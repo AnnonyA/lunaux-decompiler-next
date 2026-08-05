@@ -20,6 +20,7 @@ environment.LUNAUX_OPTIONS = environment.LUNAUX_OPTIONS or {
     ShowFunctionId = false,
     PreserveForStep = false,
     UseIfExpression = true,
+    MaxOutputCharacters = 4000000,
 }
 
 local function apiRequest(bytecode, branch, scriptName, options)

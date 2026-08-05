@@ -16,6 +16,9 @@ from lunaux.backends.lifter import decompile_module, disassemble_module
 from lunaux.backends.opcodes import disassemble_words, unpack_words
 
 _PRINTABLE: Final[re.Pattern[bytes]] = re.compile(rb"[\x20-\x7e]{4,}")
+_COMPATIBILITY_NOTICE: Final[str] = (
+    "-- Higher-fidelity reconstruction may require a compatible native or external backend.\n"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,16 +145,23 @@ class ReconstructedBackend:
     ) -> str:
         module, parse_error = _try_parse(bytecode)
         if module is not None:
-            return decompile_module(module, options, filename)
+            return _COMPATIBILITY_NOTICE + decompile_module(module, options, filename)
         if parse_error is None and len(bytecode) % 4 == 0:
             source = decompile_module(_raw_proto(bytecode), options, filename)
             listing = "\n".join(
                 f"-- {line}" for line in disassemble_words(bytecode).splitlines()
             )
-            return source + "\n-- Raw instruction stream\n" + listing + "\n"
+            return (
+                _COMPATIBILITY_NOTICE
+                + source
+                + "\n-- Raw instruction stream\n"
+                + listing
+                + "\n"
+            )
         summary = inspect_bytecode(bytecode)
         label = filename or "<bytecode>"
         lines = [
+            _COMPATIBILITY_NOTICE.rstrip(),
             f"-- LunaUX Next could not parse {label} as serialized Luau bytecode.",
         ]
         if parse_error is not None:

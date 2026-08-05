@@ -31,6 +31,7 @@ class BytecodeSummary:
     serialized_container: bool
     prototype_count: int
     strings: tuple[str, ...]
+    opcode_encoding: str | None = None
     parse_error: str | None = None
 
     def as_dict(self) -> dict[str, object]:
@@ -42,6 +43,7 @@ class BytecodeSummary:
             "serialized_container": self.serialized_container,
             "prototype_count": self.prototype_count,
             "strings": list(self.strings),
+            "opcode_encoding": self.opcode_encoding,
             "parse_error": self.parse_error,
         }
 
@@ -91,6 +93,7 @@ def inspect_bytecode(bytecode: bytes, *, string_limit: int = 32) -> BytecodeSumm
         serialized_container=module is not None,
         prototype_count=len(module.protos) if module else 0,
         strings=tuple(strings),
+        opcode_encoding=module.opcode_encoding if module else None,
         parse_error=str(parse_error) if parse_error else None,
     )
 
@@ -136,7 +139,7 @@ class ReconstructedBackend:
 
     @property
     def version(self) -> str:
-        return "0.9.0"
+        return "0.9.1"
 
     def decompile(
         self,

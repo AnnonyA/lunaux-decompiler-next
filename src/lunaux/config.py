@@ -25,7 +25,7 @@ class Settings:
     cors_origins: tuple[str, ...] = ()
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         origins = tuple(
             origin.strip()
             for origin in os.getenv("LUNAUX_CORS_ORIGINS", "").split(",")

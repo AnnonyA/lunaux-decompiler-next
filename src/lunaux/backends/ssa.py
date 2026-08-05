@@ -117,16 +117,18 @@ class _SSABuilder:
         self.phis_by_block: dict[int, list[_PhiBuilder]] = defaultdict(list)
         for phi in self.phis.values():
             self.phis_by_block[phi.block].append(phi)
-        for values in self.phis_by_block.values():
-            values.sort(key=lambda item: item.register)
+        for phi_builders in self.phis_by_block.values():
+            phi_builders.sort(key=lambda item: item.register)
 
         self.children: dict[int, list[int]] = defaultdict(list)
         for block, parent in analysis.immediate_dominators.items():
             if parent is not None:
                 self.children[parent].append(block)
         order = {block: index for index, block in enumerate(reverse_postorder(analysis))}
-        for values in self.children.values():
-            values.sort(key=lambda block: order.get(block, len(order)))
+        for child_blocks in self.children.values():
+            child_blocks.sort(
+                key=lambda block: order.get(block, len(order))
+            )
 
     def _entry_value(self, register: int) -> SSAValue:
         value = self.entry_values.get(register)

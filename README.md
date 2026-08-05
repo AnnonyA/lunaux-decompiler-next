@@ -1,36 +1,31 @@
 # LunaUX Decompiler Next
 
-A local Roblox Luau bytecode decompiler and disassembler with multiple independent engines, a request-compatible HTTP API, a command-line application, and a Windows graphical launcher.
+A local Roblox Luau bytecode decompiler and disassembler with a native backend, the optional Unluau CLI, a portable Python engine, an HTTP API, a CLI, and a Windows launcher.
 
-> **Version 0.5:** adds optional [Unluau](https://github.com/atrexus/unluau) support and per-request fallback between the native LunaUX extension, Unluau, and the open Python engine.
+> **Version 0.6:** synchronizes the open engine with the current official Luau bytecode specification: standard bytecode versions 3–13, experimental class bytecode version 100, the complete 90-opcode table, structured type metadata, double-precision vectors, classes, userdata field opcodes, feedback slots, and stricter validation.
 
-## What changed
+## Engine chain
 
-LunaUX Next no longer depends on a single decompiler implementation. In the recommended `auto` mode it builds this chain:
+The recommended `auto` mode tries each engine for every script:
 
 ```text
 compatible luna.pyd / luna.so
     -> Unluau CLI
-    -> LunaUX pure-Python engine
+    -> LunaUX Python engine
 ```
 
-The fallback is performed for every submitted script. If one engine is unavailable, crashes, times out, or produces empty output, LunaUX tries the next engine.
+A crash, timeout, unsupported file, or empty result from one engine moves the request to the next engine.
 
-This improves recovery across different Roblox/Luau compiler generations without pretending that one decompiler is perfect.
+## Highlights
 
-## Features
-
-- Parses serialized Luau bytecode versions 3 through 12.
-- Supports the original native `luna.pyd` and `.so` extension.
-- Supports the Apache-2.0 Unluau CLI as a separate optional process.
-- Reconstructs common locals, globals, imports, calls, methods, tables, closures, conditions, and loops in Python.
-- Resolves constants, properties, line numbers, prototypes, and jump targets in disassembly.
-- Falls through to another engine when an individual file fails.
-- Supports raw files and Base64 input.
-- Provides classic plain-text API routes and structured `/v1` routes.
-- Applies bytecode size, output size, filename, timeout, and reference validation.
+- Parses official serialized Luau bytecode v3 through v13.
+- Parses the current experimental class format v100.
+- Tracks all 90 opcodes currently defined in `Luau/Bytecode.h`, including `NEWCLASS`.
+- Validates AUX words, opcode/version compatibility, jump targets, constants, closures, captures, prototypes, feedback slots, and metadata ranges.
+- Recovers strings, imports, constants, child functions, line information, debug locals, upvalue names, typed locals, typed upvalues, userdata names, proto flags, sizes, costs, and feedback data.
+- Reconstructs common expressions, table access, calls, methods, returns, closures, numeric/generic loops, simple `while`/`repeat` regions, and common `if`/`else` layouts.
+- Resolves modern userdata, class, fastcall, feedback, and proto operands in disassembly.
 - Never executes submitted Luau bytecode.
-- Never silently downloads native or external decompiler binaries.
 
 ## Windows quick start
 
@@ -38,7 +33,8 @@ Requirements:
 
 - Windows 10 or 11;
 - Python 3.11 or newer;
-- Python 3.13 x64 only when using the recovered Windows `luna.pyd`.
+- Python 3.13 x64 only for the recovered Windows `luna.pyd`;
+- Git and .NET SDK only when building Unluau from source.
 
 Clone or download the repository and double-click:
 
@@ -49,144 +45,64 @@ run.bat
 In the launcher:
 
 1. Select **Install / Update**.
-2. Keep the backend mode on **auto**.
-3. Optionally configure `luna.pyd` or Unluau.
+2. Keep **Backend mode** on `auto`.
+3. Optionally configure `luna.pyd` or an Unluau executable.
 4. Select **Start server**.
-5. Open **API docs** or copy the local API URL.
+5. Open **API docs**.
 
-The default address is:
+Default API address:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-## Add Unluau
+## Install the pinned Unluau source
 
-Unluau is optional and is not bundled in this repository.
+LunaUX includes a reproducible installer for the reviewed upstream Unluau revision. It explicitly fetches the Apache-2.0 source, checks out the pinned commit, builds the CLI, copies its license, and writes a build manifest.
 
-Place an authorized upstream build in one of these locations:
-
-```text
-tools/unluau/unluau.exe
-tools/unluau/Unluau.CLI.exe
-tools/unluau/Unluau.CLI.dll
-```
-
-LunaUX detects it automatically. You can also set an explicit path:
+Windows x64:
 
 ```bat
-set LUNAUX_UNLUAU_PATH=C:\Tools\Unluau.CLI.exe
+py -3 scripts\install_unluau.py --runtime win-x64
 ```
 
-For a framework-dependent DLL:
+Fetch only the pinned source:
 
 ```bat
-set LUNAUX_UNLUAU_PATH=C:\Tools\Unluau.CLI.dll
+py -3 scripts\install_unluau.py --source-only
 ```
 
-DLL builds require `dotnet` in PATH. Self-contained `.exe` builds do not.
+The source is stored in `third_party/unluau` and the build in `tools/unluau`. Both generated directories are ignored by Git. LunaUX then detects the CLI automatically.
 
-Run diagnostics:
-
-```bat
-.venv\Scripts\python.exe -m lunaux doctor
-```
-
-Detailed instructions are in [`docs/UNLUAU.md`](docs/UNLUAU.md).
+You may instead select an existing `Unluau.CLI.exe`, `Unluau.CLI.dll`, or compatible executable in the graphical launcher. See [`docs/UNLUAU.md`](docs/UNLUAU.md).
 
 ## Backend modes
 
 | Mode | Behavior |
 | --- | --- |
 | `auto` | Native, then Unluau, then Python. Recommended. |
-| `native` | Require the `luna` Python extension. |
-| `unluau` | Require the external Unluau CLI. |
-| `reconstructed` | Use only the LunaUX Python engine. |
+| `native` | Require the `luna` extension. |
+| `unluau` | Require Unluau. |
+| `reconstructed` | Use only the Python parser/lifter. |
 
-Set a mode temporarily on Windows:
-
-```bat
-set LUNAUX_BACKEND_MODE=unluau
-lunaux doctor
-```
-
-Linux/macOS:
-
-```bash
-export LUNAUX_BACKEND_MODE=auto
-export LUNAUX_UNLUAU_PATH=$HOME/tools/unluau/Unluau.CLI
-lunaux doctor
-```
-
-## Why Unluau is isolated
-
-LunaUX does not import or execute Unluau inside the API process. For each request it:
-
-1. creates a private temporary directory;
-2. writes the submitted bytecode there;
-3. invokes the CLI without a shell;
-4. captures output and errors;
-5. enforces a timeout;
-6. removes the temporary directory.
-
-The adapter enables Unluau's table inlining, variable-name guessing, and upvalue renaming options to improve readability.
-
-## Pure-Python engine
-
-The built-in engine remains available on every supported platform and does not require external binaries. It contains:
-
-1. a validated Luau container parser;
-2. an instruction and AUX-word decoder;
-3. a register-aware source lifter;
-4. enriched disassembly and debug metadata recovery.
-
-See [`docs/PYTHON_ENGINE.md`](docs/PYTHON_ENGINE.md) for supported constants, opcodes, metadata, and limitations.
-
-## Native LunaUX engine
-
-Windows CPython 3.13 x64 example:
+Diagnostics:
 
 ```bat
-set LUNAUX_BACKEND_MODE=auto
-set LUNAUX_BACKEND_MODULE=luna
-set LUNAUX_NATIVE_PATH=C:\path\to\luna.pyd
-lunaux doctor
+.venv\Scripts\python.exe -m lunaux doctor
 ```
 
-Linux CPython 3.12 x86-64 example:
-
-```bash
-export LUNAUX_BACKEND_MODE=auto
-export LUNAUX_BACKEND_MODULE=luna
-export LUNAUX_NATIVE_PATH=$HOME/path/to/luna-linux.so
-lunaux doctor
-```
-
-The module name must match its exported Python initializer. A binary exporting `PyInit_luna` must use the module name `luna`.
-
-## API client
-
-Start the server:
+## File CLI
 
 ```bat
-run.bat
+lunaux decompile input.luac -o recovered.luau
+lunaux disassemble input.luac -o instructions.txt
 ```
 
-or manually:
+Input can be raw bytecode or Base64 according to `--input-format`.
 
-```bash
-lunaux run
-```
+## API
 
-Use [`examples/api_script.luau`](examples/api_script.luau) in an authorized environment that provides:
-
-```text
-request
-getscriptbytecode
-base64encode or crypt.base64.encode
-```
-
-Classic routes return plain text:
+Classic plain-text routes:
 
 ```text
 GET  /health
@@ -196,7 +112,7 @@ POST /decomp
 POST /disasm
 ```
 
-Structured routes return JSON with backend metadata:
+Structured routes with backend metadata:
 
 ```text
 GET  /v1/health
@@ -210,97 +126,39 @@ Interactive documentation:
 http://127.0.0.1:8000/docs
 ```
 
-## Decompilation options
-
-The API accepts PascalCase and snake_case names.
-
-| Option | Default | Purpose |
-| --- | --- | --- |
-| `Semicolons` | `false` | Add semicolons when supported. |
-| `StringInterpolation` | `true` | Prefer Luau interpolation. |
-| `UpvalueComment` | `true` | Show known upvalues/captures. |
-| `ShowLineDefined` | `true` | Show prototype definition lines. |
-| `ShowFunctionId` | `false` | Show prototype IDs. |
-| `PreserveForStep` | `false` | Preserve numeric loop steps. |
-| `UseIfExpression` | `true` | Prefer conditional expressions. |
-| `MaxOutputCharacters` | `4000000` | Reject unexpectedly large output. |
-
-Each engine supports a different subset. Unsupported formatting preferences do not change the bytecode analysis itself.
-
-## CLI
-
-```text
-lunaux run
-lunaux serve
-lunaux decomp input.luac output-folder
-lunaux disasm input.luac output-folder
-lunaux doctor
-lunaux -v
-lunaux -ih
-```
-
-Exact output paths are supported with `-o`:
-
-```bat
-lunaux decompile input.luac -o recovered.luau
-lunaux disassemble input.luac -o instructions.txt
-```
-
-## Manual installation
-
-Windows:
-
-```bat
-py -3.13 -m venv .venv
-.venv\Scripts\activate
-python -m pip install --upgrade pip
-pip install -e .
-lunaux run
-```
-
-Linux/macOS:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -e .
-lunaux run
-```
-
-Development:
-
-```bash
-pip install -e ".[dev]"
-ruff check .
-mypy
-pytest
-```
+Use [`examples/api_script.luau`](examples/api_script.luau) only in an authorized environment that supplies `request`, `getscriptbytecode`, and Base64 encoding.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `LUNAUX_BACKEND_MODE` | `auto` | `auto`, `native`, `unluau`, or `reconstructed`. |
-| `LUNAUX_BACKEND_MODULE` | `luna` | Native Python extension name. |
-| `LUNAUX_NATIVE_PATH` | empty | Path to `.pyd` or `.so`. |
-| `LUNAUX_UNLUAU_PATH` | auto-detect | Path to Unluau executable or `.dll`. |
-| `LUNAUX_EXTERNAL_TIMEOUT_SECONDS` | `45` | External engine timeout per operation. |
-| `LUNAUX_MAX_BYTECODE_BYTES` | `16777216` | Maximum accepted bytecode size. |
-| `LUNAUX_CORS_ORIGINS` | empty | Comma-separated browser origins. |
+| `LUNAUX_BACKEND_MODULE` | `luna` | Native extension import name. |
+| `LUNAUX_NATIVE_PATH` | empty | Direct `.pyd` or `.so` path. |
+| `LUNAUX_UNLUAU_PATH` | auto-detect | Unluau executable or `.dll`. |
+| `LUNAUX_EXTERNAL_TIMEOUT_SECONDS` | `45` | External operation timeout. |
+| `LUNAUX_MAX_BYTECODE_BYTES` | `16777216` | Maximum accepted input size. |
+| `LUNAUX_CORS_ORIGINS` | empty | Allowed browser origins. |
 
-## Limitations
+## Development
 
-Decompilation cannot recover information that bytecode does not contain. Comments, exact formatting, and many original temporary names are permanently lost.
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
+ruff check .
+mypy
+pytest
+```
 
-Unluau is an alpha project and can fail on newer or heavily optimized bytecode. The Python lifter is intentionally conservative and may emit labels or explanatory comments for ambiguous control flow. The native extension may also be tied to a specific Python ABI and operating system.
+The repository also checks its opcode, constant, builtin, and bytecode-version metadata against the current upstream `Luau/Bytecode.h` on a schedule. See [`scripts/check_luau_bytecode_spec.py`](scripts/check_luau_bytecode_spec.py).
 
-The multi-engine chain improves coverage, but it does not guarantee the original source code.
+## Accuracy and limitations
 
-Only inspect bytecode you own or are authorized to analyze.
+This update improves bytecode compatibility and semantic reconstruction, but bytecode does not preserve comments, exact formatting, every local name, or every original high-level control-flow choice. Optimized or irreducible patterns may still be represented conservatively with labels or comments. No decompiler can guarantee byte-for-byte recovery of the original source.
+
+Only inspect scripts you own or are authorized to analyze.
 
 ## Third-party attribution
 
-- Luau is distributed under the MIT License.
-- Unluau is a separate Apache-2.0 project and is not redistributed by LunaUX Next.
-- LunaUX Next is distributed under the repository's Apache-2.0 license.
+See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Luau is MIT-licensed. Unluau is an Apache-2.0 project and remains separately attributed.

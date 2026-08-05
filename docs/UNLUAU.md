@@ -1,120 +1,90 @@
 # Unluau integration
 
-LunaUX Next 0.5 can use [atrexus/unluau](https://github.com/atrexus/unluau) as an optional external decompilation engine.
+LunaUX Next can use [`atrexus/unluau`](https://github.com/atrexus/unluau) as an optional external engine. Unluau is Apache-2.0 licensed and remains a separate program.
 
-Unluau is not copied into this repository and no binary is downloaded automatically. The upstream project is licensed under Apache-2.0 and remains a separate program. LunaUX communicates with its command-line interface through a restricted subprocess call.
+## Reproducible source installation
 
-## Why use it
-
-The pure-Python LunaUX engine is portable and conservative. Unluau has a larger source lifter for several older/common Roblox Luau compiler patterns, including table reconstruction and variable-name guessing. Neither engine is perfect, so `auto` mode uses a chain:
+The repository includes `scripts/install_unluau.py`. It pins the reviewed upstream revision:
 
 ```text
-compatible luna native extension
-    -> Unluau CLI
-    -> LunaUX pure-Python engine
+f89e03a560f535eb19f11e89a6aadec636d2a8f5
 ```
 
-Fallback happens for each request. If Unluau is installed but fails or returns empty output for one script, LunaUX tries the Python engine instead of failing the whole request.
+The command is explicit; LunaUX never downloads or updates an external engine during API startup or decompilation.
 
-## Windows setup
-
-1. Obtain or build an authorized Unluau CLI release from the upstream repository.
-2. Put the executable in one of these locations:
-
-```text
-tools/unluau/unluau.exe
-tools/unluau/Unluau.CLI.exe
-unluau/Unluau.CLI.exe
-```
-
-Alternatively, set an explicit path:
+Windows x64 build:
 
 ```bat
-set LUNAUX_UNLUAU_PATH=C:\Tools\Unluau.CLI.exe
+py -3 scripts\install_unluau.py --runtime win-x64
 ```
 
-Then use the normal launcher:
-
-```text
-run.bat
-```
-
-Keep `Backend mode` set to `auto`. Run diagnostics from the GUI or command line:
+Fetch the source without building:
 
 ```bat
-.venv\Scripts\python.exe -m lunaux doctor
+py -3 scripts\install_unluau.py --source-only
 ```
 
-## Framework-dependent DLL
-
-A `.NET` build can also be configured:
+Refresh the pinned checkout and rebuild:
 
 ```bat
-set LUNAUX_UNLUAU_PATH=C:\Tools\Unluau.CLI.dll
+py -3 scripts\install_unluau.py --refresh --runtime win-x64
 ```
 
-LunaUX will invoke it as:
+Requirements for a source build:
+
+- Git;
+- .NET SDK;
+- a compatible runtime identifier such as `win-x64`.
+
+Generated locations:
 
 ```text
-dotnet C:\Tools\Unluau.CLI.dll
+third_party/unluau/   pinned source checkout
+tools/unluau/         published CLI, license, and build manifest
 ```
 
-The `dotnet` command must be available in PATH for DLL builds. Self-contained `.exe` releases do not need a separate .NET runtime.
+These generated files are ignored by Git. The committed installer, pin, documentation, adapter, tests, and notices make the integration reproducible without silently redistributing an opaque binary.
 
-## Linux setup
+## Existing binary
 
-Place an executable named `unluau`, `Unluau.CLI`, or a compatible DLL in PATH or under `tools/unluau`, then optionally configure:
+You can instead place or select an authorized upstream build named:
 
-```bash
-export LUNAUX_UNLUAU_PATH=$HOME/tools/unluau/Unluau.CLI
-export LUNAUX_BACKEND_MODE=auto
+```text
+unluau.exe
+unluau
+Unluau.CLI.exe
+Unluau.CLI
+Unluau.CLI.dll
 ```
 
-## Modes
+Automatic search includes `tools/unluau`, `unluau`, PATH, and the path configured by `LUNAUX_UNLUAU_PATH`.
 
-| Mode | Behavior |
-| --- | --- |
-| `auto` | Native, then Unluau, then Python. Recommended. |
-| `native` | Require the `luna` Python extension. |
-| `unluau` | Require Unluau and report its errors directly. |
-| `reconstructed` | Use only the LunaUX Python engine. |
+For a framework-dependent DLL, `dotnet` must be in PATH. A self-contained executable does not require a separately installed runtime.
 
-## Configuration
+## Engine policy
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `LUNAUX_UNLUAU_PATH` | auto-detect | Executable or `.dll` path. |
-| `LUNAUX_EXTERNAL_TIMEOUT_SECONDS` | `45` | Maximum time allowed for one external operation. |
-| `LUNAUX_BACKEND_MODE` | `auto` | Select the engine policy. |
+Recommended mode:
 
-## Process isolation
+```text
+native LunaUX -> Unluau -> Python reconstruction
+```
 
-For every request LunaUX:
+Fallback happens for every request. An Unluau timeout, process failure, missing output, or unsupported script does not prevent the Python engine from attempting recovery in `auto` mode.
+
+## Isolation
+
+For each operation the adapter:
 
 1. creates a private temporary directory;
-2. writes only the submitted bytecode there;
-3. invokes Unluau without a shell;
-4. captures standard output and standard error;
-5. applies a timeout;
-6. reads the generated source;
+2. writes the submitted bytecode there;
+3. invokes Unluau with an argument list and no shell;
+4. directs generated source and logs to separate files;
+5. captures stdout/stderr;
+6. enforces `LUNAUX_EXTERNAL_TIMEOUT_SECONDS`;
 7. removes the temporary directory.
 
-Submitted bytecode is never executed by LunaUX or loaded into the Luau VM.
-
-## Output options
-
-LunaUX enables the following Unluau options for more readable output:
-
-```text
---inline-tables
---smart-variable-names
---rename-upvalues
-```
-
-`StringInterpolation=false` is also forwarded when requested through the LunaUX API. Options that Unluau does not support remain handled by the other engines or are ignored by that engine.
+LunaUX requests Unluau's table inlining, variable-name guessing, and upvalue renaming options for readable output.
 
 ## Limitations
 
-Unluau is an alpha project and may fail on newer or heavily optimized bytecode. Its upstream README states that complex scripts can expose bugs. LunaUX therefore treats it as one engine in a chain rather than as an infallible replacement.
-
-Use decompilation only for scripts you own or are authorized to inspect.
+Unluau is alpha software and its upstream history documents incomplete coverage on complex or newer bytecode. It is therefore one engine in a fallback chain, not a promise of exact original-source recovery.

@@ -9,6 +9,7 @@ from lunaux.backends.bytecode import (
     BytecodeFormatError,
     LuauBytecodeModule,
     LuauProto,
+    is_supported_bytecode_version,
     parse_bytecode,
 )
 from lunaux.backends.lifter import decompile_module, disassemble_module
@@ -26,6 +27,7 @@ class BytecodeSummary:
     serialized_container: bool
     prototype_count: int
     strings: tuple[str, ...]
+    parse_error: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -36,20 +38,31 @@ class BytecodeSummary:
             "serialized_container": self.serialized_container,
             "prototype_count": self.prototype_count,
             "strings": list(self.strings),
+            "parse_error": self.parse_error,
         }
 
 
-def _try_parse(bytecode: bytes) -> LuauBytecodeModule | None:
-    if not bytecode or bytecode[0] not in range(3, 13):
-        return None
+def _looks_like_container(bytecode: bytes) -> bool:
+    if not bytecode or not is_supported_bytecode_version(bytecode[0]):
+        return False
+    if bytecode[0] >= 4:
+        return len(bytecode) >= 2 and bytecode[1] in (1, 2, 3)
+    return True
+
+
+def _try_parse(
+    bytecode: bytes,
+) -> tuple[LuauBytecodeModule | None, BytecodeFormatError | None]:
+    if not _looks_like_container(bytecode):
+        return None, None
     try:
-        return parse_bytecode(bytecode)
-    except BytecodeFormatError:
-        return None
+        return parse_bytecode(bytecode), None
+    except BytecodeFormatError as exc:
+        return None, exc
 
 
 def inspect_bytecode(bytecode: bytes, *, string_limit: int = 32) -> BytecodeSummary:
-    module = _try_parse(bytecode)
+    module, parse_error = _try_parse(bytecode)
     strings: list[str] = []
     if module is not None:
         strings.extend(module.strings[:string_limit])
@@ -74,6 +87,7 @@ def inspect_bytecode(bytecode: bytes, *, string_limit: int = 32) -> BytecodeSumm
         serialized_container=module is not None,
         prototype_count=len(module.protos) if module else 0,
         strings=tuple(strings),
+        parse_error=str(parse_error) if parse_error else None,
     )
 
 
@@ -118,7 +132,7 @@ class ReconstructedBackend:
 
     @property
     def version(self) -> str:
-        return "0.5.0"
+        return "0.6.0"
 
     def decompile(
         self,
@@ -126,10 +140,10 @@ class ReconstructedBackend:
         options: dict[str, bool],
         filename: str | None,
     ) -> str:
-        module = _try_parse(bytecode)
+        module, parse_error = _try_parse(bytecode)
         if module is not None:
             return decompile_module(module, options, filename)
-        if len(bytecode) % 4 == 0:
+        if parse_error is None and len(bytecode) % 4 == 0:
             source = decompile_module(_raw_proto(bytecode), options, filename)
             listing = "\n".join(
                 f"-- {line}" for line in disassemble_words(bytecode).splitlines()
@@ -137,20 +151,28 @@ class ReconstructedBackend:
             return source + "\n-- Raw instruction stream\n" + listing + "\n"
         summary = inspect_bytecode(bytecode)
         label = filename or "<bytecode>"
-        return "\n".join(
+        lines = [
+            f"-- LunaUX Next could not parse {label} as serialized Luau bytecode.",
+        ]
+        if parse_error is not None:
+            lines.append(f"-- Parse error: {parse_error}")
+        else:
+            lines.append(
+                "-- The input is also not a complete 32-bit instruction stream."
+            )
+        lines.extend(
             [
-                f"-- LunaUX Next could not parse {label} as serialized Luau bytecode.",
-                "-- The input is also not a complete 32-bit instruction stream.",
                 f"-- metadata: {json.dumps(summary.as_dict(), ensure_ascii=False)}",
                 "",
             ]
         )
+        return "\n".join(lines)
 
     def disassemble(self, bytecode: bytes, filename: str | None) -> str:
-        module = _try_parse(bytecode)
+        module, parse_error = _try_parse(bytecode)
         if module is not None:
             return disassemble_module(module, filename)
-        if len(bytecode) % 4 == 0:
+        if parse_error is None and len(bytecode) % 4 == 0:
             return disassemble_words(bytecode)
         summary = inspect_bytecode(bytecode)
         payload = {

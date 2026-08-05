@@ -6,7 +6,7 @@ from typing import TypeAlias
 
 from lunaux.backends.opcodes import DecodedInstruction, decode_words
 
-ConstantScalar: TypeAlias = None | bool | int | float | str
+ConstantScalar: TypeAlias = bool | int | float | str | None
 ConstantValue: TypeAlias = (
     ConstantScalar
     | tuple[float, float, float, float]

@@ -19,6 +19,10 @@ class DecompileOptions(BaseModel):
     show_function_id: bool = Field(default=False, alias="ShowFunctionId")
     preserve_for_step: bool = Field(default=False, alias="PreserveForStep")
     use_if_expression: bool = Field(default=True, alias="UseIfExpression")
+    inline_single_use_temporaries: bool = Field(
+        default=True,
+        alias="InlineSingleUseTemporaries",
+    )
     max_output_characters: int = Field(
         default=4_000_000,
         alias="MaxOutputCharacters",
@@ -35,4 +39,5 @@ class DecompileOptions(BaseModel):
             "ShowFunctionId": self.show_function_id,
             "PreserveForStep": self.preserve_for_step,
             "UseIfExpression": self.use_if_expression,
+            "InlineSingleUseTemporaries": self.inline_single_use_temporaries,
         }

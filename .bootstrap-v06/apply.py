@@ -24,9 +24,11 @@ def main() -> int:
                 raise RuntimeError(f"unsafe payload path: {item.filename}")
         archive.extractall(ROOT)
 
+    # GitHub Actions tokens cannot create or modify workflow files. The
+    # connector adds the permanent workflow after this source commit lands.
+    generated_workflow = ROOT / ".github" / "workflows" / "luau-spec-check.yml"
+    generated_workflow.unlink(missing_ok=True)
     shutil.rmtree(BOOTSTRAP)
-    workflow = ROOT / ".github" / "workflows" / "apply-v06.yml"
-    workflow.unlink(missing_ok=True)
     return 0
 
 

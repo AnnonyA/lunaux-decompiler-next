@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# This script is intentionally idempotent and only runs on the feature branch.
 ROOT = Path(__file__).resolve().parents[1]
 path = ROOT / "src/lunaux/backends/bytecode.py"
 text = path.read_text(encoding="utf-8")

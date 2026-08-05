@@ -1,0 +1,39 @@
+name: Apply SSA expression inlining v0.8
+
+on:
+  push:
+    branches:
+      - feature/ssa-expression-v08
+    paths:
+      - "scripts/apply_ssa_inlining_v08.py"
+      - ".github/workflows/apply-ssa-inlining-v08.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/ssa-expression-v08
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Integrate SSA inlining
+        run: |
+          if [ -f scripts/apply_ssa_inlining_v08.py ]; then
+            python scripts/apply_ssa_inlining_v08.py
+          fi
+      - name: Commit generated source
+        run: |
+          if git diff --quiet; then
+            echo "No generated changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Integrate SSA-driven temporary inlining"
+          git push origin HEAD:feature/ssa-expression-v08

@@ -73,6 +73,7 @@ def candidate_opcode_multipliers() -> tuple[int, ...]:
     """Return deterministic candidates, preferring Roblox's common multiplier."""
 
     preferred = 227
-    return (preferred,) + tuple(
-        value for value in range(3, 256, 2) if value != preferred
+    return (
+        preferred,
+        *(value for value in range(3, 256, 2) if value != preferred),
     )

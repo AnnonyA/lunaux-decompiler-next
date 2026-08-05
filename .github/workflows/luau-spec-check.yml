@@ -1,0 +1,35 @@
+name: Luau bytecode specification
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * 1"
+  pull_request:
+    paths:
+      - "src/lunaux/backends/bytecode.py"
+      - "src/lunaux/backends/opcodes.py"
+      - "scripts/check_luau_bytecode_spec.py"
+      - ".github/workflows/luau-spec-check.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  compare-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: luau-lang/luau
+          path: .upstream-luau
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e .
+      - name: Compare Bytecode.h metadata
+        run: >-
+          python scripts/check_luau_bytecode_spec.py
+          .upstream-luau/Common/include/Luau/Bytecode.h

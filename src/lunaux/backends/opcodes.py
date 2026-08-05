@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import struct
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 _OPCODE_NAMES = (
     "NOP", "BREAK", "LOADNIL", "LOADB", "LOADN", "LOADK", "MOVE",

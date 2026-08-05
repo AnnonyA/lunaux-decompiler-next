@@ -858,6 +858,7 @@ class _FunctionLifter:
     def _lift_instruction(self, instruction: DecodedInstruction) -> None:
         name = instruction.name
         pc = instruction.pc
+        expression: Expr | str
         if name in {"NOP", "BREAK", "COVERAGE", "NATIVECALL", "PREPVARARGS"}:
             return
         if name == "LOADNIL":

@@ -1,0 +1,39 @@
+name: Apply compiler analysis v0.7 integration
+
+on:
+  push:
+    branches:
+      - feature/compiler-analysis-v07
+    paths:
+      - "scripts/apply_compiler_analysis_v07.py"
+      - ".github/workflows/apply-compiler-analysis-v07.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/compiler-analysis-v07
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply source integration
+        run: |
+          if [ -f scripts/apply_compiler_analysis_v07.py ]; then
+            python scripts/apply_compiler_analysis_v07.py
+          fi
+      - name: Commit generated source
+        run: |
+          if git diff --quiet; then
+            echo "No generated changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Integrate CFG analysis into the lifter"
+          git push origin HEAD:feature/compiler-analysis-v07

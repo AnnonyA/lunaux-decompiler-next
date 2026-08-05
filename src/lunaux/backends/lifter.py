@@ -8,11 +8,6 @@ from dataclasses import dataclass
 from typing import cast
 
 from lunaux.backends.analysis import analyze_control_flow
-from lunaux.backends.inlining import (
-    parenthesize_inlined_expression,
-    plan_expression_inlining,
-)
-from lunaux.backends.ssa import SSAValue, build_ssa
 from lunaux.backends.bytecode import (
     ClassShapeConstant,
     LuauBytecodeModule,
@@ -20,12 +15,17 @@ from lunaux.backends.bytecode import (
     LuauProto,
     format_type_tag,
 )
+from lunaux.backends.inlining import (
+    parenthesize_inlined_expression,
+    plan_expression_inlining,
+)
 from lunaux.backends.opcodes import (
     DecodedInstruction,
     builtin_name,
     decode_words,
     get_jump_target,
 )
+from lunaux.backends.ssa import SSAValue, build_ssa
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RESERVED = {

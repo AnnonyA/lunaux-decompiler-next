@@ -1,6 +1,6 @@
 # LunaUX Decompiler Next
 
-A local Roblox Luau bytecode decompiler and disassembler with a native backend, the optional Unluau CLI, a portable Python engine, an HTTP API, a CLI, and a Windows launcher.
+A local Roblox Luau bytecode decompiler and disassembler with a native backend, the optional Unluau CLI, a portable Python engine, an HTTP API, a CLI, and Windows/Linux launchers.
 
 > **Version 0.6:** synchronizes the open engine with the current official Luau bytecode specification: standard bytecode versions 3–13, experimental class bytecode version 100, the complete 90-opcode table, structured type metadata, double-precision vectors, classes, userdata field opcodes, feedback slots, and stricter validation.
 
@@ -27,7 +27,9 @@ A crash, timeout, unsupported file, or empty result from one engine moves the re
 - Resolves modern userdata, class, fastcall, feedback, and proto operands in disassembly.
 - Never executes submitted Luau bytecode.
 
-## Windows quick start
+## Quick start
+
+### Windows
 
 Requirements:
 
@@ -36,9 +38,9 @@ Requirements:
 - Python 3.13 x64 only for the recovered Windows `luna.pyd`;
 - Git and .NET SDK only when building Unluau from source.
 
-Clone or download the repository and double-click:
-
-```text
+```bat
+git clone https://github.com/AnnonyA/lunaux-decompiler-next.git
+cd lunaux-decompiler-next
 run.bat
 ```
 
@@ -50,10 +52,39 @@ In the launcher:
 4. Select **Start server**.
 5. Open **API docs**.
 
+### Linux
+
+Requirements:
+
+- Python 3.11 or newer;
+- `python3-venv` on distributions that package `venv` separately;
+- Git and .NET SDK only when building Unluau from source.
+
+```bash
+git clone https://github.com/AnnonyA/lunaux-decompiler-next.git
+cd lunaux-decompiler-next
+chmod +x run.sh
+./run.sh
+```
+
+`run.sh` creates `.venv`, installs or updates LunaUX Next, and starts the local API. Press `Ctrl+C` to stop it.
+
 Default API address:
 
 ```text
 http://127.0.0.1:8000
+```
+
+Interactive documentation:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+You can override the Linux bind address with environment variables:
+
+```bash
+LUNAUX_HOST=127.0.0.1 LUNAUX_PORT=8000 ./run.sh
 ```
 
 ## Install the pinned Unluau source
@@ -66,15 +97,21 @@ Windows x64:
 py -3 scripts\install_unluau.py --runtime win-x64
 ```
 
+Linux x64:
+
+```bash
+python3 scripts/install_unluau.py --runtime linux-x64
+```
+
 Fetch only the pinned source:
 
-```bat
-py -3 scripts\install_unluau.py --source-only
+```bash
+python3 scripts/install_unluau.py --source-only
 ```
 
 The source is stored in `third_party/unluau` and the build in `tools/unluau`. Both generated directories are ignored by Git. LunaUX then detects the CLI automatically.
 
-You may instead select an existing `Unluau.CLI.exe`, `Unluau.CLI.dll`, or compatible executable in the graphical launcher. See [`docs/UNLUAU.md`](docs/UNLUAU.md).
+You may instead select or configure an existing `Unluau.CLI.exe`, `Unluau.CLI.dll`, or compatible executable. See [`docs/UNLUAU.md`](docs/UNLUAU.md).
 
 ## Backend modes
 
@@ -85,22 +122,37 @@ You may instead select an existing `Unluau.CLI.exe`, `Unluau.CLI.dll`, or compat
 | `unluau` | Require Unluau. |
 | `reconstructed` | Use only the Python parser/lifter. |
 
-Diagnostics:
+Diagnostics on Windows:
 
 ```bat
 .venv\Scripts\python.exe -m lunaux doctor
 ```
 
+Diagnostics on Linux:
+
+```bash
+.venv/bin/python -m lunaux doctor
+```
+
 ## File CLI
 
+Windows:
+
 ```bat
-lunaux decompile input.luac -o recovered.luau
-lunaux disassemble input.luac -o instructions.txt
+.venv\Scripts\lunaux.exe decompile input.luac -o recovered.luau
+.venv\Scripts\lunaux.exe disassemble input.luac -o instructions.txt
+```
+
+Linux:
+
+```bash
+.venv/bin/lunaux decompile input.luac -o recovered.luau
+.venv/bin/lunaux disassemble input.luac -o instructions.txt
 ```
 
 Input can be raw bytecode or Base64 according to `--input-format`.
 
-## API
+## API routes
 
 Classic plain-text routes:
 
@@ -120,13 +172,152 @@ POST /v1/decompile
 POST /v1/disassemble
 ```
 
-Interactive documentation:
+## API script
 
-```text
-http://127.0.0.1:8000/docs
+Paste [`examples/api_script.luau`](examples/api_script.luau) into an **authorized environment** that provides:
+
+- `request`;
+- `getscriptbytecode`;
+- `base64encode` or `crypt.base64.encode`.
+
+Start the LunaUX server first, then use this client:
+
+```luau
+-- LunaUX Next local API client
+-- Requires an authorized environment that provides request, getscriptbytecode,
+-- and either base64encode or crypt.base64.encode.
+
+assert(request, "http request function missing")
+assert(getscriptbytecode, "getscriptbytecode function missing")
+
+local base64_encoder = (crypt and crypt.base64 and crypt.base64.encode) or base64encode
+assert(base64_encoder, "base64encode function missing")
+
+local http = game:GetService("HttpService")
+local environment = getgenv and getgenv() or _G
+local apiBaseUrl = environment.LUNAUX_API_URL or "http://127.0.0.1:8000"
+
+environment.LUNAUX_OPTIONS = environment.LUNAUX_OPTIONS or {
+    Semicolons = false,
+    StringInterpolation = true,
+    UpvalueComment = true,
+    ShowLineDefined = true,
+    ShowFunctionId = false,
+    PreserveForStep = false,
+    UseIfExpression = true,
+    MaxOutputCharacters = 4000000,
+}
+
+local function apiRequest(bytecode, branch, scriptName, options)
+    local payload = {
+        bytecode = base64_encoder(bytecode),
+        filename = scriptName,
+    }
+
+    if options then
+        payload.options = options
+    end
+
+    local response = request({
+        Url = apiBaseUrl .. "/" .. branch,
+        Method = "POST",
+        Headers = {
+            ["Content-Type"] = "application/json",
+        },
+        Body = http:JSONEncode(payload),
+    })
+
+    if response.StatusCode ~= 200 then
+        return `--[[ Server error (HTTP {response.StatusCode}):\n\t{response.Body}\n]]`
+    end
+
+    return response.Body
+end
+
+local function isValidScript(scriptInstance: BaseScript)
+    return
+        (scriptInstance.ClassName == "Script" and scriptInstance.RunContext == Enum.RunContext.Client)
+        or scriptInstance.ClassName == "LocalScript"
+        or scriptInstance.ClassName == "ModuleScript"
+end
+
+environment.decompile = function(scriptPath: BaseScript)
+    if typeof(scriptPath) ~= "Instance" then
+        return "-- Invalid argument #1 to 'decompile' (Instance expected)"
+    end
+    if not isValidScript(scriptPath) then
+        return "-- Server scripts are IMPOSSIBLE to decompile"
+    end
+
+    local ok, bytecode = pcall(getscriptbytecode, scriptPath)
+    if not ok then
+        return `--[[ Failed to get script bytecode:\n\t{bytecode}\n]]`
+    end
+    if type(bytecode) ~= "string" then
+        return `--[[ Failed to get script bytecode, string type expected got {type(bytecode)} ]]`
+    end
+    if bytecode == "" then
+        return "-- Empty bytecode"
+    end
+
+    return apiRequest(bytecode, "decompile", scriptPath.Name, environment.LUNAUX_OPTIONS)
+end
+
+environment.disassemble = function(scriptPath: BaseScript)
+    if typeof(scriptPath) ~= "Instance" then
+        return "-- Invalid argument #1 to 'disassemble' (Instance expected)"
+    end
+    if not isValidScript(scriptPath) then
+        return "-- Server scripts are IMPOSSIBLE to disassemble"
+    end
+
+    local ok, bytecode = pcall(getscriptbytecode, scriptPath)
+    if not ok then
+        return `--[[ Failed to get script bytecode:\n\t{bytecode}\n]]`
+    end
+    if type(bytecode) ~= "string" then
+        return `--[[ Failed to get script bytecode, string type expected got {type(bytecode)} ]]`
+    end
+    if bytecode == "" then
+        return "-- Empty bytecode"
+    end
+
+    return apiRequest(bytecode, "disassemble", scriptPath.Name)
+end
 ```
 
-Use [`examples/api_script.luau`](examples/api_script.luau) only in an authorized environment that supplies `request`, `getscriptbytecode`, and Base64 encoding.
+Example usage:
+
+```luau
+local source = decompile(game.Players.LocalPlayer.PlayerScripts.LocalScript)
+print(source)
+
+local instructions = disassemble(game.Players.LocalPlayer.PlayerScripts.LocalScript)
+print(instructions)
+```
+
+To use a different local API address:
+
+```luau
+getgenv().LUNAUX_API_URL = "http://127.0.0.1:8000"
+```
+
+## API options
+
+All decompiling options can be placed inside `LUNAUX_OPTIONS` or sent in the JSON `options` object.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `Semicolons` | `false` | Add a semicolon after generated statements. |
+| `StringInterpolation` | `true` | Prefer Luau string interpolation when the backend can reconstruct it. |
+| `UpvalueComment` | `true` | Include information about upvalues used by reconstructed functions. |
+| `ShowLineDefined` | `true` | Include the original prototype line-defined metadata when available. |
+| `ShowFunctionId` | `false` | Include the original function/prototype identifier. `ShowLineDefined` should also be enabled. |
+| `PreserveForStep` | `false` | Keep the explicit step in numeric loops, including a step of `1`. |
+| `UseIfExpression` | `true` | Prefer `if ... then ... else ...` expressions instead of equivalent `and`/`or` expressions. |
+| `MaxOutputCharacters` | `4000000` | Maximum generated output length. Accepted range: 1,000 to 20,000,000 characters. |
+
+The exact effect of formatting options can vary by backend. Unsupported options are preserved for compatibility but may not change every engine's output.
 
 ## Configuration
 

@@ -14,5 +14,6 @@ dist/
 build/
 *.egg-info/
 .env
+.lunaux-windows.json
 .DS_Store
 Thumbs.db

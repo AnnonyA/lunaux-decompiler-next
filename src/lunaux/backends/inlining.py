@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -54,6 +55,10 @@ _INLINEABLE_DEFINITIONS = frozenset(
         "CALL",
         "CALLFB",
     }
+)
+_ATOMIC_EXPRESSION = re.compile(
+    r'^(?:nil|true|false|-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?'
+    r'|"(?:\\.|[^"\\])*"|[A-Za-z_][A-Za-z0-9_]*)$'
 )
 _SUPPORTED_CONSUMERS = frozenset(
     {
@@ -305,6 +310,8 @@ def plan_expression_inlining(
 
 def parenthesize_inlined_expression(expression: str) -> str:
     stripped = expression.strip()
+    if _ATOMIC_EXPRESSION.fullmatch(stripped):
+        return stripped
     if stripped.startswith("(") and stripped.endswith(")"):
         return stripped
     return f"({stripped})"

@@ -128,7 +128,7 @@ def _raw_proto(bytecode: bytes) -> LuauBytecodeModule:
 
 
 class ReconstructedBackend:
-    """Portable Luau parser, SSA analyzer, and compiler-aware reconstructor."""
+    """Portable Luau parser with CFG, SSA, AST, and scope-aware reconstruction."""
 
     @property
     def name(self) -> str:
@@ -136,7 +136,7 @@ class ReconstructedBackend:
 
     @property
     def version(self) -> str:
-        return "0.8.0"
+        return "0.9.0"
 
     def decompile(
         self,

@@ -123,6 +123,9 @@ def test_rejects_loadb_with_skip_control_flow() -> None:
     assert not plan_expression_inlining(program, _proto()).should_inline(value)
 
 
-def test_parenthesizes_once() -> None:
+def test_parenthesizes_only_compound_expressions() -> None:
+    assert parenthesize_inlined_expression("42") == "42"
+    assert parenthesize_inlined_expression('"hello"') == '"hello"'
+    assert parenthesize_inlined_expression("value") == "value"
     assert parenthesize_inlined_expression("a + b") == "(a + b)"
     assert parenthesize_inlined_expression("(a + b)") == "(a + b)"

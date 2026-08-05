@@ -2,7 +2,7 @@
 
 A local Roblox Luau bytecode decompiler and disassembler with a native backend, the optional Unluau CLI, a portable Python engine, an HTTP API, a CLI, and Windows/Linux launchers.
 
-> **Version 0.8:** adds versioned SSA values, predecessor-specific phi operands, use counts, and conservative single-use temporary elimination on top of the 0.7 control-flow and data-flow engine.
+> **Version 0.9:** adds a structured Luau expression AST, precedence-aware printing, and lexical scope recovery on top of the CFG and SSA engine.
 
 ## Engine chain
 
@@ -27,6 +27,9 @@ A crash, timeout, unsupported file, or empty result from one engine moves the re
 - Computes register liveness, reaching definitions, reverse def-use chains, and conservative SSA phi placement.
 - Renames register definitions into versioned SSA values and resolves phi operands for each predecessor.
 - Eliminates safe adjacent single-use temporaries without duplicating evaluations or hiding named/typed debug locals.
+- Represents recovered unary, binary, table, field, index, call, and method expressions as immutable AST nodes.
+- Prints Luau expressions with formal precedence and associativity, including safe nested unary rendering.
+- Reconstructs lexical scopes from debug ranges, including shadowing, register reuse, and typed bindings.
 - Reconstructs common expressions, table access, calls, methods, returns, closures, numeric/generic loops, `while`/`repeat` regions, and `if`/`else` layouts using compatibility patterns plus whole-function CFG/SSA analysis.
 - Resolves modern userdata, class, fastcall, feedback, and proto operands in disassembly.
 - Never executes submitted Luau bytecode.
@@ -348,7 +351,7 @@ mypy
 pytest
 ```
 
-The repository also checks its opcode, constant, builtin, and bytecode-version metadata against the current upstream `Luau/Bytecode.h` on a schedule. See [`scripts/check_luau_bytecode_spec.py`](scripts/check_luau_bytecode_spec.py). The compiler-analysis design is documented in [`docs/COMPILER_ANALYSIS.md`](docs/COMPILER_ANALYSIS.md), and the SSA/expression stage in [`docs/SSA_AND_EXPRESSIONS.md`](docs/SSA_AND_EXPRESSIONS.md).
+The repository also checks its opcode, constant, builtin, and bytecode-version metadata against the current upstream `Luau/Bytecode.h` on a schedule. See [`scripts/check_luau_bytecode_spec.py`](scripts/check_luau_bytecode_spec.py). The compiler-analysis design is documented in [`docs/COMPILER_ANALYSIS.md`](docs/COMPILER_ANALYSIS.md), the SSA stage in [`docs/SSA_AND_EXPRESSIONS.md`](docs/SSA_AND_EXPRESSIONS.md), and the structured AST/scope stage in [`docs/AST_AND_SCOPES.md`](docs/AST_AND_SCOPES.md).
 
 ## Accuracy and limitations
 

@@ -1,0 +1,14 @@
+LunaUX Decompiler Next
+Copyright 2026 AnnonyA and contributors
+
+This project is an independent redesign inspired by the public
+LunaUX-Decompiler project by boydev-1444 and its contributors:
+https://github.com/boydev-1444/lunaux-decompiler
+
+Portions of the public-facing behavior, option names, and local client workflow
+are derived from or compatible with that Apache-2.0-licensed project. Modified
+files and the new architecture in this repository are not official releases of
+the original LunaUX project.
+
+No original closed-source native decompiler implementation is included in this
+repository.

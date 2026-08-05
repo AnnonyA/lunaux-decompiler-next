@@ -61,7 +61,7 @@ def test_inlines_adjacent_single_use_value_by_default() -> None:
     source = decompile_module(module, {}, "inline.luac")
 
     assert "local v0 = 42" not in source
-    assert "return (42)" in source
+    assert "return 42" in source
 
 
 def test_can_disable_temporary_inlining() -> None:
@@ -110,7 +110,7 @@ def test_folds_a_short_expression_chain() -> None:
 
     assert "local v0" not in source
     assert "local v1" not in source
-    assert "return (-(4))" in source
+    assert "return -4" in source
 
 
 def test_does_not_duplicate_a_value_used_twice_by_one_instruction() -> None:

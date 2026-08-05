@@ -123,8 +123,8 @@ def test_python_engine_reconstructs_common_call() -> None:
     module = parse_bytecode(_sample_container())
     source = decompile_module(module, {}, "Example")
     assert "local v0 = print" in source
-    assert 'local v1 = "hello"' in source
-    assert "v0(v1)" in source
+    assert 'local v1 = "hello"' not in source
+    assert 'v0("hello")' in source
 
 
 def test_semicolon_option_is_applied() -> None:
@@ -134,7 +134,7 @@ def test_semicolon_option_is_applied() -> None:
         "Example",
     )
     assert "local v0 = print;" in source
-    assert "v0(v1);" in source
+    assert 'v0("hello");' in source
 
 
 def test_disassembly_resolves_constant_names() -> None:
@@ -152,8 +152,8 @@ def test_malformed_container_reports_offset() -> None:
 def test_raw_words_still_get_lifted() -> None:
     bytecode = struct.pack("<II", _ad(4, 0, 42), _abc(22, 0, 2, 0))
     source = ReconstructedBackend().decompile(bytecode, {}, "raw")
-    assert "local v0 = 42" in source
-    assert "return v0" in source
+    assert "local v0 = 42" not in source
+    assert "return 42" in source
 
 
 def test_opcode_table_matches_current_official_count() -> None:

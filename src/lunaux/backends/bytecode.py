@@ -105,16 +105,16 @@ class _Reader:
         return self.read_bytes(1)[0]
 
     def read_u32(self) -> int:
-        return struct.unpack("<I", self.read_bytes(4))[0]
+        return int(struct.unpack("<I", self.read_bytes(4))[0])
 
     def read_i32(self) -> int:
-        return struct.unpack("<i", self.read_bytes(4))[0]
+        return int(struct.unpack("<i", self.read_bytes(4))[0])
 
     def read_f32(self) -> float:
-        return struct.unpack("<f", self.read_bytes(4))[0]
+        return float(struct.unpack("<f", self.read_bytes(4))[0])
 
     def read_f64(self) -> float:
-        return struct.unpack("<d", self.read_bytes(8))[0]
+        return float(struct.unpack("<d", self.read_bytes(8))[0])
 
     def read_varuint(self) -> int:
         result = 0

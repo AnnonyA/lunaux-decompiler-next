@@ -81,8 +81,10 @@ class ReconstructedBackend:
         else:
             lines.extend(
                 [
-                    "-- The input appears to be a serialized Luau container, not a raw word stream.",
-                    "-- Use a matching native backend for full container parsing and decompilation.",
+                    "-- The input appears to be a serialized Luau container, "
+                    "not a raw word stream.",
+                    "-- Use a matching native backend for full container parsing "
+                    "and decompilation.",
                 ]
             )
         return "\n".join(lines) + "\n"

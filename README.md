@@ -1,19 +1,21 @@
 # LunaUX Decompiler Next
 
-A clean CLI and HTTP API for Luau bytecode analysis with automatic native compatibility and a portable Python fallback.
+A local Luau bytecode decompiler and disassembler with a native-first backend, a portable Python fallback, a request-compatible API, and a command-line application.
 
-> **Version 0.2:** LunaUX Next now tries the exact native `luna` engine when available, can load a `.pyd` or `.so` directly by path, and falls back to a readable Python instruction decoder instead of refusing to start.
+> **Version 0.3:** adds classic `/decompile` and `/disassemble` routes that return plain text, PascalCase API options, the `run`, `decomp`, and `disasm` CLI aliases, and an installation hash flag.
 
-## What it does
+## Features
 
-- Decompiles Luau bytecode through a compatible native LunaUX extension.
-- Disassembles raw 32-bit Luau instruction streams without a native binary.
-- Reports metadata and printable strings for unsupported serialized containers.
-- Exposes the same backend through a local CLI and versioned HTTP API.
-- Validates input sizes, filenames, Base64 payloads, and output limits.
+- Uses a compatible native `luna.pyd` or `.so` for complete decompilation.
+- Loads an authorized native extension directly through `LUNAUX_NATIVE_PATH`.
+- Falls back to a readable Python Luau instruction decoder when native loading fails.
+- Supports raw bytecode and Base64-encoded bytecode.
+- Provides plain-text compatibility routes for request-based Luau clients.
+- Keeps the structured, versioned `/v1` API for applications that need backend metadata.
+- Validates Base64, input size, filenames, options, and output size.
 - Never downloads native binaries or modifies its own installation at runtime.
 
-The Python fallback is intentionally conservative. It does not present guessed pseudocode as recovered source. Complete serialized-container decompilation still requires a compatible native backend.
+The Python fallback is intentionally conservative. It does not claim that heuristic output is recovered source. Complete serialized-container decompilation still requires a compatible native backend.
 
 ## Installation
 
@@ -44,29 +46,17 @@ pip install -e ".[dev]"
 pytest
 ```
 
-## Backend selection
+## Native backend
 
-`LUNAUX_BACKEND_MODE` controls how LunaUX Next starts:
+LunaUX Next supports three backend modes:
 
 | Mode | Behavior |
 | --- | --- |
-| `auto` | Try native first, then activate the Python fallback. This is the default. |
-| `native` | Require the native extension and fail clearly if it cannot load. |
+| `auto` | Try native first, then use the Python fallback. This is the default. |
+| `native` | Require the native extension and fail if it cannot load. |
 | `reconstructed` | Skip native loading and always use the Python fallback. |
 
-Run diagnostics at any time:
-
-```bash
-lunaux doctor
-```
-
-The diagnostics show the active backend, version, configured native path, and the reason for any fallback.
-
-## Use the recovered `luna.pyd` on Windows
-
-The recovered Windows extension targets **CPython 3.13 x64**. Use a matching interpreter.
-
-CMD:
+Windows CPython 3.13 x64 example:
 
 ```bat
 set LUNAUX_BACKEND_MODE=auto
@@ -75,20 +65,7 @@ set LUNAUX_NATIVE_PATH=C:\path\to\luna.pyd
 lunaux doctor
 ```
 
-PowerShell:
-
-```powershell
-$env:LUNAUX_BACKEND_MODE = "auto"
-$env:LUNAUX_BACKEND_MODULE = "luna"
-$env:LUNAUX_NATIVE_PATH = "C:\path\to\luna.pyd"
-lunaux doctor
-```
-
-A `.pyd` is a native Python extension. Its Python version, architecture, operating system, and exported initializer must match the current interpreter.
-
-## Use the recovered `.so` on Linux
-
-The recovered Linux extension targets **CPython 3.12 x86-64**.
+Linux CPython 3.12 x86-64 example:
 
 ```bash
 export LUNAUX_BACKEND_MODE=auto
@@ -97,34 +74,238 @@ export LUNAUX_NATIVE_PATH=$HOME/path/to/luna-linux.so
 lunaux doctor
 ```
 
-Both recovered binaries export `PyInit_luna`, so the module name must remain `luna` even when the file is named `luna-linux.so`.
+The module name must match the exported initializer. A binary exporting `PyInit_luna` must use `LUNAUX_BACKEND_MODULE=luna`.
 
-Native binaries are not committed to this repository. Keep them locally or distribute authorized artifacts separately with hashes and ABI labels.
+## API Script
 
-## CLI
-
-Decompile a raw bytecode file:
+Start the local server first:
 
 ```bash
-lunaux decompile script.luac -o script.luau
+lunaux run
 ```
 
-Disassemble:
+Then paste [`examples/api_script.luau`](examples/api_script.luau) into an authorized environment that supports `request`, `getscriptbytecode`, and either `base64encode` or `crypt.base64.encode`.
+
+```luau
+assert(request, "http request function missing")
+assert(getscriptbytecode, "getscriptbytecode function missing")
+
+local base64_encoder = (crypt and crypt.base64 and crypt.base64.encode) or base64encode
+assert(base64_encoder, "base64encode function missing")
+
+local http = game:GetService("HttpService")
+local environment = getgenv and getgenv() or _G
+local apiBaseUrl = environment.LUNAUX_API_URL or "http://127.0.0.1:8000"
+
+environment.LUNAUX_OPTIONS = environment.LUNAUX_OPTIONS or {
+    Semicolons = false,
+    StringInterpolation = true,
+    UpvalueComment = true,
+    ShowLineDefined = true,
+    ShowFunctionId = false,
+    PreserveForStep = false,
+    UseIfExpression = true,
+}
+
+local function apiRequest(bytecode, branch, scriptName, options)
+    local payload = {
+        bytecode = base64_encoder(bytecode),
+        filename = scriptName,
+    }
+
+    if options then
+        payload.options = options
+    end
+
+    local response = request({
+        Url = apiBaseUrl .. "/" .. branch,
+        Method = "POST",
+        Headers = {
+            ["Content-Type"] = "application/json",
+        },
+        Body = http:JSONEncode(payload),
+    })
+
+    if response.StatusCode ~= 200 then
+        return `--[[ Server error (HTTP {response.StatusCode}):\n\t{response.Body}\n]]`
+    end
+
+    return response.Body
+end
+
+local function isValidScript(scriptInstance: BaseScript)
+    return
+        (scriptInstance.ClassName == "Script" and scriptInstance.RunContext == Enum.RunContext.Client)
+        or scriptInstance.ClassName == "LocalScript"
+        or scriptInstance.ClassName == "ModuleScript"
+end
+
+environment.decompile = function(scriptPath: BaseScript)
+    if typeof(scriptPath) ~= "Instance" then
+        return "-- Invalid argument #1 to 'decompile' (Instance expected)"
+    end
+    if not isValidScript(scriptPath) then
+        return "-- Server scripts are IMPOSSIBLE to decompile"
+    end
+
+    local ok, bytecode = pcall(getscriptbytecode, scriptPath)
+    if not ok then
+        return `--[[ Failed to get script bytecode:\n\t{bytecode}\n]]`
+    end
+    if type(bytecode) ~= "string" then
+        return `--[[ Failed to get script bytecode, string type expected got {type(bytecode)} ]]`
+    end
+    if bytecode == "" then
+        return "-- Empty bytecode"
+    end
+
+    return apiRequest(bytecode, "decompile", scriptPath.Name, environment.LUNAUX_OPTIONS)
+end
+
+environment.disassemble = function(scriptPath: BaseScript)
+    if typeof(scriptPath) ~= "Instance" then
+        return "-- Invalid argument #1 to 'disassemble' (Instance expected)"
+    end
+    if not isValidScript(scriptPath) then
+        return "-- Server scripts are IMPOSSIBLE to disassemble"
+    end
+
+    local ok, bytecode = pcall(getscriptbytecode, scriptPath)
+    if not ok then
+        return `--[[ Failed to get script bytecode:\n\t{bytecode}\n]]`
+    end
+    if type(bytecode) ~= "string" then
+        return `--[[ Failed to get script bytecode, string type expected got {type(bytecode)} ]]`
+    end
+    if bytecode == "" then
+        return "-- Empty bytecode"
+    end
+
+    return apiRequest(bytecode, "disassemble", scriptPath.Name)
+end
+```
+
+The client calls these plain-text endpoints:
+
+```text
+POST /decompile
+POST /disassemble
+```
+
+Successful responses use `Content-Type: text/plain`, so `response.Body` is directly the decompiled source or disassembly.
+
+The following short route aliases are also available:
+
+```text
+POST /decomp
+POST /disasm
+```
+
+## API Options
+
+Pass options inside the `options` object sent to `/decompile` or `/v1/decompile`.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `Semicolons` | `false` | Add a semicolon to every generated line. |
+| `StringInterpolation` | `true` | Reconstruct string interpolation when supported. |
+| `UpvalueComment` | `true` | Show the upvalues used by a function. |
+| `ShowLineDefined` | `true` | Add the original prototype line information. |
+| `ShowFunctionId` | `false` | Add the original function ID. `ShowLineDefined` should remain enabled. |
+| `PreserveForStep` | `false` | Preserve the numeric-loop step even when it equals one. |
+| `UseIfExpression` | `true` | Use `if ... then ... else ...` expressions instead of AND/OR reconstruction. |
+| `MaxOutputCharacters` | `4000000` | Reject unexpectedly large backend output. Range: 1,000–20,000,000. |
+
+Classic PascalCase and Python-style snake_case names are both accepted. For example, `StringInterpolation` and `string_interpolation` are equivalent.
+
+Example request:
+
+```json
+{
+  "bytecode": "BASE64_DATA",
+  "filename": "Example.luau",
+  "options": {
+    "Semicolons": false,
+    "StringInterpolation": true,
+    "UpvalueComment": true,
+    "ShowLineDefined": true,
+    "ShowFunctionId": false,
+    "PreserveForStep": false,
+    "UseIfExpression": true
+  }
+}
+```
+
+## Structured API
+
+Applications that need backend metadata can use the versioned routes:
+
+```text
+GET  /v1/health
+POST /v1/decompile
+POST /v1/disassemble
+```
+
+The versioned routes return JSON:
+
+```json
+{
+  "result": "-- decompiled output",
+  "backend": "luna",
+  "backend_version": "..."
+}
+```
+
+Compatibility health is also available at:
+
+```text
+GET /health
+```
+
+Interactive API documentation is served at `/docs` and `/redoc`.
+
+## CLI Application
+
+Tool for quick local analysis, automation, or starting the API server. File commands support raw bytecode and Base64-encoded bytecode.
+
+```text
+Options:
+  -h, --help       Show the help message.
+  -v, --version    Show version information.
+  -ih, --hash      Show the current installation SHA-256.
+
+Commands:
+  run
+    Start the LunaUX Next local server.
+
+  serve
+    Alias-compatible server command with the same host and port options.
+
+  decomp, decompile <input_file> [output_directory]
+    Decompile the specified bytecode file.
+    If an output directory is supplied, the result is saved as <name>.luau.
+    Otherwise, the result is printed to the console.
+
+  disasm, disassemble <input_file> [output_directory]
+    Disassemble the specified bytecode file.
+    If an output directory is supplied, the result is saved as <name>.disasm.txt.
+    Otherwise, the result is printed to the console.
+
+  doctor
+    Show Python, backend, native extension, and fallback diagnostics.
+```
+
+Examples:
 
 ```bash
+lunaux run
+lunaux decomp script.luac output
+lunaux decompile script.txt output --input-format base64
+lunaux disasm script.luac output
 lunaux disassemble script.luac -o instructions.txt
-```
-
-Read Base64 text explicitly:
-
-```bash
-lunaux decompile script.txt --input-format base64 -o script.luau
-```
-
-Start the API:
-
-```bash
-lunaux serve --host 127.0.0.1 --port 8000
+lunaux doctor
+lunaux -v
+lunaux -ih
 ```
 
 Input formats:
@@ -133,84 +314,12 @@ Input formats:
 - `base64`: require valid Base64 and decode it.
 - `auto`: conservatively detect canonical Base64; otherwise use raw bytes.
 
-Use an explicit format for untrusted or ambiguous files.
-
-## Fallback output
-
-When the native backend is unavailable, `auto` mode selects `python-reconstruction`.
-
-For a raw word stream it prints decoded instructions with:
-
-- program counter;
-- raw 32-bit word;
-- opcode name;
-- `A`, `B`, `C`, `D`, and `E` fields;
-- auxiliary words for opcodes that use them.
-
-For a complete serialized container that the fallback cannot parse, it returns structured metadata rather than false source code. Switch to a matching native runtime for complete decompilation.
-
-Force fallback mode:
-
-Windows CMD:
-
-```bat
-set LUNAUX_BACKEND_MODE=reconstructed
-lunaux disassemble script.luac
-```
-
-Linux/macOS:
-
-```bash
-export LUNAUX_BACKEND_MODE=reconstructed
-lunaux disassemble script.luac
-```
-
-## HTTP API
-
-Start the server:
-
-```bash
-lunaux serve
-```
-
-Health check:
-
-```text
-GET /v1/health
-```
-
-Decompile:
-
-```text
-POST /v1/decompile
-Content-Type: application/json
-```
-
-```json
-{
-  "bytecode": "BASE64_DATA",
-  "filename": "Example.luau",
-  "options": {
-    "string_interpolation": true,
-    "use_if_expression": true
-  }
-}
-```
-
-Disassemble:
-
-```text
-POST /v1/disassemble
-```
-
-The response reports the backend name and backend version. The server binds to `127.0.0.1` by default, and CORS is disabled unless `LUNAUX_CORS_ORIGINS` is configured.
-
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `LUNAUX_BACKEND_MODE` | `auto` | Select `auto`, `native`, or `reconstructed`. |
-| `LUNAUX_BACKEND_MODULE` | `luna` | Import name and native initializer name. |
+| `LUNAUX_BACKEND_MODULE` | `luna` | Native import and initializer name. |
 | `LUNAUX_NATIVE_PATH` | empty | Direct path to a compatible `.pyd` or `.so`. |
 | `LUNAUX_MAX_BYTECODE_BYTES` | `16777216` | Maximum accepted bytecode size. |
 | `LUNAUX_CORS_ORIGINS` | empty | Comma-separated allowed API origins. |
@@ -218,6 +327,9 @@ The response reports the backend name and backend version. The server binds to `
 ## Repository layout
 
 ```text
+examples/
+└── api_script.luau       # Request-based Luau client
+
 src/lunaux/
 ├── api/                  # FastAPI application and request models
 ├── backends/
@@ -226,19 +338,18 @@ src/lunaux/
 │   ├── native.py         # Installed-module and direct-path native loader
 │   ├── opcodes.py        # Pure Python Luau word decoder
 │   └── reconstructed.py  # Conservative portable fallback
-├── cli.py                # Typer CLI and diagnostics
+├── cli.py                # CLI, aliases, server launcher, global flags
 ├── config.py             # Environment-backed configuration
 ├── errors.py             # Stable public error codes
+├── hashing.py            # Deterministic installation SHA-256
 ├── io.py                 # Raw/Base64 input handling
-├── models.py             # Shared decompilation options
+├── models.py             # Decompilation options and API aliases
 └── service.py            # Validation and orchestration
 ```
 
-See [`docs/NATIVE_BACKEND.md`](docs/NATIVE_BACKEND.md) for native loading details and [`ARCHITECTURE.md`](ARCHITECTURE.md) for the long-term open-engine design.
-
 ## Native backend interface
 
-A compatible module must expose:
+A compatible native module must expose:
 
 ```python
 decompile_bytecode(bytecode: bytes, options: dict, filename: str | None) -> str
@@ -251,9 +362,11 @@ The adapter reads `__version__` or calls `get_version()` when available.
 
 ```bash
 pytest
+ruff check .
+mypy
 ```
 
-The suite covers input decoding, service validation, HTTP behavior, backend fallback, raw opcode decoding, and prevention of misleading serialized-container output.
+CI validates the project on Windows, Ubuntu, and macOS with Python 3.11, 3.12, and 3.13.
 
 ## Attribution
 
@@ -263,7 +376,7 @@ The Python reconstruction is a behavioral interoperability layer based on analys
 
 ## Responsible use
 
-Only analyze bytecode you own or are authorized to inspect. Decompilation cannot restore comments, original local names, exact formatting, or server-only source code that was never present in the provided bytecode.
+Only analyze bytecode you own or are authorized to inspect. Decompilation cannot restore comments, original local names, exact formatting, or server-only source code that was never present in the supplied bytecode.
 
 ## License
 

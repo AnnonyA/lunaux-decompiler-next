@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from lunaux import __version__
 from lunaux.api.models import BytecodeRequest, DecompileRequest, HealthResult, TextResult
-from lunaux.backends.native import NativeModuleBackend
+from lunaux.backends.auto import build_backend
 from lunaux.config import Settings
 from lunaux.errors import ErrorCode, LunaUXError
 from lunaux.io import decode_base64
@@ -35,7 +35,11 @@ def create_app(
 ) -> FastAPI:
     resolved_settings = settings or Settings.from_env()
     resolved_service = service or DecompilerService(
-        NativeModuleBackend(resolved_settings.backend_module),
+        build_backend(
+            resolved_settings.backend_module,
+            resolved_settings.backend_mode,
+            resolved_settings.native_path,
+        ),
         resolved_settings.max_bytecode_bytes,
     )
 

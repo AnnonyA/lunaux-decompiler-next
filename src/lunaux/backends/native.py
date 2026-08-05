@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from importlib import import_module
+import sys
+from importlib import import_module, util
+from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
 
@@ -9,23 +11,48 @@ from lunaux.errors import ErrorCode, LunaUXError
 
 
 class NativeModuleBackend(DecompilerBackend):
-    """Compatibility adapter for the original `luna` native Python module."""
+    """Compatibility adapter for the original ``luna`` native Python extension."""
 
-    def __init__(self, module_name: str = "luna") -> None:
+    def __init__(self, module_name: str = "luna", module_path: str | None = None) -> None:
         self._module_name = module_name
-        self._module = self._load(module_name)
+        self._module_path = module_path
+        self._module = self._load(module_name, module_path)
         self._validate_module(self._module)
 
     @staticmethod
-    def _load(module_name: str) -> ModuleType:
+    def _load(module_name: str, module_path: str | None) -> ModuleType:
         try:
+            if module_path:
+                return NativeModuleBackend._load_path(module_name, Path(module_path))
             return import_module(module_name)
         except Exception as exc:
+            location = f" from '{module_path}'" if module_path else ""
             raise LunaUXError(
                 ErrorCode.BACKEND_UNAVAILABLE,
-                f"Could not import backend module '{module_name}': {exc}",
+                f"Could not import backend module '{module_name}'{location}: {exc}",
                 status_code=503,
             ) from exc
+
+    @staticmethod
+    def _load_path(module_name: str, path: Path) -> ModuleType:
+        resolved = path.expanduser().resolve()
+        if not resolved.is_file():
+            raise FileNotFoundError(resolved)
+        spec = util.spec_from_file_location(module_name, resolved)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not create an extension loader for {resolved}")
+        module = util.module_from_spec(spec)
+        previous = sys.modules.get(module_name)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            if previous is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous
+            raise
+        return module
 
     @staticmethod
     def _validate_module(module: ModuleType) -> None:
@@ -57,6 +84,11 @@ class NativeModuleBackend(DecompilerBackend):
             except Exception:
                 return "unknown"
         return "unknown"
+
+    @property
+    def path(self) -> str | None:
+        value = getattr(self._module, "__file__", None)
+        return str(value) if value else self._module_path
 
     def decompile(
         self,

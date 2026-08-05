@@ -8,6 +8,23 @@ from dataclasses import dataclass
 from typing import cast
 
 from lunaux.backends.analysis import analyze_control_flow
+from lunaux.backends.ast import (
+    BinaryExpr,
+    CallExpr,
+    Expr,
+    FieldExpr,
+    IndexExpr,
+    LiteralExpr,
+    MethodCallExpr,
+    NameExpr,
+    Precedence,
+    RawExpr,
+    TableExpr,
+    UnaryExpr,
+    ensure_expr,
+    render_expression,
+    source_expr,
+)
 from lunaux.backends.bytecode import (
     ClassShapeConstant,
     LuauBytecodeModule,
@@ -15,16 +32,14 @@ from lunaux.backends.bytecode import (
     LuauProto,
     format_type_tag,
 )
-from lunaux.backends.inlining import (
-    parenthesize_inlined_expression,
-    plan_expression_inlining,
-)
+from lunaux.backends.inlining import plan_expression_inlining
 from lunaux.backends.opcodes import (
     DecodedInstruction,
     builtin_name,
     decode_words,
     get_jump_target,
 )
+from lunaux.backends.scopes import build_scope_tree
 from lunaux.backends.ssa import SSAValue, build_ssa
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -383,9 +398,10 @@ class _FunctionLifter:
         self.proto_names = proto_names
         self.options = options
         self.out = emitter
+        self.scope_tree = build_scope_tree(proto)
         self.register_names: dict[int, str] = {}
         self.declared: set[str] = set()
-        self.pending_namecalls: dict[int, tuple[str, str]] = {}
+        self.pending_namecalls: dict[int, tuple[Expr, str]] = {}
         self.block_closures: dict[int, list[str]] = defaultdict(list)
         self.else_transitions: dict[int, int] = {}
         self.instructions = list(decode_words(proto.code))
@@ -396,7 +412,7 @@ class _FunctionLifter:
             analysis=self.analysis,
         )
         self.inline_plan = plan_expression_inlining(self.ssa, proto)
-        self.inline_expressions: dict[SSAValue, str] = {}
+        self.inline_expressions: dict[SSAValue, Expr] = {}
         self.instruction_by_pc = {
             instruction.pc: instruction for instruction in self.instructions
         }
@@ -550,33 +566,38 @@ class _FunctionLifter:
         return labels
 
     def _name(self, register: int, pc: int) -> str:
-        active = _local_name(self.proto, register, pc)
-        if active:
+        binding = self.scope_tree.binding_for_register(register, pc)
+        if binding is not None:
+            active = _sanitize_identifier(binding.name, f"v{register}")
             self.register_names[register] = active
             return active
         return self.register_names.get(register, f"v{register}")
 
-    def _ref(self, register: int, pc: int) -> str:
+    def _ref_expr(self, register: int, pc: int) -> Expr:
         if self.options.inline_single_use_temporaries:
             value = self.ssa.value_at_use(pc, register)
             if value is not None:
                 expression = self.inline_expressions.get(value)
                 if expression is not None:
-                    return parenthesize_inlined_expression(expression)
-        return self._name(register, pc)
+                    return expression
+        return NameExpr(self._name(register, pc))
+
+    def _ref(self, register: int, pc: int) -> str:
+        return render_expression(self._ref_expr(register, pc))
 
     def _annotated_name(self, register: int, name: str, pc: int) -> str:
         type_name = _local_type(self.module, self.proto, register, pc)
         return f"{name}: {type_name}" if type_name and type_name != "any" else name
 
-    def _assign(self, register: int, expression: str, pc: int) -> None:
+    def _assign(self, register: int, expression: Expr | str, pc: int) -> None:
+        resolved_expression = ensure_expr(expression)
         value = self.ssa.value_defined_at(pc, register)
         if (
             self.options.inline_single_use_temporaries
             and value is not None
             and self.inline_plan.should_inline(value)
         ):
-            self.inline_expressions[value] = expression
+            self.inline_expressions[value] = resolved_expression
             self.register_names.setdefault(register, f"v{register}")
             return
         name = self._name(register, pc)
@@ -586,9 +607,16 @@ class _FunctionLifter:
             lhs = "local " + self._annotated_name(register, name, pc)
             self.declared.add(name)
         self.register_names[register] = name
-        self.out.line(f"{lhs} = {expression}", statement=True)
+        rendered = render_expression(resolved_expression)
+        self.out.line(f"{lhs} = {rendered}", statement=True)
 
-    def _assign_many(self, registers: list[int], expression: str, pc: int) -> None:
+    def _assign_many(
+        self,
+        registers: list[int],
+        expression: Expr | str,
+        pc: int,
+    ) -> None:
+        rendered_expression = render_expression(ensure_expr(expression))
         names = [self._name(register, pc) for register in registers]
         new_flags = [name not in self.declared for name in names]
         if all(new_flags):
@@ -597,7 +625,7 @@ class _FunctionLifter:
                 for register, name in zip(registers, names, strict=True)
             ]
             self.out.line(
-                f"local {', '.join(annotated)} = {expression}",
+                f"local {', '.join(annotated)} = {rendered_expression}",
                 statement=True,
             )
         elif any(new_flags):
@@ -612,9 +640,15 @@ class _FunctionLifter:
                 if is_new
             ]
             self.out.line("local " + ", ".join(declarations), statement=True)
-            self.out.line(f"{', '.join(names)} = {expression}", statement=True)
+            self.out.line(
+                f"{', '.join(names)} = {rendered_expression}",
+                statement=True,
+            )
         else:
-            self.out.line(f"{', '.join(names)} = {expression}", statement=True)
+            self.out.line(
+                f"{', '.join(names)} = {rendered_expression}",
+                statement=True,
+            )
         self.declared.update(names)
         for register, name in zip(registers, names, strict=True):
             self.register_names[register] = name
@@ -649,30 +683,28 @@ class _FunctionLifter:
         key = _constant_string(self.proto, index)
         return key if key is not None else f"K{index}"
 
-    def _call_expression(self, instruction: DecodedInstruction) -> str:
+    def _call_expression(self, instruction: DecodedInstruction) -> Expr:
         if instruction.a in self.pending_namecalls:
             base, method = self.pending_namecalls.pop(instruction.a)
             start = instruction.a + 2
             count = max(0, instruction.b - 2) if instruction.b else 0
-            args = [self._ref(start + index, instruction.pc) for index in range(count)]
-            method_expr = (
-                method
-                if _IDENTIFIER.fullmatch(method) and method not in _RESERVED
-                else f"[{_quote(method)}]"
+            args = tuple(
+                self._ref_expr(start + index, instruction.pc)
+                for index in range(count)
             )
-            if method_expr.startswith("["):
-                return f"{base}{method_expr}({', '.join(args)})"
-            return f"{base}:{method_expr}({', '.join(args)})"
-        function = self._ref(instruction.a, instruction.pc)
+            return MethodCallExpr(base, method, args)
+        function = self._ref_expr(instruction.a, instruction.pc)
         if instruction.b == 0:
-            args_text = "... --[[ all arguments through stack top ]]"
-        else:
-            args = [
-                self._ref(instruction.a + index, instruction.pc)
-                for index in range(1, instruction.b)
-            ]
-            args_text = ", ".join(args)
-        return f"{function}({args_text})"
+            text = (
+                f"{render_expression(function)}"
+                "(... --[[ all arguments through stack top ]])"
+            )
+            return RawExpr(text, Precedence.POSTFIX)
+        args = tuple(
+            self._ref_expr(instruction.a + index, instruction.pc)
+            for index in range(1, instruction.b)
+        )
+        return CallExpr(function, args)
 
     def _conditional_body(self, instruction: DecodedInstruction) -> str | None:
         name = instruction.name
@@ -826,6 +858,7 @@ class _FunctionLifter:
     def _lift_instruction(self, instruction: DecodedInstruction) -> None:
         name = instruction.name
         pc = instruction.pc
+        expression: Expr | str
         if name in {"NOP", "BREAK", "COVERAGE", "NATIVECALL", "PREPVARARGS"}:
             return
         if name == "LOADNIL":
@@ -842,16 +875,27 @@ class _FunctionLifter:
             index = instruction.aux if instruction.aux is not None else 0
             self._assign(instruction.a, _constant_expr(self.proto, index), pc)
         elif name == "MOVE":
-            self._assign(instruction.a, self._ref(instruction.b, pc), pc)
+            self._assign(instruction.a, self._ref_expr(instruction.b, pc), pc)
         elif name == "GETGLOBAL":
-            self._assign(instruction.a, self._global_key(instruction), pc)
+            self._assign(
+                instruction.a,
+                RawExpr(self._global_key(instruction), Precedence.POSTFIX),
+                pc,
+            )
         elif name == "SETGLOBAL":
             self.out.line(
                 f"{self._global_key(instruction)} = {self._ref(instruction.a, pc)}",
                 statement=True,
             )
         elif name == "GETIMPORT":
-            self._assign(instruction.a, _decode_import(self.proto, instruction.aux), pc)
+            self._assign(
+                instruction.a,
+                RawExpr(
+                    _decode_import(self.proto, instruction.aux),
+                    Precedence.POSTFIX,
+                ),
+                pc,
+            )
         elif name == "GETUPVAL":
             upvalue = (
                 self.proto.upvalue_names[instruction.b]
@@ -860,7 +904,9 @@ class _FunctionLifter:
             )
             self._assign(
                 instruction.a,
-                _sanitize_identifier(upvalue, f"upvalue_{instruction.b}"),
+                NameExpr(
+                    _sanitize_identifier(upvalue, f"upvalue_{instruction.b}")
+                ),
                 pc,
             )
         elif name == "SETUPVAL":
@@ -872,9 +918,9 @@ class _FunctionLifter:
             lhs = _sanitize_identifier(upvalue, f"upvalue_{instruction.b}")
             self.out.line(f"{lhs} = {self._ref(instruction.a, pc)}", statement=True)
         elif name == "GETTABLE":
-            expression = (
-                f"{self._ref(instruction.b, pc)}"
-                f"[{self._ref(instruction.c, pc)}]"
+            expression = IndexExpr(
+                self._ref_expr(instruction.b, pc),
+                self._ref_expr(instruction.c, pc),
             )
             self._assign(instruction.a, expression, pc)
         elif name == "SETTABLE":
@@ -885,8 +931,8 @@ class _FunctionLifter:
                 statement=True,
             )
         elif name in {"GETTABLEKS", "GETUDATAKS"}:
-            expression = _field(
-                self._ref(instruction.b, pc),
+            expression = FieldExpr(
+                self._ref_expr(instruction.b, pc),
                 self._table_key(instruction),
             )
             self._assign(instruction.a, expression, pc)
@@ -899,7 +945,10 @@ class _FunctionLifter:
         elif name == "GETTABLEN":
             self._assign(
                 instruction.a,
-                f"{self._ref(instruction.b, pc)}[{instruction.c + 1}]",
+                IndexExpr(
+                    self._ref_expr(instruction.b, pc),
+                    LiteralExpr(str(instruction.c + 1)),
+                ),
                 pc,
             )
         elif name == "SETTABLEN":
@@ -909,38 +958,47 @@ class _FunctionLifter:
                 statement=True,
             )
         elif name in _BINARY_OPS:
-            expression = (
-                f"{self._ref(instruction.b, pc)} {_BINARY_OPS[name]} "
-                f"{self._ref(instruction.c, pc)}"
+            expression = BinaryExpr(
+                self._ref_expr(instruction.b, pc),
+                _BINARY_OPS[name],
+                self._ref_expr(instruction.c, pc),
             )
             self._assign(instruction.a, expression, pc)
         elif name in _BINARY_CONST_OPS:
-            expression = (
-                f"{self._ref(instruction.b, pc)} {_BINARY_CONST_OPS[name]} "
-                f"{_constant_expr(self.proto, instruction.c)}"
+            expression = BinaryExpr(
+                self._ref_expr(instruction.b, pc),
+                _BINARY_CONST_OPS[name],
+                source_expr(_constant_expr(self.proto, instruction.c)),
             )
             self._assign(instruction.a, expression, pc)
         elif name in {"SUBRK", "DIVRK"}:
             operator = "-" if name == "SUBRK" else "/"
-            expression = (
-                f"{_constant_expr(self.proto, instruction.b)} {operator} "
-                f"{self._ref(instruction.c, pc)}"
+            expression = BinaryExpr(
+                source_expr(_constant_expr(self.proto, instruction.b)),
+                operator,
+                self._ref_expr(instruction.c, pc),
             )
             self._assign(instruction.a, expression, pc)
         elif name in _UNARY_OPS:
             self._assign(
                 instruction.a,
-                f"{_UNARY_OPS[name]}{self._ref(instruction.b, pc)}",
+                UnaryExpr(
+                    _UNARY_OPS[name].strip(),
+                    self._ref_expr(instruction.b, pc),
+                ),
                 pc,
             )
         elif name == "CONCAT":
-            values = [
-                self._ref(register, pc)
-                for register in range(instruction.b, instruction.c + 1)
-            ]
-            self._assign(instruction.a, " .. ".join(values), pc)
+            expression = self._ref_expr(instruction.c, pc)
+            for register in reversed(range(instruction.b, instruction.c)):
+                expression = BinaryExpr(
+                    self._ref_expr(register, pc),
+                    "..",
+                    expression,
+                )
+            self._assign(instruction.a, expression, pc)
         elif name == "NEWTABLE":
-            self._assign(instruction.a, "{}", pc)
+            self._assign(instruction.a, TableExpr(), pc)
         elif name == "DUPTABLE":
             self._assign(instruction.a, _constant_expr(self.proto, instruction.d), pc)
         elif name == "SETLIST":
@@ -982,11 +1040,12 @@ class _FunctionLifter:
             )
             self._assign(instruction.a, expression, pc)
         elif name in {"NAMECALL", "NAMECALLUDATA"}:
+            base = self._ref_expr(instruction.b, pc)
             self.pending_namecalls[instruction.a] = (
-                self._ref(instruction.b, pc),
+                base,
                 self._table_key(instruction),
             )
-            self.register_names[instruction.a + 1] = self._ref(instruction.b, pc)
+            self.register_names[instruction.a + 1] = render_expression(base)
         elif name in {"CALL", "CALLFB"}:
             if name == "CALLFB":
                 slot = (
@@ -997,11 +1056,14 @@ class _FunctionLifter:
                 self.out.line(f"-- call feedback slot: {slot}")
             expression = self._call_expression(instruction)
             if instruction.c == 1:
-                self.out.line(expression, statement=True)
+                self.out.line(render_expression(expression), statement=True)
             elif instruction.c == 0:
                 self._assign(
                     instruction.a,
-                    expression + " --[[ multiple returns ]]",
+                    RawExpr(
+                        render_expression(expression)
+                        + " --[[ multiple returns ]]"
+                    ),
                     pc,
                 )
             else:

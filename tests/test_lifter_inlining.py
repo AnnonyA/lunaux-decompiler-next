@@ -125,4 +125,20 @@ def test_does_not_duplicate_a_value_used_twice_by_one_instruction() -> None:
     source = decompile_module(module, {}, "duplicate.luac")
 
     assert "local v0 = 2" in source
-    assert "return (v0 + v0)" in source
+    assert "return v0 + v0" in source
+
+
+def test_nested_unary_inlining_is_valid_luau() -> None:
+    module = _module(
+        (
+            _ad("LOADN", 0, 4),
+            _abc("MINUS", 1, 0, 0),
+            _abc("MINUS", 2, 1, 0),
+            _abc("RETURN", 2, 2, 0),
+        )
+    )
+
+    source = decompile_module(module, {}, "unary.luac")
+
+    assert "return -(-4)" in source
+    assert "--4" not in source

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lunaux-next"
-version = "0.8.0"
-description = "A multi-engine Luau decompiler with compiler-grade CFG, SSA, and conservative expression recovery"
+version = "0.9.0"
+description = "A multi-engine Luau decompiler with CFG, SSA, structured expressions, and lexical scope recovery"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }

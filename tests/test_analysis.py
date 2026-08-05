@@ -118,6 +118,19 @@ def test_preserves_aux_word_instruction_boundaries() -> None:
     assert analysis.block_for_pc[2] == 0
 
 
+def test_loadb_skip_has_only_the_jump_successor() -> None:
+    instructions = [
+        _instruction(0, "LOADB", a=0, b=1, c=1),
+        _instruction(1, "LOADN", a=1, d=99),
+        _instruction(2, "RETURN", a=0, b=2),
+    ]
+
+    analysis = analyze_control_flow(instructions, code_size=3)
+
+    assert analysis.block_by_start[0].successors == frozenset({2})
+    assert 1 not in analysis.reachable
+
+
 def test_renders_graphviz_with_edges_loop_and_phi_annotations() -> None:
     instructions = [
         _instruction(0, "JUMPIF", a=2, d=2),

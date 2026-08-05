@@ -350,6 +350,8 @@ def render_expression(expression: Expr) -> str:
         return "..."
     if isinstance(expression, UnaryExpr):
         operand = _render_child(expression.operand, Precedence.UNARY)
+        if isinstance(expression.operand, UnaryExpr):
+            operand = f"({render_expression(expression.operand)})"
         separator = " " if expression.operator == "not" else ""
         return f"{expression.operator}{separator}{operand}"
     if isinstance(expression, BinaryExpr):

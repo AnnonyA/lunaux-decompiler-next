@@ -141,3 +141,9 @@ def test_function_printer_supports_varargs_and_semicolons() -> None:
         "    return first;\n"
         "end\n"
     )
+
+
+def test_nested_unary_never_becomes_a_comment() -> None:
+    expression = UnaryExpr("-", UnaryExpr("-", name("value")))
+
+    assert render_expression(expression) == "-(-value)"

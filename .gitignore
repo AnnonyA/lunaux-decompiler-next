@@ -15,5 +15,7 @@ build/
 *.egg-info/
 .env
 .lunaux-windows.json
+tools/unluau/*
+!tools/unluau/README.md
 .DS_Store
 Thumbs.db

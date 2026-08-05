@@ -63,6 +63,8 @@ def create_app(
             resolved_settings.backend_module,
             resolved_settings.backend_mode,
             resolved_settings.native_path,
+            resolved_settings.unluau_path,
+            resolved_settings.external_timeout_seconds,
         ),
         resolved_settings.max_bytecode_bytes,
     )

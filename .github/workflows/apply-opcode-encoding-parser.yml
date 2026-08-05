@@ -1,0 +1,35 @@
+name: Apply encoded opcode parser integration
+
+on:
+  push:
+    branches:
+      - fix/roblox-opcode-encoding
+    paths:
+      - "scripts/apply_opcode_encoding_parser.py"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/roblox-opcode-encoding
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply parser integration
+        run: python scripts/apply_opcode_encoding_parser.py
+      - name: Commit generated source
+        run: |
+          if git diff --quiet; then
+            echo "No generated changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/lunaux/backends/bytecode.py
+          git commit -m "Normalize encoded Roblox opcode streams"
+          git push origin HEAD:fix/roblox-opcode-encoding

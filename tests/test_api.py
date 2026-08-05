@@ -16,8 +16,18 @@ def client() -> TestClient:
     return TestClient(app)
 
 
+def encoded(value: bytes) -> str:
+    return base64.b64encode(value).decode()
+
+
 def test_health_reports_backend() -> None:
     response = client().get("/v1/health")
+    assert response.status_code == 200
+    assert response.json()["backend"] == "fake"
+
+
+def test_classic_health_alias_reports_backend() -> None:
+    response = client().get("/health")
     assert response.status_code == 200
     assert response.json()["backend"] == "fake"
 
@@ -25,10 +35,56 @@ def test_health_reports_backend() -> None:
 def test_decompile_returns_structured_result() -> None:
     response = client().post(
         "/v1/decompile",
-        json={"bytecode": base64.b64encode(b"abc").decode(), "filename": "A.luau"},
+        json={"bytecode": encoded(b"abc"), "filename": "A.luau"},
     )
     assert response.status_code == 200
     assert response.json()["result"].startswith("decompiled:A.luau:3")
+
+
+def test_classic_decompile_returns_plain_source() -> None:
+    response = client().post(
+        "/decompile",
+        json={"bytecode": encoded(b"abc"), "filename": "A.luau"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.text.startswith("decompiled:A.luau:3")
+
+
+def test_classic_api_accepts_pascal_case_options() -> None:
+    response = client().post(
+        "/decompile",
+        json={
+            "bytecode": encoded(b"abc"),
+            "filename": "A.luau",
+            "options": {"UseIfExpression": False, "Semicolons": True},
+        },
+    )
+    assert response.status_code == 200
+    assert response.text.endswith(":False")
+
+
+def test_classic_disassemble_returns_plain_text() -> None:
+    response = client().post(
+        "/disassemble",
+        json={"bytecode": encoded(b"abc"), "filename": "A.luau"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.text == "disassembled:A.luau:3"
+
+
+def test_short_route_aliases_work() -> None:
+    decompile_response = client().post(
+        "/decomp",
+        json={"bytecode": encoded(b"abc")},
+    )
+    disassemble_response = client().post(
+        "/disasm",
+        json={"bytecode": encoded(b"abc")},
+    )
+    assert decompile_response.status_code == 200
+    assert disassemble_response.status_code == 200
 
 
 def test_invalid_base64_returns_error_object() -> None:

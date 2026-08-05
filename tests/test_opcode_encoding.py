@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import struct
+
 import pytest
 
 from lunaux.backends.bytecode import (
     LuauBytecodeModule,
     LuauProto,
     _recover_opcode_encoding,
+    parse_bytecode,
 )
 from lunaux.backends.opcode_encoding import decode_multiplicative_opcode_words
 from lunaux.backends.opcodes import opcode_names
@@ -59,6 +62,38 @@ def _module(code: tuple[int, ...]) -> LuauBytecodeModule:
     )
 
 
+def _serialized_v9_module(code: tuple[int, ...]) -> bytes:
+    data = bytearray(
+        (
+            9,  # bytecode version
+            3,  # type information version
+            0,  # string count
+            0,  # userdata type terminator
+            1,  # prototype count
+            2,  # max stack size
+            0,  # parameter count
+            0,  # upvalue count
+            0,  # is vararg
+            0,  # flags
+            0,  # type information size
+            len(code),
+        )
+    )
+    data.extend(struct.pack(f"<{len(code)}I", *code))
+    data.extend(
+        (
+            0,  # constant count
+            0,  # child prototype count
+            0,  # line defined
+            0,  # debug name
+            0,  # no line information
+            0,  # no debug information
+            0,  # main prototype id
+        )
+    )
+    return bytes(data)
+
+
 def test_decodes_roblox_multiplier_without_touching_operands() -> None:
     original = _ad("LOADN", 1, -42)
     encoded = _encoded(original)
@@ -105,3 +140,18 @@ def test_recovers_and_validates_an_encoded_module() -> None:
     assert recovered is not None
     assert recovered.opcode_encoding == "multiplicative:227"
     assert recovered.main_proto.code == original
+
+
+def test_parser_recovers_a_complete_serialized_v9_container() -> None:
+    original = (
+        _ad("LOADN", 0, 42),
+        _abc("RETURN", 0, 2, 0),
+    )
+    encoded = tuple(_encoded(word) for word in original)
+
+    module = parse_bytecode(_serialized_v9_module(encoded))
+
+    assert module.version == 9
+    assert module.types_version == 3
+    assert module.opcode_encoding == "multiplicative:227"
+    assert module.main_proto.code == original

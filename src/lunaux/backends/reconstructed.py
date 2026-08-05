@@ -17,7 +17,8 @@ from lunaux.backends.opcodes import disassemble_words, unpack_words
 
 _PRINTABLE: Final[re.Pattern[bytes]] = re.compile(rb"[\x20-\x7e]{4,}")
 _COMPATIBILITY_NOTICE: Final[str] = (
-    "-- Higher-fidelity reconstruction may require a compatible native or external backend.\n"
+    "-- Higher-fidelity reconstruction requires a compatible native or external "
+    "backend in some cases.\n"
 )
 
 

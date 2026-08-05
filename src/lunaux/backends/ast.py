@@ -431,7 +431,11 @@ class LuauPrinter:
             self._line(f"{prefix}{targets} = {values}", statement=True)
             return
         if isinstance(statement, ReturnStatement):
-            suffix = " " + ", ".join(render_expression(item) for item in statement.values) if statement.values else ""
+            if statement.values:
+                values = ", ".join(render_expression(item) for item in statement.values)
+                suffix = " " + values
+            else:
+                suffix = ""
             self._line("return" + suffix, statement=True)
             return
         if isinstance(statement, BreakStatement):

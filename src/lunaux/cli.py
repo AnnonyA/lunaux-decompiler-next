@@ -73,6 +73,8 @@ def _service() -> DecompilerService:
         settings.backend_module,
         settings.backend_mode,
         settings.native_path,
+        settings.unluau_path,
+        settings.external_timeout_seconds,
     )
     return DecompilerService(backend, settings.max_bytecode_bytes)
 
@@ -212,13 +214,15 @@ def run(
 
 @app.command()
 def doctor() -> None:
-    """Check Python, configuration, native compatibility, and active fallback."""
+    """Check Python, configuration, native, Unluau, and fallback engines."""
     try:
         settings = Settings.from_env()
         backend = build_backend(
             settings.backend_module,
             settings.backend_mode,
             settings.native_path,
+            settings.unluau_path,
+            settings.external_timeout_seconds,
         )
     except (LunaUXError, ValueError) as exc:
         error_console.print(f"[red]Configuration error:[/red] {exc}")
@@ -231,17 +235,13 @@ def doctor() -> None:
     table.add_row("Python", sys.version.split()[0])
     table.add_row("Backend mode", settings.backend_mode.value)
     table.add_row("Backend module", settings.backend_module)
-    table.add_row("Native path", settings.native_path or "not configured")
+    table.add_row("Native path", settings.native_path or "auto-detect / not configured")
+    table.add_row("Unluau path", settings.unluau_path or "auto-detect")
+    table.add_row("External timeout", f"{settings.external_timeout_seconds} seconds")
     table.add_row("Active backend", backend.name)
+    table.add_row("Engines", " -> ".join(item.name for item in backend.backends))
     table.add_row("Backend version", backend.version)
     table.add_row("Bytecode limit", f"{settings.max_bytecode_bytes} bytes")
-    if backend.fallback_reason:
-        table.add_row("Native status", "unavailable; Python fallback active")
-    else:
-        table.add_row(
-            "Native status",
-            "active" if backend.name != "python-reconstruction" else "disabled",
-        )
     console.print(table)
     if backend.fallback_reason:
         error_console.print(f"[yellow]{backend.fallback_reason}[/yellow]")

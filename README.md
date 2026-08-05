@@ -2,7 +2,7 @@
 
 A local Roblox Luau bytecode decompiler and disassembler with a native backend, the optional Unluau CLI, a portable Python engine, an HTTP API, a CLI, and Windows/Linux launchers.
 
-> **Version 0.6:** synchronizes the open engine with the current official Luau bytecode specification: standard bytecode versions 3–13, experimental class bytecode version 100, the complete 90-opcode table, structured type metadata, double-precision vectors, classes, userdata field opcodes, feedback slots, and stricter validation.
+> **Version 0.7:** adds compiler-grade control-flow and data-flow analysis on top of the complete Luau bytecode v3–v13/v100 decoder. The Python engine now builds basic blocks, dominators, postdominators, natural loops, liveness, reaching definitions, def-use chains, and pruned SSA phi placement.
 
 ## Engine chain
 
@@ -23,7 +23,9 @@ A crash, timeout, unsupported file, or empty result from one engine moves the re
 - Tracks all 90 opcodes currently defined in `Luau/Bytecode.h`, including `NEWCLASS`.
 - Validates AUX words, opcode/version compatibility, jump targets, constants, closures, captures, prototypes, feedback slots, and metadata ranges.
 - Recovers strings, imports, constants, child functions, line information, debug locals, upvalue names, typed locals, typed upvalues, userdata names, proto flags, sizes, costs, and feedback data.
-- Reconstructs common expressions, table access, calls, methods, returns, closures, numeric/generic loops, simple `while`/`repeat` regions, and common `if`/`else` layouts.
+- Builds an AUX-aware control-flow graph with dominators, postdominators, dominance frontiers, branch joins, natural loops, and strongly connected components.
+- Computes register liveness, reaching definitions, reverse def-use chains, and conservative SSA phi placement.
+- Reconstructs common expressions, table access, calls, methods, returns, closures, numeric/generic loops, `while`/`repeat` regions, and `if`/`else` layouts using both compatibility patterns and whole-function CFG analysis.
 - Resolves modern userdata, class, fastcall, feedback, and proto operands in disassembly.
 - Never executes submitted Luau bytecode.
 
@@ -342,7 +344,7 @@ mypy
 pytest
 ```
 
-The repository also checks its opcode, constant, builtin, and bytecode-version metadata against the current upstream `Luau/Bytecode.h` on a schedule. See [`scripts/check_luau_bytecode_spec.py`](scripts/check_luau_bytecode_spec.py).
+The repository also checks its opcode, constant, builtin, and bytecode-version metadata against the current upstream `Luau/Bytecode.h` on a schedule. See [`scripts/check_luau_bytecode_spec.py`](scripts/check_luau_bytecode_spec.py). The compiler-analysis design and public API are documented in [`docs/COMPILER_ANALYSIS.md`](docs/COMPILER_ANALYSIS.md).
 
 ## Accuracy and limitations
 

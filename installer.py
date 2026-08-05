@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -22,6 +23,8 @@ CONFIG_PATH = ROOT / ".lunaux-windows.json"
 VENV_DIR = ROOT / ".venv"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
+DEFAULT_EXTERNAL_TIMEOUT = 45
+UNLUAU_URL = "https://github.com/atrexus/unluau"
 
 BG = "#0b1120"
 PANEL = "#111a2e"
@@ -37,7 +40,9 @@ WARNING = "#f5b942"
 @dataclass(slots=True)
 class LauncherConfig:
     native_path: str = ""
+    unluau_path: str = ""
     backend_mode: str = "auto"
+    external_timeout_seconds: int = DEFAULT_EXTERNAL_TIMEOUT
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
 
@@ -49,7 +54,11 @@ class LauncherConfig:
             return cls()
         return cls(
             native_path=str(data.get("native_path", "")),
+            unluau_path=str(data.get("unluau_path", "")),
             backend_mode=str(data.get("backend_mode", "auto")),
+            external_timeout_seconds=int(
+                data.get("external_timeout_seconds", DEFAULT_EXTERNAL_TIMEOUT)
+            ),
             host=str(data.get("host", DEFAULT_HOST)),
             port=int(data.get("port", DEFAULT_PORT)),
         )
@@ -67,8 +76,8 @@ class LunaUXInstaller:
         self.busy = False
 
         self.root.title("LunaUX Next — Windows Launcher")
-        self.root.geometry("920x650")
-        self.root.minsize(820, 580)
+        self.root.geometry("960x720")
+        self.root.minsize(840, 620)
         self.root.configure(bg=BG)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -191,7 +200,7 @@ class LunaUXInstaller:
         )
         ttk.Label(
             title_box,
-            text="Decompiler, disassembler and local API launcher for Windows",
+            text="Multi-engine Roblox Luau decompiler and local API launcher",
             style="Subtitle.TLabel",
         ).pack(anchor="w", pady=(3, 0))
         self.server_badge = tk.Label(
@@ -210,14 +219,14 @@ class LunaUXInstaller:
         notebook = ttk.Notebook(outer)
         notebook.pack(fill=BOTH, expand=True, pady=(16, 0))
         dashboard = ttk.Frame(notebook, style="Panel.TFrame", padding=18)
-        backend = ttk.Frame(notebook, style="Panel.TFrame", padding=18)
+        engines = ttk.Frame(notebook, style="Panel.TFrame", padding=18)
         logs = ttk.Frame(notebook, style="Panel.TFrame", padding=12)
         notebook.add(dashboard, text="Dashboard")
-        notebook.add(backend, text="Native backend")
+        notebook.add(engines, text="Decompiler engines")
         notebook.add(logs, text="Logs")
 
         self._build_dashboard(dashboard)
-        self._build_backend_tab(backend)
+        self._build_backend_tab(engines)
         self._build_logs(logs)
 
     def _build_status_cards(self, parent: ttk.Frame) -> None:
@@ -225,7 +234,7 @@ class LunaUXInstaller:
         row.pack(fill=X)
         self.python_value = self._status_card(row, "Python", "Checking…")
         self.install_value = self._status_card(row, "Installation", "Checking…")
-        self.backend_value = self._status_card(row, "Backend", "Checking…")
+        self.backend_value = self._status_card(row, "Engine chain", "Checking…")
 
     def _status_card(
         self,
@@ -326,32 +335,32 @@ class LunaUXInstaller:
         tk.Label(
             info,
             text=(
-                "The Python engine parses serialized Luau containers and "
-                "reconstructs common expressions, calls, tables, loops and "
-                "conditionals. A compatible luna.pyd remains available as "
-                "the exact native backend."
+                "Recommended mode: Native → Unluau → Python. LunaUX tries the "
+                "next engine automatically when one engine cannot recover a "
+                "specific script. External binaries remain optional."
             ),
             bg=PANEL_ALT,
             fg=TEXT,
             justify=LEFT,
-            wraplength=760,
+            wraplength=800,
             font=("Segoe UI", 10),
         ).pack(anchor="w")
 
     def _build_backend_tab(self, parent: ttk.Frame) -> None:
         ttk.Label(
             parent,
-            text="Native backend configuration",
+            text="Decompiler engine configuration",
             style="PanelTitle.TLabel",
         ).pack(anchor="w")
         ttk.Label(
             parent,
             text=(
-                "Windows native builds normally require CPython 3.13 x64. "
-                "Leave the path empty to use the portable Python engine."
+                "Auto mode tries a compatible luna extension, then Unluau, "
+                "then the portable Python engine. Paths may be left empty "
+                "for automatic detection."
             ),
             style="Muted.TLabel",
-        ).pack(anchor="w", pady=(4, 16))
+        ).pack(anchor="w", pady=(4, 14))
 
         ttk.Label(parent, text="Backend mode", style="Body.TLabel").pack(
             anchor="w"
@@ -360,33 +369,60 @@ class LunaUXInstaller:
         mode = ttk.Combobox(
             parent,
             textvariable=self.mode_var,
-            values=("auto", "native", "reconstructed"),
+            values=("auto", "native", "unluau", "reconstructed"),
             state="readonly",
             width=24,
         )
-        mode.pack(anchor="w", pady=(6, 14))
+        mode.pack(anchor="w", pady=(6, 12))
 
         ttk.Label(parent, text="luna.pyd path", style="Body.TLabel").pack(
             anchor="w"
         )
-        path_row = ttk.Frame(parent, style="Panel.TFrame")
-        path_row.pack(fill=X, pady=(6, 10))
+        native_row = ttk.Frame(parent, style="Panel.TFrame")
+        native_row.pack(fill=X, pady=(6, 10))
         self.native_var = tk.StringVar(value=self.config.native_path)
-        ttk.Entry(path_row, textvariable=self.native_var).pack(
+        ttk.Entry(native_row, textvariable=self.native_var).pack(
             side=LEFT,
             fill=X,
             expand=True,
             padx=(0, 8),
         )
         ttk.Button(
-            path_row,
+            native_row,
             text="Browse…",
             style="Secondary.TButton",
             command=self.choose_native,
         ).pack(side=RIGHT)
 
+        ttk.Label(
+            parent,
+            text="Unluau executable or .NET DLL",
+            style="Body.TLabel",
+        ).pack(anchor="w")
+        unluau_row = ttk.Frame(parent, style="Panel.TFrame")
+        unluau_row.pack(fill=X, pady=(6, 10))
+        self.unluau_var = tk.StringVar(value=self.config.unluau_path)
+        ttk.Entry(unluau_row, textvariable=self.unluau_var).pack(
+            side=LEFT,
+            fill=X,
+            expand=True,
+            padx=(0, 8),
+        )
+        ttk.Button(
+            unluau_row,
+            text="Browse…",
+            style="Secondary.TButton",
+            command=self.choose_unluau,
+        ).pack(side=RIGHT, padx=(0, 8))
+        ttk.Button(
+            unluau_row,
+            text="Upstream",
+            style="Secondary.TButton",
+            command=self.open_unluau,
+        ).pack(side=RIGHT)
+
         server_row = ttk.Frame(parent, style="Panel.TFrame")
-        server_row.pack(fill=X, pady=(12, 0))
+        server_row.pack(fill=X, pady=(10, 0))
         host_box = ttk.Frame(server_row, style="Panel.TFrame")
         host_box.pack(side=LEFT, padx=(0, 18))
         ttk.Label(host_box, text="Host", style="Body.TLabel").pack(anchor="w")
@@ -395,10 +431,23 @@ class LunaUXInstaller:
             pady=(6, 0)
         )
         port_box = ttk.Frame(server_row, style="Panel.TFrame")
-        port_box.pack(side=LEFT)
+        port_box.pack(side=LEFT, padx=(0, 18))
         ttk.Label(port_box, text="Port", style="Body.TLabel").pack(anchor="w")
         self.port_var = tk.StringVar(value=str(self.config.port))
         ttk.Entry(port_box, textvariable=self.port_var, width=10).pack(
+            pady=(6, 0)
+        )
+        timeout_box = ttk.Frame(server_row, style="Panel.TFrame")
+        timeout_box.pack(side=LEFT)
+        ttk.Label(
+            timeout_box,
+            text="External timeout (seconds)",
+            style="Body.TLabel",
+        ).pack(anchor="w")
+        self.timeout_var = tk.StringVar(
+            value=str(self.config.external_timeout_seconds)
+        )
+        ttk.Entry(timeout_box, textvariable=self.timeout_var, width=12).pack(
             pady=(6, 0)
         )
 
@@ -407,7 +456,7 @@ class LunaUXInstaller:
             text="Save configuration",
             style="Accent.TButton",
             command=self.save_configuration,
-        ).pack(anchor="w", pady=(20, 0))
+        ).pack(anchor="w", pady=(18, 0))
 
     def _build_logs(self, parent: ttk.Frame) -> None:
         toolbar = ttk.Frame(parent, style="Panel.TFrame")
@@ -554,10 +603,17 @@ class LunaUXInstaller:
         env["PYTHONUTF8"] = "1"
         env["LUNAUX_BACKEND_MODE"] = self.config.backend_mode
         env["LUNAUX_BACKEND_MODULE"] = "luna"
+        env["LUNAUX_EXTERNAL_TIMEOUT_SECONDS"] = str(
+            self.config.external_timeout_seconds
+        )
         if self.config.native_path:
             env["LUNAUX_NATIVE_PATH"] = self.config.native_path
         else:
             env.pop("LUNAUX_NATIVE_PATH", None)
+        if self.config.unluau_path:
+            env["LUNAUX_UNLUAU_PATH"] = self.config.unluau_path
+        else:
+            env.pop("LUNAUX_UNLUAU_PATH", None)
         return env
 
     def start_server(self) -> None:
@@ -664,11 +720,29 @@ class LunaUXInstaller:
         if selected:
             self.native_var.set(selected)
 
+    def choose_unluau(self) -> None:
+        selected = filedialog.askopenfilename(
+            title="Select Unluau command-line build",
+            filetypes=(
+                ("Unluau executable or DLL", "*.exe *.dll"),
+                ("All files", "*.*"),
+            ),
+        )
+        if selected:
+            self.unluau_var.set(selected)
+
+    def open_unluau(self) -> None:
+        webbrowser.open(UNLUAU_URL)
+
     def save_configuration(self, *, show_message: bool = True) -> bool:
         try:
             port = int(self.port_var.get())
+            timeout = int(self.timeout_var.get())
         except ValueError:
-            messagebox.showerror("LunaUX Next", "Port must be a number.")
+            messagebox.showerror(
+                "LunaUX Next",
+                "Port and timeout must be whole numbers.",
+            )
             return False
         if not 1 <= port <= 65535:
             messagebox.showerror(
@@ -676,16 +750,31 @@ class LunaUXInstaller:
                 "Port must be between 1 and 65535.",
             )
             return False
+        if timeout <= 0:
+            messagebox.showerror(
+                "LunaUX Next",
+                "External timeout must be greater than zero.",
+            )
+            return False
         native_path = self.native_var.get().strip()
+        unluau_path = self.unluau_var.get().strip()
         if native_path and not Path(native_path).is_file():
             messagebox.showerror(
                 "LunaUX Next",
                 "The selected native backend does not exist.",
             )
             return False
+        if unluau_path and not Path(unluau_path).is_file():
+            messagebox.showerror(
+                "LunaUX Next",
+                "The selected Unluau executable or DLL does not exist.",
+            )
+            return False
         self.config = LauncherConfig(
             native_path=native_path,
+            unluau_path=unluau_path,
             backend_mode=self.mode_var.get(),
+            external_timeout_seconds=timeout,
             host=self.host_var.get().strip() or DEFAULT_HOST,
             port=port,
         )
@@ -714,6 +803,21 @@ class LunaUXInstaller:
         self.log_text.delete("1.0", END)
         self.log_text.configure(state="disabled")
 
+    def _has_unluau(self) -> bool:
+        if self.config.unluau_path and Path(self.config.unluau_path).is_file():
+            return True
+        candidates = (
+            ROOT / "tools" / "unluau" / "unluau.exe",
+            ROOT / "tools" / "unluau" / "Unluau.CLI.exe",
+            ROOT / "tools" / "unluau" / "Unluau.CLI.dll",
+        )
+        if any(candidate.is_file() for candidate in candidates):
+            return True
+        return any(
+            shutil.which(name)
+            for name in ("unluau", "Unluau.CLI", "Unluau.CLI.exe")
+        )
+
     def _refresh_status(self) -> None:
         architecture = platform.machine() or "unknown"
         self.python_value.configure(
@@ -724,12 +828,24 @@ class LunaUXInstaller:
             text="Ready" if installed else "Not installed",
             fg=SUCCESS if installed else WARNING,
         )
-        if self.config.backend_mode == "reconstructed":
-            backend_text = "Python engine"
-        elif self.config.native_path:
-            backend_text = "Native-first"
+        has_native = bool(
+            self.config.native_path and Path(self.config.native_path).is_file()
+        )
+        has_unluau = self._has_unluau()
+        if self.config.backend_mode == "native":
+            backend_text = "Native only"
+        elif self.config.backend_mode == "unluau":
+            backend_text = "Unluau only"
+        elif self.config.backend_mode == "reconstructed":
+            backend_text = "Python only"
+        elif has_native and has_unluau:
+            backend_text = "Native → Unluau → Python"
+        elif has_native:
+            backend_text = "Native → Python"
+        elif has_unluau:
+            backend_text = "Unluau → Python"
         else:
-            backend_text = "Auto / Python"
+            backend_text = "Auto-detect → Python"
         self.backend_value.configure(text=backend_text)
 
         running = (

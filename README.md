@@ -2,7 +2,7 @@
 
 A local Roblox Luau bytecode decompiler and disassembler with a native backend, the optional Unluau CLI, a portable Python engine, an HTTP API, a CLI, and Windows/Linux launchers.
 
-> **Version 0.7:** adds compiler-grade control-flow and data-flow analysis on top of the complete Luau bytecode v3–v13/v100 decoder. The Python engine now builds basic blocks, dominators, postdominators, natural loops, liveness, reaching definitions, def-use chains, and pruned SSA phi placement.
+> **Version 0.8:** adds versioned SSA values, predecessor-specific phi operands, use counts, and conservative single-use temporary elimination on top of the 0.7 control-flow and data-flow engine.
 
 ## Engine chain
 
@@ -25,7 +25,9 @@ A crash, timeout, unsupported file, or empty result from one engine moves the re
 - Recovers strings, imports, constants, child functions, line information, debug locals, upvalue names, typed locals, typed upvalues, userdata names, proto flags, sizes, costs, and feedback data.
 - Builds an AUX-aware control-flow graph with dominators, postdominators, dominance frontiers, branch joins, natural loops, and strongly connected components.
 - Computes register liveness, reaching definitions, reverse def-use chains, and conservative SSA phi placement.
-- Reconstructs common expressions, table access, calls, methods, returns, closures, numeric/generic loops, `while`/`repeat` regions, and `if`/`else` layouts using both compatibility patterns and whole-function CFG analysis.
+- Renames register definitions into versioned SSA values and resolves phi operands for each predecessor.
+- Eliminates safe adjacent single-use temporaries without duplicating evaluations or hiding named/typed debug locals.
+- Reconstructs common expressions, table access, calls, methods, returns, closures, numeric/generic loops, `while`/`repeat` regions, and `if`/`else` layouts using compatibility patterns plus whole-function CFG/SSA analysis.
 - Resolves modern userdata, class, fastcall, feedback, and proto operands in disassembly.
 - Never executes submitted Luau bytecode.
 
@@ -207,6 +209,7 @@ environment.LUNAUX_OPTIONS = environment.LUNAUX_OPTIONS or {
     ShowFunctionId = false,
     PreserveForStep = false,
     UseIfExpression = true,
+    InlineSingleUseTemporaries = true,
     MaxOutputCharacters = 4000000,
 }
 
@@ -317,6 +320,7 @@ All decompiling options can be placed inside `LUNAUX_OPTIONS` or sent in the JSO
 | `ShowFunctionId` | `false` | Include the original function/prototype identifier. `ShowLineDefined` should also be enabled. |
 | `PreserveForStep` | `false` | Keep the explicit step in numeric loops, including a step of `1`. |
 | `UseIfExpression` | `true` | Prefer `if ... then ... else ...` expressions instead of equivalent `and`/`or` expressions. |
+| `InlineSingleUseTemporaries` | `true` | Fold safe adjacent SSA temporaries into their single consumer. Disable for more literal register-oriented output. |
 | `MaxOutputCharacters` | `4000000` | Maximum generated output length. Accepted range: 1,000 to 20,000,000 characters. |
 
 The exact effect of formatting options can vary by backend. Unsupported options are preserved for compatibility but may not change every engine's output.
@@ -344,7 +348,7 @@ mypy
 pytest
 ```
 
-The repository also checks its opcode, constant, builtin, and bytecode-version metadata against the current upstream `Luau/Bytecode.h` on a schedule. See [`scripts/check_luau_bytecode_spec.py`](scripts/check_luau_bytecode_spec.py). The compiler-analysis design and public API are documented in [`docs/COMPILER_ANALYSIS.md`](docs/COMPILER_ANALYSIS.md).
+The repository also checks its opcode, constant, builtin, and bytecode-version metadata against the current upstream `Luau/Bytecode.h` on a schedule. See [`scripts/check_luau_bytecode_spec.py`](scripts/check_luau_bytecode_spec.py). The compiler-analysis design is documented in [`docs/COMPILER_ANALYSIS.md`](docs/COMPILER_ANALYSIS.md), and the SSA/expression stage in [`docs/SSA_AND_EXPRESSIONS.md`](docs/SSA_AND_EXPRESSIONS.md).
 
 ## Accuracy and limitations
 

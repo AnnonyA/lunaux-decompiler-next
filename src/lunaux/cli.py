@@ -14,13 +14,57 @@ from lunaux.api.app import create_app
 from lunaux.backends.auto import build_backend
 from lunaux.config import Settings
 from lunaux.errors import LunaUXError
+from lunaux.hashing import installation_hash
 from lunaux.io import InputFormat, decode_input
 from lunaux.models import DecompileOptions
 from lunaux.service import DecompilerService
 
-app = typer.Typer(no_args_is_help=True, add_completion=False)
+app = typer.Typer(
+    no_args_is_help=True,
+    add_completion=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 console = Console()
 error_console = Console(stderr=True)
+
+
+def _version_option(value: bool) -> None:
+    if value:
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
+def _hash_option(value: bool) -> None:
+    if value:
+        typer.echo(installation_hash())
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-v",
+            callback=_version_option,
+            is_eager=True,
+            help="Show version information and exit.",
+        ),
+    ] = False,
+    show_hash: Annotated[
+        bool,
+        typer.Option(
+            "--hash",
+            "-ih",
+            callback=_hash_option,
+            is_eager=True,
+            help="Show the current installation SHA-256 and exit.",
+        ),
+    ] = False,
+) -> None:
+    """LunaUX Next local Luau bytecode analysis tools."""
+    del version, show_hash
 
 
 def _service() -> DecompilerService:
@@ -50,7 +94,29 @@ def _write_or_print(text: str, output: Path | None) -> None:
     console.print(f"[green]Saved:[/green] {output}")
 
 
-def _run(operation: str, input_path: Path, output: Path | None, input_format: InputFormat) -> None:
+def _resolve_output(
+    operation: str,
+    input_path: Path,
+    output_directory: Path | None,
+    output: Path | None,
+) -> Path | None:
+    if output_directory is not None and output is not None:
+        raise typer.BadParameter("Use either output_directory or --output, not both.")
+    if output is not None:
+        return output
+    if output_directory is None:
+        return None
+    suffix = ".luau" if operation == "decompile" else ".disasm.txt"
+    return output_directory / f"{input_path.stem}{suffix}"
+
+
+def _run(
+    operation: str,
+    input_path: Path,
+    output_directory: Path | None,
+    output: Path | None,
+    input_format: InputFormat,
+) -> None:
     try:
         bytecode = _read(input_path, input_format)
         service = _service()
@@ -58,7 +124,10 @@ def _run(operation: str, input_path: Path, output: Path | None, input_format: In
             result = service.decompile(bytecode, DecompileOptions(), input_path.name)
         else:
             result = service.disassemble(bytecode, input_path.name)
-        _write_or_print(result, output)
+        _write_or_print(
+            result,
+            _resolve_output(operation, input_path, output_directory, output),
+        )
     except LunaUXError as exc:
         error_console.print(f"[red]{exc.code}:[/red] {exc.message}")
         raise typer.Exit(code=1) from exc
@@ -67,24 +136,58 @@ def _run(operation: str, input_path: Path, output: Path | None, input_format: In
         raise typer.Exit(code=1) from exc
 
 
+def _serve(host: str, port: int, log_level: str) -> None:
+    try:
+        api = create_app()
+    except (LunaUXError, ValueError) as exc:
+        message = exc.message if isinstance(exc, LunaUXError) else str(exc)
+        error_console.print(f"[red]Startup error:[/red] {message}")
+        raise typer.Exit(code=1) from exc
+    uvicorn.run(api, host=host, port=port, log_level=log_level, access_log=False)
+
+
 @app.command()
 def decompile(
     input_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    output_directory: Annotated[Path | None, typer.Argument(file_okay=False)] = None,
     output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
     input_format: Annotated[InputFormat, typer.Option("--input-format")] = InputFormat.AUTO,
 ) -> None:
-    """Decompile one raw or Base64-encoded Luau bytecode file."""
-    _run("decompile", input_path, output, input_format)
+    """Decompile a raw or Base64-encoded Luau bytecode file."""
+    _run("decompile", input_path, output_directory, output, input_format)
+
+
+@app.command(name="decomp")
+def decomp_alias(
+    input_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    output_directory: Annotated[Path | None, typer.Argument(file_okay=False)] = None,
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+    input_format: Annotated[InputFormat, typer.Option("--input-format")] = InputFormat.AUTO,
+) -> None:
+    """Alias for ``decompile``."""
+    _run("decompile", input_path, output_directory, output, input_format)
 
 
 @app.command()
 def disassemble(
     input_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    output_directory: Annotated[Path | None, typer.Argument(file_okay=False)] = None,
     output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
     input_format: Annotated[InputFormat, typer.Option("--input-format")] = InputFormat.AUTO,
 ) -> None:
-    """Disassemble one raw or Base64-encoded Luau bytecode file."""
-    _run("disassemble", input_path, output, input_format)
+    """Disassemble a raw or Base64-encoded Luau bytecode file."""
+    _run("disassemble", input_path, output_directory, output, input_format)
+
+
+@app.command(name="disasm")
+def disasm_alias(
+    input_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    output_directory: Annotated[Path | None, typer.Argument(file_okay=False)] = None,
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+    input_format: Annotated[InputFormat, typer.Option("--input-format")] = InputFormat.AUTO,
+) -> None:
+    """Alias for ``disassemble``."""
+    _run("disassemble", input_path, output_directory, output, input_format)
 
 
 @app.command()
@@ -93,14 +196,18 @@ def serve(
     port: Annotated[int, typer.Option(min=1, max=65535)] = 8000,
     log_level: Annotated[str, typer.Option()] = "info",
 ) -> None:
-    """Run the versioned local HTTP API."""
-    try:
-        api = create_app()
-    except (LunaUXError, ValueError) as exc:
-        message = exc.message if isinstance(exc, LunaUXError) else str(exc)
-        error_console.print(f"[red]Startup error:[/red] {message}")
-        raise typer.Exit(code=1) from exc
-    uvicorn.run(api, host=host, port=port, log_level=log_level, access_log=False)
+    """Run the local HTTP API."""
+    _serve(host, port, log_level)
+
+
+@app.command()
+def run(
+    host: Annotated[str, typer.Option()] = "127.0.0.1",
+    port: Annotated[int, typer.Option(min=1, max=65535)] = 8000,
+    log_level: Annotated[str, typer.Option()] = "info",
+) -> None:
+    """Classic alias for ``serve``."""
+    _serve(host, port, log_level)
 
 
 @app.command()

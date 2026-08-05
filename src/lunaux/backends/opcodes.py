@@ -52,7 +52,10 @@ class DecodedInstruction:
         return 2 if self.aux is not None else 1
 
     def render(self) -> str:
-        fields = f"A={self.a:<3} B={self.b:<3} C={self.c:<3} D={self.d:<7} E={self.e:<9}"
+        fields = (
+            f"A={self.a:<3} B={self.b:<3} C={self.c:<3} "
+            f"D={self.d:<7} E={self.e:<9}"
+        )
         if self.aux is not None:
             fields += f" AUX=0x{self.aux:08x}"
         return f"{self.pc:04d}  0x{self.word:08x}  {self.name:<18} {fields.rstrip()}"
@@ -65,6 +68,11 @@ def _sign(value: int, bits: int) -> int:
 
 def opcode_name(opcode: int) -> str:
     return _OPCODE_NAMES[opcode] if 0 <= opcode < len(_OPCODE_NAMES) else f"OP_{opcode}"
+
+
+def has_aux_word(opcode: int | str) -> bool:
+    name = opcode if isinstance(opcode, str) else opcode_name(opcode)
+    return name in _AUX_OPS
 
 
 def decode_word(word: int, pc: int = 0, aux: int | None = None) -> DecodedInstruction:

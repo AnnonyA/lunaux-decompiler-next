@@ -107,6 +107,7 @@ def _instruction_successors(
         next_pc < code_size
         and next_pc in valid_pcs
         and (instruction.name not in _TERMINATOR_NAMES)
+        and not (instruction.name == "LOADB" and instruction.c)
         and (target is None or is_fallthrough(instruction.opcode))
     ):
         successors.add(next_pc)

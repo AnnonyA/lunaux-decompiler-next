@@ -7,6 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import cast
 
+from lunaux.backends.analysis import analyze_control_flow
 from lunaux.backends.bytecode import (
     ClassShapeConstant,
     LuauBytecodeModule,
@@ -378,6 +379,7 @@ class _FunctionLifter:
         self.block_closures: dict[int, list[str]] = defaultdict(list)
         self.else_transitions: dict[int, int] = {}
         self.instructions = list(decode_words(proto.code))
+        self.analysis = analyze_control_flow(self.instructions, len(proto.code))
         self.instruction_by_pc = {
             instruction.pc: instruction for instruction in self.instructions
         }
@@ -392,6 +394,7 @@ class _FunctionLifter:
         self.if_else_regions: dict[int, _IfElseRegion] = {}
         self.skip_jump_pcs: set[int] = set()
         self._analyze_control_flow()
+        self._analyze_cfg_regions()
         self.labels = self._collect_labels()
 
     def _analyze_control_flow(self) -> None:
@@ -435,6 +438,80 @@ class _FunctionLifter:
                 else_pc=else_pc,
                 end_pc=end_pc,
                 skip_jump_pc=skip.pc,
+            )
+            self.skip_jump_pcs.add(skip.pc)
+
+    def _analyze_cfg_regions(self) -> None:
+        for loop in self.analysis.loops:
+            header_block = self.analysis.block_by_start[loop.header]
+            latch_block = self.analysis.block_by_start[loop.latch]
+            header = header_block.terminator
+            latch = latch_block.terminator
+            if header is None or latch is None:
+                continue
+
+            if (
+                header.name in _CONDITIONAL_OPS
+                and latch.name in {"JUMP", "JUMPBACK", "JUMPX"}
+            ):
+                exits = sorted(
+                    target
+                    for source, target in loop.exits
+                    if source == loop.header
+                )
+                if exits:
+                    self.while_headers.setdefault(
+                        header.pc,
+                        (exits[0], header),
+                    )
+                    self.while_back_pcs.add(latch.pc)
+
+            if (
+                latch.name in _CONDITIONAL_OPS
+                and get_jump_target(latch) == loop.header
+            ):
+                self.repeat_starts.setdefault(loop.header, latch.pc)
+                self.repeat_conditions.setdefault(latch.pc, latch)
+
+        for branch in self.analysis.branches:
+            header_block = self.analysis.block_by_start[branch.header]
+            condition = header_block.terminator
+            join = branch.join
+            if (
+                condition is None
+                or condition.name not in _CONDITIONAL_OPS
+                or join is None
+                or branch.taken <= condition.pc
+                or condition.pc in self.while_headers
+                or condition.pc in self.repeat_conditions
+            ):
+                continue
+
+            join_block = self.analysis.block_by_start.get(join)
+            if join_block is None:
+                continue
+            skip_candidates: list[DecodedInstruction] = []
+            for predecessor in join_block.predecessors:
+                predecessor_block = self.analysis.block_by_start[predecessor]
+                terminator = predecessor_block.terminator
+                if (
+                    terminator is not None
+                    and terminator.name in {"JUMP", "JUMPX"}
+                    and get_jump_target(terminator) == join
+                    and self.analysis.dominates(branch.fallthrough, predecessor)
+                ):
+                    skip_candidates.append(terminator)
+            if not skip_candidates:
+                continue
+
+            skip = max(skip_candidates, key=lambda item: item.pc)
+            self.if_else_regions.setdefault(
+                condition.pc,
+                _IfElseRegion(
+                    else_pc=branch.taken,
+                    end_pc=join,
+                    skip_jump_pc=skip.pc,
+                ),
             )
             self.skip_jump_pcs.add(skip.pc)
 

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping
 
 from lunaux.backends.opcodes import DecodedInstruction, get_jump_target, is_fallthrough
 
@@ -275,7 +275,7 @@ def _dominance_frontiers(
     predecessors: Mapping[int, frozenset[int]],
     immediate_dominators: Mapping[int, int | None],
 ) -> dict[int, set[int]]:
-    result = {node: set() for node in nodes}
+    result: dict[int, set[int]] = {node: set() for node in nodes}
     for node in nodes:
         incoming = predecessors.get(node, frozenset()) & nodes
         if len(incoming) < 2:
@@ -563,8 +563,12 @@ def _liveness(
     accesses: Mapping[int, RegisterAccess],
 ) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
     block_uses, block_defs = _block_use_def(blocks, accesses)
-    live_in = {block.start_pc: set() for block in blocks}
-    live_out = {block.start_pc: set() for block in blocks}
+    live_in: dict[int, set[int]] = {
+        block.start_pc: set() for block in blocks
+    }
+    live_out: dict[int, set[int]] = {
+        block.start_pc: set() for block in blocks
+    }
     changed = True
     while changed:
         changed = False

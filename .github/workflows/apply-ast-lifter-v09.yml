@@ -1,0 +1,35 @@
+name: Apply AST lifter migration v0.9
+
+on:
+  push:
+    branches:
+      - feature/ast-precedence-v09
+    paths:
+      - "scripts/apply_ast_lifter_v09.py"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/ast-precedence-v09
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply AST migration
+        run: python scripts/apply_ast_lifter_v09.py
+      - name: Commit generated source
+        run: |
+          if git diff --quiet; then
+            echo "No generated changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/lunaux/backends/lifter.py tests/test_lifter_inlining.py
+          git commit -m "Integrate AST expressions into the source lifter"
+          git push origin HEAD:feature/ast-precedence-v09

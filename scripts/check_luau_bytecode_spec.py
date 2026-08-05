@@ -48,7 +48,9 @@ def check_header(path: Path) -> list[str]:
             f"; upstream={upstream_constants}; local={CONSTANT_TAG_NAMES}"
         )
 
-    upstream_builtins = _enum_values(_BUILTIN, text)
+    upstream_builtins = tuple(
+        name for name in _enum_values(_BUILTIN, text) if name != "_COUNT"
+    )
     if len(upstream_builtins) != builtin_count():
         errors.append(
             f"builtin count differs: upstream={len(upstream_builtins)} "

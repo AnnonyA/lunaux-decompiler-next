@@ -158,15 +158,14 @@ class UnluauBackend(DecompilerBackend):
             temp = Path(temp_name)
             input_path = temp / (filename or "chunk.luac")
             output_path = temp / "decompiled.luau"
-            log_path = temp / "unluau.log"
             input_path.write_bytes(bytecode)
 
             arguments = [
                 str(input_path),
                 "--output",
                 str(output_path),
-                "--logs",
-                str(log_path),
+                "--log-level",
+                "Fatal",
                 "--inline-tables",
                 "--smart-variable-names",
                 "--rename-upvalues",
@@ -176,7 +175,7 @@ class UnluauBackend(DecompilerBackend):
 
             process = self._execute(arguments, temp)
             if process.returncode != 0:
-                raise self._process_error("decompilation", process, log_path)
+                raise self._process_error("decompilation", process)
             try:
                 result = output_path.read_text(encoding="utf-8", errors="replace")
             except OSError as exc:
@@ -186,7 +185,7 @@ class UnluauBackend(DecompilerBackend):
                     status_code=422,
                 ) from exc
             if not result.strip():
-                raise self._process_error("decompilation produced empty output", process, log_path)
+                raise self._process_error("decompilation produced empty output", process)
             return result
 
     def disassemble(self, bytecode: bytes, filename: str | None) -> str:
@@ -194,7 +193,6 @@ class UnluauBackend(DecompilerBackend):
             temp = Path(temp_name)
             input_path = temp / (filename or "chunk.luac")
             output_path = temp / "discarded-decompile.luau"
-            log_path = temp / "unluau.log"
             input_path.write_bytes(bytecode)
 
             process = self._execute(
@@ -203,16 +201,16 @@ class UnluauBackend(DecompilerBackend):
                     "--dissasemble",
                     "--output",
                     str(output_path),
-                    "--logs",
-                    str(log_path),
+                    "--log-level",
+                    "Fatal",
                 ],
                 temp,
             )
             if process.returncode != 0:
-                raise self._process_error("disassembly", process, log_path)
+                raise self._process_error("disassembly", process)
             result = process.stdout.strip()
             if not result:
-                raise self._process_error("disassembly produced empty output", process, log_path)
+                raise self._process_error("disassembly produced empty output", process)
             return result
 
     def _execute(self, arguments: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -245,19 +243,12 @@ class UnluauBackend(DecompilerBackend):
     def _process_error(
         operation: str,
         process: subprocess.CompletedProcess[str],
-        log_path: Path,
     ) -> LunaUXError:
         details: list[str] = []
         for value in (process.stderr, process.stdout):
             cleaned = value.strip()
             if cleaned:
                 details.append(cleaned)
-        try:
-            log_text = log_path.read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
-            log_text = ""
-        if log_text:
-            details.append(log_text)
         excerpt = " | ".join(details).replace("\n", " ")[:800]
         suffix = f": {excerpt}" if excerpt else "."
         return LunaUXError(

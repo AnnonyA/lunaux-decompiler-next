@@ -1,0 +1,296 @@
+from __future__ import annotations
+
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Literal
+
+from lunaux.backends.analysis import (
+    ControlFlowAnalysis,
+    analyze_control_flow,
+    reverse_postorder,
+)
+from lunaux.backends.opcodes import DecodedInstruction
+
+SSAValueKind = Literal["entry", "instruction", "phi"]
+
+
+@dataclass(frozen=True, order=True, slots=True)
+class SSAValue:
+    register: int
+    version: int
+    origin_pc: int | None
+    kind: SSAValueKind
+
+    @property
+    def name(self) -> str:
+        return f"R{self.register}.{self.version}"
+
+
+@dataclass(frozen=True, slots=True)
+class SSAUse:
+    register: int
+    value: SSAValue
+
+
+@dataclass(frozen=True, slots=True)
+class SSAInstruction:
+    instruction: DecodedInstruction
+    uses: tuple[SSAUse, ...]
+    definitions: tuple[SSAValue, ...]
+
+    @property
+    def pc(self) -> int:
+        return self.instruction.pc
+
+
+@dataclass(frozen=True, slots=True)
+class SSAPhi:
+    block: int
+    register: int
+    result: SSAValue
+    operands: Mapping[int, SSAValue]
+
+
+@dataclass(frozen=True, slots=True)
+class SSAProgram:
+    analysis: ControlFlowAnalysis
+    instructions: Mapping[int, SSAInstruction]
+    phis: tuple[SSAPhi, ...]
+    entry_values: Mapping[int, SSAValue]
+    use_counts: Mapping[SSAValue, int]
+    definitions: Mapping[tuple[int, int], SSAValue]
+
+    def instruction_at(self, pc: int) -> SSAInstruction | None:
+        return self.instructions.get(pc)
+
+    def value_at_use(self, pc: int, register: int) -> SSAValue | None:
+        instruction = self.instructions.get(pc)
+        if instruction is None:
+            return None
+        for use in instruction.uses:
+            if use.register == register:
+                return use.value
+        return None
+
+    def value_defined_at(self, pc: int, register: int) -> SSAValue | None:
+        return self.definitions.get((pc, register))
+
+    def uses_of(self, value: SSAValue) -> int:
+        return self.use_counts.get(value, 0)
+
+    def single_use_instruction_values(self) -> frozenset[SSAValue]:
+        return frozenset(
+            value
+            for value, count in self.use_counts.items()
+            if value.kind == "instruction" and count == 1
+        )
+
+
+@dataclass(slots=True)
+class _PhiBuilder:
+    block: int
+    register: int
+    result: SSAValue | None
+    operands: dict[int, SSAValue]
+
+
+class _SSABuilder:
+    def __init__(self, analysis: ControlFlowAnalysis) -> None:
+        self.analysis = analysis
+        self.counters: dict[int, int] = defaultdict(int)
+        self.stacks: dict[int, list[SSAValue]] = defaultdict(list)
+        self.entry_values: dict[int, SSAValue] = {}
+        self.instructions: dict[int, SSAInstruction] = {}
+        self.definitions: dict[tuple[int, int], SSAValue] = {}
+        self.use_counts: dict[SSAValue, int] = defaultdict(int)
+        self.phis: dict[tuple[int, int], _PhiBuilder] = {
+            (phi.block, phi.register): _PhiBuilder(
+                block=phi.block,
+                register=phi.register,
+                result=None,
+                operands={},
+            )
+            for phi in analysis.phi_nodes
+        }
+        self.phis_by_block: dict[int, list[_PhiBuilder]] = defaultdict(list)
+        for phi in self.phis.values():
+            self.phis_by_block[phi.block].append(phi)
+        for phi_builders in self.phis_by_block.values():
+            phi_builders.sort(key=lambda item: item.register)
+
+        self.children: dict[int, list[int]] = defaultdict(list)
+        for block, parent in analysis.immediate_dominators.items():
+            if parent is not None:
+                self.children[parent].append(block)
+        order = {block: index for index, block in enumerate(reverse_postorder(analysis))}
+        for child_blocks in self.children.values():
+            child_blocks.sort(
+                key=lambda block: order.get(block, len(order))
+            )
+
+    def _entry_value(self, register: int) -> SSAValue:
+        value = self.entry_values.get(register)
+        if value is None:
+            value = SSAValue(
+                register=register,
+                version=0,
+                origin_pc=None,
+                kind="entry",
+            )
+            self.entry_values[register] = value
+        return value
+
+    def _current(self, register: int) -> SSAValue:
+        stack = self.stacks[register]
+        if not stack:
+            stack.append(self._entry_value(register))
+        return stack[-1]
+
+    def _new_value(
+        self,
+        register: int,
+        origin_pc: int,
+        kind: Literal["instruction", "phi"],
+    ) -> SSAValue:
+        self.counters[register] += 1
+        value = SSAValue(
+            register=register,
+            version=self.counters[register],
+            origin_pc=origin_pc,
+            kind=kind,
+        )
+        self.stacks[register].append(value)
+        return value
+
+    def _record_phi_operands(self, predecessor: int, successor: int) -> None:
+        for phi in self.phis_by_block.get(successor, []):
+            value = self._current(phi.register)
+            previous = phi.operands.get(predecessor)
+            if previous is not None:
+                self.use_counts[previous] -= 1
+            phi.operands[predecessor] = value
+            self.use_counts[value] += 1
+
+    def _visit(self, block_start: int) -> None:
+        block = self.analysis.block_by_start[block_start]
+        pushed: list[int] = []
+
+        for phi in self.phis_by_block.get(block_start, []):
+            result = self._new_value(phi.register, block_start, "phi")
+            phi.result = result
+            pushed.append(phi.register)
+
+        for instruction in block.instructions:
+            access = self.analysis.register_accesses[instruction.pc]
+            uses = tuple(
+                SSAUse(register=register, value=self._current(register))
+                for register in sorted(access.uses)
+            )
+            for use in uses:
+                self.use_counts[use.value] += 1
+
+            definitions: list[SSAValue] = []
+            for register in sorted(access.definitions):
+                value = self._new_value(register, instruction.pc, "instruction")
+                definitions.append(value)
+                pushed.append(register)
+                self.definitions[(instruction.pc, register)] = value
+
+            self.instructions[instruction.pc] = SSAInstruction(
+                instruction=instruction,
+                uses=uses,
+                definitions=tuple(definitions),
+            )
+
+        for successor in sorted(block.successors):
+            if successor in self.analysis.reachable:
+                self._record_phi_operands(block_start, successor)
+
+        for child in self.children.get(block_start, []):
+            self._visit(child)
+
+        for register in reversed(pushed):
+            self.stacks[register].pop()
+
+    def build(self) -> SSAProgram:
+        if self.analysis.reachable:
+            self._visit(self.analysis.entry)
+
+        frozen_phis: list[SSAPhi] = []
+        for key in sorted(self.phis):
+            builder = self.phis[key]
+            if builder.result is None:
+                continue
+            frozen_phis.append(
+                SSAPhi(
+                    block=builder.block,
+                    register=builder.register,
+                    result=builder.result,
+                    operands=MappingProxyType(dict(sorted(builder.operands.items()))),
+                )
+            )
+
+        return SSAProgram(
+            analysis=self.analysis,
+            instructions=MappingProxyType(dict(sorted(self.instructions.items()))),
+            phis=tuple(frozen_phis),
+            entry_values=MappingProxyType(dict(sorted(self.entry_values.items()))),
+            use_counts=MappingProxyType(
+                {
+                    value: count
+                    for value, count in sorted(
+                        self.use_counts.items(),
+                        key=lambda item: item[0],
+                    )
+                    if count > 0
+                }
+            ),
+            definitions=MappingProxyType(dict(sorted(self.definitions.items()))),
+        )
+
+
+def build_ssa(
+    instructions: Sequence[DecodedInstruction],
+    code_size: int,
+    *,
+    analysis: ControlFlowAnalysis | None = None,
+) -> SSAProgram:
+    resolved_analysis = analysis or analyze_control_flow(tuple(instructions), code_size)
+    return _SSABuilder(resolved_analysis).build()
+
+
+def render_ssa(program: SSAProgram) -> str:
+    phis_by_block: dict[int, list[SSAPhi]] = defaultdict(list)
+    for phi in program.phis:
+        phis_by_block[phi.block].append(phi)
+
+    lines: list[str] = []
+    for block in program.analysis.blocks:
+        reachable = block.start_pc in program.analysis.reachable
+        suffix = "" if reachable else " [unreachable]"
+        lines.append(f"B{block.start_pc}{suffix}:")
+        for phi in phis_by_block.get(block.start_pc, []):
+            operands = ", ".join(
+                f"B{predecessor}: {value.name}"
+                for predecessor, value in phi.operands.items()
+            )
+            lines.append(f"  {phi.result.name} = phi({operands})")
+        for instruction in block.instructions:
+            ssa_instruction = program.instructions.get(instruction.pc)
+            if ssa_instruction is None:
+                lines.append(f"  {instruction.pc:04d} {instruction.name} [unreachable]")
+                continue
+            definitions = ", ".join(
+                value.name for value in ssa_instruction.definitions
+            )
+            uses = ", ".join(
+                f"R{use.register}={use.value.name}" for use in ssa_instruction.uses
+            )
+            assignment = f"{definitions} = " if definitions else ""
+            operand_suffix = f" [{uses}]" if uses else ""
+            lines.append(
+                f"  {instruction.pc:04d} {assignment}{instruction.name}{operand_suffix}"
+            )
+    return "\n".join(lines) + ("\n" if lines else "")

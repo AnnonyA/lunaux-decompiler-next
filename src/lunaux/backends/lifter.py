@@ -15,12 +15,17 @@ from lunaux.backends.bytecode import (
     LuauProto,
     format_type_tag,
 )
+from lunaux.backends.inlining import (
+    parenthesize_inlined_expression,
+    plan_expression_inlining,
+)
 from lunaux.backends.opcodes import (
     DecodedInstruction,
     builtin_name,
     decode_words,
     get_jump_target,
 )
+from lunaux.backends.ssa import SSAValue, build_ssa
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RESERVED = {
@@ -102,6 +107,7 @@ class _Options:
     show_line_defined: bool
     show_function_id: bool
     preserve_for_step: bool
+    inline_single_use_temporaries: bool
 
     @classmethod
     def from_backend(cls, options: dict[str, bool]) -> _Options:
@@ -111,6 +117,10 @@ class _Options:
             show_line_defined=options.get("ShowLineDefined", True),
             show_function_id=options.get("ShowFunctionId", False),
             preserve_for_step=options.get("PreserveForStep", False),
+            inline_single_use_temporaries=options.get(
+                "InlineSingleUseTemporaries",
+                True,
+            ),
         )
 
 
@@ -380,6 +390,13 @@ class _FunctionLifter:
         self.else_transitions: dict[int, int] = {}
         self.instructions = list(decode_words(proto.code))
         self.analysis = analyze_control_flow(self.instructions, len(proto.code))
+        self.ssa = build_ssa(
+            self.instructions,
+            len(proto.code),
+            analysis=self.analysis,
+        )
+        self.inline_plan = plan_expression_inlining(self.ssa, proto)
+        self.inline_expressions: dict[SSAValue, str] = {}
         self.instruction_by_pc = {
             instruction.pc: instruction for instruction in self.instructions
         }
@@ -540,6 +557,12 @@ class _FunctionLifter:
         return self.register_names.get(register, f"v{register}")
 
     def _ref(self, register: int, pc: int) -> str:
+        if self.options.inline_single_use_temporaries:
+            value = self.ssa.value_at_use(pc, register)
+            if value is not None:
+                expression = self.inline_expressions.get(value)
+                if expression is not None:
+                    return parenthesize_inlined_expression(expression)
         return self._name(register, pc)
 
     def _annotated_name(self, register: int, name: str, pc: int) -> str:
@@ -547,6 +570,15 @@ class _FunctionLifter:
         return f"{name}: {type_name}" if type_name and type_name != "any" else name
 
     def _assign(self, register: int, expression: str, pc: int) -> None:
+        value = self.ssa.value_defined_at(pc, register)
+        if (
+            self.options.inline_single_use_temporaries
+            and value is not None
+            and self.inline_plan.should_inline(value)
+        ):
+            self.inline_expressions[value] = expression
+            self.register_names.setdefault(register, f"v{register}")
+            return
         name = self._name(register, pc)
         if name in self.declared:
             lhs = name

@@ -12,10 +12,10 @@ import tkinter as tk
 import urllib.error
 import urllib.request
 import webbrowser
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from tkinter import BOTH, END, LEFT, RIGHT, X, Y, filedialog, messagebox, ttk
-from typing import Callable
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / ".lunaux-windows.json"
@@ -529,8 +529,6 @@ class LunaUXInstaller:
 
     def install_or_update(self) -> None:
         def task() -> None:
-            if sys.version_info < (3, 11):
-                raise RuntimeError("Python 3.11 or newer is required.")
             if not self._venv_python().exists():
                 self._post("log", "Creating isolated .venv environment…")
                 code = self._run_command(

@@ -1,0 +1,39 @@
+name: Apply LOADB CFG fix
+
+on:
+  push:
+    branches:
+      - feature/compiler-analysis-v07
+    paths:
+      - "scripts/apply_loadb_cfg_fix.py"
+      - ".github/workflows/apply-loadb-cfg-fix.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/compiler-analysis-v07
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Patch CFG successor handling
+        run: |
+          if [ -f scripts/apply_loadb_cfg_fix.py ]; then
+            python scripts/apply_loadb_cfg_fix.py
+          fi
+      - name: Commit fix
+        run: |
+          if git diff --quiet; then
+            echo "No generated changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Fix LOADB skip control-flow edge"
+          git push origin HEAD:feature/compiler-analysis-v07

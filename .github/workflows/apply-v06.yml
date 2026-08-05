@@ -7,12 +7,18 @@ on:
     paths:
       - ".bootstrap-v06/**"
       - ".github/workflows/apply-v06.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".bootstrap-v06/**"
+      - ".github/workflows/apply-v06.yml"
 
 permissions:
   contents: write
 
 jobs:
   apply:
+    if: github.head_ref == 'feature/luau-bytecode-v13-complete-opcodes' || github.ref_name == 'feature/luau-bytecode-v13-complete-opcodes'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TypeAlias, cast
 
+from lunaux.backends.opcode_encoding import (
+    candidate_opcode_multipliers,
+    decode_multiplicative_opcode_words,
+)
 from lunaux.backends.opcodes import (
     DecodedInstruction,
     decode_words,
@@ -144,6 +148,7 @@ class LuauBytecodeModule:
     bytes_consumed: int
     trailing_bytes: int
     userdata_types: tuple[tuple[int, str], ...] = ()
+    opcode_encoding: str | None = None
 
     @property
     def main_proto(self) -> LuauProto:
@@ -807,6 +812,64 @@ def _validate_module(module: LuauBytecodeModule) -> None:
         _validate_proto_code(proto, module.version, module.protos)
 
 
+def _contains_nonstandard_opcode_stream(module: LuauBytecodeModule) -> bool:
+    for proto in module.protos:
+        try:
+            decode_words(
+                proto.code,
+                strict=True,
+                bytecode_version=module.version,
+            )
+        except ValueError:
+            return True
+    return False
+
+
+def _module_with_opcode_multiplier(
+    module: LuauBytecodeModule,
+    multiplier: int,
+) -> LuauBytecodeModule:
+    protos = tuple(
+        replace(
+            proto,
+            code=decode_multiplicative_opcode_words(
+                proto.code,
+                multiplier,
+                bytecode_version=module.version,
+            ),
+        )
+        for proto in module.protos
+    )
+    return replace(
+        module,
+        protos=protos,
+        opcode_encoding=f"multiplicative:{multiplier}",
+    )
+
+
+def _recover_opcode_encoding(
+    module: LuauBytecodeModule,
+) -> LuauBytecodeModule | None:
+    if not _contains_nonstandard_opcode_stream(module):
+        return None
+
+    inferred: list[LuauBytecodeModule] = []
+    for multiplier in candidate_opcode_multipliers():
+        try:
+            candidate = _module_with_opcode_multiplier(module, multiplier)
+            _validate_module(candidate)
+        except (BytecodeFormatError, ValueError):
+            continue
+
+        if multiplier == 227:
+            return candidate
+        inferred.append(candidate)
+        if len(inferred) > 1:
+            return None
+
+    return inferred[0] if len(inferred) == 1 else None
+
+
 def parse_bytecode(data: bytes) -> LuauBytecodeModule:
     """Parse and validate a serialized Luau bytecode container."""
 
@@ -876,5 +939,11 @@ def parse_bytecode(data: bytes) -> LuauBytecodeModule:
         trailing_bytes=reader.remaining,
         userdata_types=tuple(userdata_types),
     )
-    _validate_module(module)
+    try:
+        _validate_module(module)
+    except BytecodeFormatError:
+        recovered = _recover_opcode_encoding(module)
+        if recovered is None:
+            raise
+        module = recovered
     return module

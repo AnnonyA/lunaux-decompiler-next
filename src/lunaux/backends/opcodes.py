@@ -107,4 +107,5 @@ def decode_words(words: Iterable[int]) -> list[DecodedInstruction]:
 
 def disassemble_words(data: bytes) -> str:
     instructions = decode_words(unpack_words(data))
-    return "\n".join(instruction.render() for instruction in instructions) + ("\n" if instructions else "")
+    rendered = "\n".join(instruction.render() for instruction in instructions)
+    return rendered + ("\n" if instructions else "")

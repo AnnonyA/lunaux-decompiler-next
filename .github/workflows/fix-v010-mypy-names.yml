@@ -1,4 +1,4 @@
-name: Fix v0.10 mypy names
+name: Fix v0.10 symbol recovery typing names
 
 on:
   pull_request:

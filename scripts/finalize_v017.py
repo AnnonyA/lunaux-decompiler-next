@@ -151,6 +151,44 @@ lifter_path = Path("src/lunaux/backends/lifter.py")
 lifter = lifter_path.read_text(encoding="utf-8")
 lifter = replace_once(
     lifter,
+    '''        self.active_loop_skip_pcs = {
+            pc
+            for pc in self.advanced_loop_plan.skipped_pcs
+            if pc not in machine_pcs
+            and any(pc in region.backedge_pcs for region in self.active_advanced_loops.values())
+        }
+        loop_condition_pcs = (
+''',
+    '''        self.active_loop_skip_pcs = {
+            pc
+            for pc in self.advanced_loop_plan.skipped_pcs
+            if pc not in machine_pcs
+            and any(pc in region.backedge_pcs for region in self.active_advanced_loops.values())
+        }
+        advanced_legacy_pcs = (
+            set(self.active_loop_actions)
+            | self.active_loop_skip_pcs
+            | {
+                region.condition_pc
+                for region in self.active_advanced_loops.values()
+                if region.condition_pc is not None
+            }
+        )
+        for header in self.active_advanced_loops:
+            self.while_headers.pop(header, None)
+            self.repeat_starts.pop(header, None)
+        self.while_back_pcs.difference_update(advanced_legacy_pcs)
+        self.repeat_conditions = {
+            pc: condition
+            for pc, condition in self.repeat_conditions.items()
+            if pc not in advanced_legacy_pcs
+        }
+        loop_condition_pcs = (
+''',
+    "legacy loop overlap exclusion",
+)
+lifter = replace_once(
+    lifter,
     '''        for instruction in self.instructions:
             target = get_jump_target(instruction)
             if (
@@ -164,5 +202,22 @@ lifter = replace_once(
                 target is not None
 ''',
     "state-machine label exclusion",
+)
+lifter = replace_once(
+    lifter,
+    '''            if instruction.pc in self.class_plan.skipped_instruction_pcs:
+                continue
+            if (
+                instruction.pc in self.active_structuring_skip_pcs
+''',
+    '''            if instruction.pc in self.class_plan.skipped_instruction_pcs:
+                continue
+            if instruction.pc in self.active_loop_actions:
+                self._lift_instruction(instruction)
+                continue
+            if (
+                instruction.pc in self.active_structuring_skip_pcs
+''',
+    "advanced loop action priority",
 )
 lifter_path.write_text(lifter, encoding="utf-8")

@@ -1,4 +1,4 @@
-name: Fix final v0.10 regressions
+name: Fix final v0.10 smart naming regressions
 
 on:
   pull_request:

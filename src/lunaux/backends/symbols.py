@@ -14,6 +14,10 @@ from lunaux.backends.bytecode import (
     LuauProto,
     format_type_tag,
 )
+from lunaux.backends.flow_types import (
+    FlowTypeAnalysis,
+    analyze_flow_types,
+)
 from lunaux.backends.opcodes import DecodedInstruction
 from lunaux.backends.roblox_patterns import (
     match_function_call,
@@ -150,6 +154,7 @@ class SymbolRecovery:
     entry_names: Mapping[int, str]
     entry_types: Mapping[int, str]
     return_type: str | None
+    flow_types: FlowTypeAnalysis
 
     def symbol_for(self, value: SSAValue | None) -> RecoveredSymbol | None:
         return self.symbols.get(value) if value is not None else None
@@ -167,6 +172,9 @@ class SymbolRecovery:
         return symbol.type_name if symbol is not None else None
 
     def type_at_use(self, pc: int, register: int) -> str | None:
+        narrowed = self.flow_types.type_at_use(pc, register)
+        if narrowed is not None:
+            return narrowed
         symbol = self.symbol_for(self.program.value_at_use(pc, register))
         return symbol.type_name if symbol is not None else None
 
@@ -189,6 +197,9 @@ class SymbolRecovery:
             lines.append(f"{symbol.value.name} -> {symbol.name}{annotation} [{evidence}]")
             if len(lines) >= limit:
                 break
+        remaining = max(0, limit - len(lines))
+        if remaining:
+            lines.extend(self.flow_types.report_lines(limit=remaining))
         return tuple(lines)
 
 
@@ -365,8 +376,17 @@ def _instruction_constant(proto: LuauProto, instruction: DecodedInstruction) -> 
     return None
 
 
-def _property_type(key: str) -> str | None:
-    return infer_property_type(key)
+def _property_type(
+    key: str,
+    *,
+    owner_type: str | None = None,
+    use_roblox_api: bool = True,
+) -> str | None:
+    return infer_property_type(
+        key,
+        owner_type=owner_type,
+        use_roblox_api=use_roblox_api,
+    )
 
 
 def _direct_call_type(path: str | None) -> str | None:
@@ -399,6 +419,9 @@ def build_symbol_recovery(
     proto: LuauProto,
     instructions: Sequence[DecodedInstruction],
     program: SSAProgram,
+    *,
+    flow_sensitive_types: bool = True,
+    roblox_api_types: bool = True,
 ) -> SymbolRecovery:
     facts: defaultdict[SSAValue, _Facts] = defaultdict(_Facts.empty)
     relations: list[tuple[SSAValue, SSAValue, int, str]] = []
@@ -575,12 +598,19 @@ def build_symbol_recovery(
                 field_index if field_index is not None else -1,
             )
             add_definition_name(pc, instruction.a, key, 68, "field name evidence")
+            base_value = program.value_at_use(pc, instruction.b)
+            base_type_candidate = facts[base_value].best_type() if base_value is not None else None
+            owner_type = base_type_candidate.text if base_type_candidate is not None else None
             add_definition_type(
                 pc,
                 instruction.a,
-                _property_type(key or ""),
-                76,
-                "known Roblox property type",
+                _property_type(
+                    key or "",
+                    owner_type=owner_type,
+                    use_roblox_api=roblox_api_types,
+                ),
+                82 if owner_type else 76,
+                "owner-aware Roblox property type",
             )
         elif name in {
             "ADD",
@@ -695,7 +725,20 @@ def build_symbol_recovery(
                         method_pattern.confidence,
                         method_pattern.evidence,
                     )
-            method_return = infer_method_return(method)
+            receiver_value = (
+                program.value_at_use(previous.pc, previous.b) if previous is not None else None
+            )
+            receiver_type_candidate = (
+                facts[receiver_value].best_type() if receiver_value is not None else None
+            )
+            receiver_type = (
+                receiver_type_candidate.text if receiver_type_candidate is not None else None
+            )
+            method_return = infer_method_return(
+                method,
+                owner_type=receiver_type,
+                use_roblox_api=roblox_api_types,
+            )
             if method_return is not None and method != "Clone":
                 for register in result_registers:
                     add_definition_type(
@@ -876,6 +919,20 @@ def build_symbol_recovery(
         if not changed:
             break
 
+    base_types = {
+        value: candidate.text
+        for value, value_facts in facts.items()
+        if (candidate := value_facts.best_type()) is not None
+    }
+    flow_types = analyze_flow_types(
+        proto,
+        instructions,
+        program,
+        base_types,
+        analysis=program.analysis,
+        enabled=flow_sensitive_types,
+    )
+
     all_values: set[SSAValue] = set(program.entry_values.values())
     all_values.update(program.definitions.values())
     all_values.update(phi.result for phi in program.phis)
@@ -1005,4 +1062,5 @@ def build_symbol_recovery(
         entry_names=MappingProxyType(entry_names),
         entry_types=MappingProxyType(entry_types),
         return_type=return_type,
+        flow_types=flow_types,
     )

@@ -12,7 +12,7 @@ The analyzer keeps a base type for each SSA value and a separate narrowed type f
 - validated `Instance:IsA("ClassName")` predicates;
 - successful `assert(value)` calls.
 
-A refinement is discarded at a merge unless every reachable predecessor supports a compatible fact. This prevents a type learned in one branch from leaking into its sibling or past the join.
+Register copies introduced by `MOVE` are resolved back to their original SSA value before a fact is attached. A refinement is discarded at a merge unless every reachable predecessor supports a compatible fact. This prevents a type learned in one branch from leaking into its sibling or past the join.
 
 ## Roblox API catalog
 

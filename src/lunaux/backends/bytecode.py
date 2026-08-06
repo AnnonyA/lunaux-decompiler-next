@@ -279,9 +279,7 @@ def _read_constant(
     if minimum == 10 and version != 100 and version < 10:
         raise reader.fail(f"constant tag {tag} requires Luau bytecode v10")
     if minimum not in (10, 13) and version != 100 and version < minimum:
-        raise reader.fail(
-            f"constant tag {tag} requires Luau bytecode v{minimum}"
-        )
+        raise reader.fail(f"constant tag {tag} requires Luau bytecode v{minimum}")
 
     if tag == 0:
         return LuauConstant("nil", None, tag)
@@ -309,9 +307,7 @@ def _read_constant(
         return LuauConstant("vector", vector, tag)
     if tag == 8:
         key_count = reader.read_count("table-with-constants key")
-        pairs = tuple(
-            (reader.read_varuint(), reader.read_i32()) for _ in range(key_count)
-        )
+        pairs = tuple((reader.read_varuint(), reader.read_i32()) for _ in range(key_count))
         return LuauConstant("table_with_constants", pairs, tag)
     if tag == 9:
         negative = bool(reader.read_u8())
@@ -356,10 +352,7 @@ def _read_line_info(reader: _Reader, code_size: int) -> tuple[int, ...]:
     for _ in range(intervals):
         last_line += reader.read_i32()
         absolute.append(last_line)
-    return tuple(
-        absolute[pc >> gap_log2] + relative[pc]
-        for pc in range(code_size)
-    )
+    return tuple(absolute[pc >> gap_log2] + relative[pc] for pc in range(code_size))
 
 
 def _read_debug_info(
@@ -381,24 +374,17 @@ def _read_debug_info(
             register=reader.read_u8(),
         )
         if item.start_pc > item.end_pc or item.end_pc > code_size:
-            raise reader.fail(
-                f"local range {item.start_pc}..{item.end_pc} is outside code"
-            )
+            raise reader.fail(f"local range {item.start_pc}..{item.end_pc} is outside code")
         if item.register >= max_stack_size:
-            raise reader.fail(
-                f"local register {item.register} exceeds stack size {max_stack_size}"
-            )
+            raise reader.fail(f"local register {item.register} exceeds stack size {max_stack_size}")
         locals_values.append(item)
 
     upvalue_count = reader.read_count("upvalue name")
     if upvalue_count > num_upvalues:
         raise reader.fail(
-            f"debug upvalue count {upvalue_count} exceeds prototype count "
-            f"{num_upvalues}"
+            f"debug upvalue count {upvalue_count} exceeds prototype count {num_upvalues}"
         )
-    upvalues = [
-        _read_string_ref(reader, strings) for _ in range(upvalue_count)
-    ]
+    upvalues = [_read_string_ref(reader, strings) for _ in range(upvalue_count)]
     upvalues.extend(None for _ in range(num_upvalues - upvalue_count))
     return tuple(locals_values), tuple(upvalues)
 
@@ -435,9 +421,7 @@ def _parse_type_info(
                 f"typed local register {register} exceeds stack size {max_stack_size}"
             )
         if end_pc > code_size:
-            raise reader.fail(
-                f"typed local range {start_pc}..{end_pc} is outside code"
-            )
+            raise reader.fail(f"typed local range {start_pc}..{end_pc} is outside code")
         typed_locals.append(
             TypedLocalInfo(
                 type_tag=type_tag,
@@ -470,9 +454,7 @@ def _read_proto(
     num_upvalues = reader.read_u8()
     is_vararg = bool(reader.read_u8())
     if num_params > max_stack_size:
-        raise reader.fail(
-            f"parameter count {num_params} exceeds stack size {max_stack_size}"
-        )
+        raise reader.fail(f"parameter count {num_params} exceeds stack size {max_stack_size}")
 
     flags = 0
     type_info = b""
@@ -500,9 +482,7 @@ def _read_proto(
     )
 
     constant_count = reader.read_count("constant")
-    constants = tuple(
-        _read_constant(reader, strings, version) for _ in range(constant_count)
-    )
+    constants = tuple(_read_constant(reader, strings, version) for _ in range(constant_count))
 
     child_count = reader.read_count("child prototype")
     child_proto_ids = tuple(reader.read_varuint() for _ in range(child_count))
@@ -617,9 +597,7 @@ def _validate_constant_graph(proto: LuauProto, proto_count: int) -> None:
                         f"prototype {proto.proto_id} table constant K{index} "
                         f"references invalid value constant {item}"
                     )
-        elif constant.kind == "class_shape" and isinstance(
-            value, ClassShapeConstant
-        ):
+        elif constant.kind == "class_shape" and isinstance(value, ClassShapeConstant):
             members = (
                 value.class_name_constant,
                 *value.property_name_constants,
@@ -704,11 +682,7 @@ def _validate_instruction_constants(
     elif name == "FASTCALL2K":
         _require_constant(proto, instruction.aux or 0, instruction)
     elif name in {"JUMPXEQKN", "JUMPXEQKS"}:
-        kinds = (
-            frozenset({"number", "integer"})
-            if name == "JUMPXEQKN"
-            else frozenset({"string"})
-        )
+        kinds = frozenset({"number", "integer"}) if name == "JUMPXEQKN" else frozenset({"string"})
         _require_constant(proto, (instruction.aux or 0) & 0xFFFFFF, instruction, kinds)
     elif name == "NEWCLASS":
         _require_constant(
@@ -763,8 +737,7 @@ def _validate_proto_code(
             child_id = proto.child_proto_ids[child_slot]
             if not 0 <= child_id < len(protos):
                 raise BytecodeFormatError(
-                    f"prototype {proto.proto_id} references invalid child "
-                    f"prototype {child_id}"
+                    f"prototype {proto.proto_id} references invalid child prototype {child_id}"
                 )
             expected = protos[child_id].num_upvalues
             capture_pc = instruction.pc + 1
@@ -795,14 +768,12 @@ def _validate_proto_code(
     for child_id in proto.child_proto_ids:
         if not 0 <= child_id < len(protos):
             raise BytecodeFormatError(
-                f"prototype {proto.proto_id} references invalid child "
-                f"prototype {child_id}"
+                f"prototype {proto.proto_id} references invalid child prototype {child_id}"
             )
     for pc in proto.feedback_pcs:
         if pc not in instruction_pcs:
             raise BytecodeFormatError(
-                f"prototype {proto.proto_id} feedback slot references invalid "
-                f"instruction word {pc}"
+                f"prototype {proto.proto_id} feedback slot references invalid instruction word {pc}"
             )
 
 
@@ -888,9 +859,7 @@ def parse_bytecode(data: bytes) -> LuauBytecodeModule:
 
     types_version = reader.read_u8() if version >= 4 else 0
     if version >= 4 and types_version not in (1, 2, 3):
-        raise reader.fail(
-            f"unsupported Luau type information version {types_version}"
-        )
+        raise reader.fail(f"unsupported Luau type information version {types_version}")
 
     string_count = reader.read_count("string")
     strings = tuple(
@@ -909,15 +878,11 @@ def parse_bytecode(data: bytes) -> LuauBytecodeModule:
             if userdata_index == 0:
                 break
             if userdata_index in seen_indices:
-                raise reader.fail(
-                    f"duplicate userdata type index {userdata_index}"
-                )
+                raise reader.fail(f"duplicate userdata type index {userdata_index}")
             seen_indices.add(userdata_index)
             name = _read_string_ref(reader, strings)
             if name is None:
-                raise reader.fail(
-                    f"userdata type index {userdata_index} has no name"
-                )
+                raise reader.fail(f"userdata type index {userdata_index} has no name")
             userdata_types.append((userdata_index, name))
 
     proto_count = reader.read_count("prototype")

@@ -640,13 +640,13 @@ class _FunctionLifter:
         labels: set[int] = set()
         structured_targets = set(self.while_headers)
         structured_targets.update(self.repeat_starts)
-        for region in self.if_else_regions.values():
-            structured_targets.add(region.else_pc)
-            structured_targets.add(region.end_pc)
-        for region in self.active_phi_headers.values():
-            structured_targets.add(region.then_block)
-            structured_targets.add(region.else_block)
-            structured_targets.add(region.join_pc)
+        for if_region in self.if_else_regions.values():
+            structured_targets.add(if_region.else_pc)
+            structured_targets.add(if_region.end_pc)
+        for phi_region in self.active_phi_headers.values():
+            structured_targets.add(phi_region.then_block)
+            structured_targets.add(phi_region.else_block)
+            structured_targets.add(phi_region.join_pc)
         for chain in self.active_boolean_chains.values():
             structured_targets.add(chain.body_start)
             structured_targets.add(chain.false_start)
@@ -1000,7 +1000,7 @@ class _FunctionLifter:
             elif name == "JUMPXEQKB":
                 rhs = LiteralExpr("true" if (instruction.aux or 0) & 1 else "false")
             else:
-                rhs = source_expr(
+                rhs: Expr = source_expr(
                     _constant_expr(
                         self.proto,
                         (instruction.aux or 0) & 0xFFFFFF,
@@ -1516,9 +1516,15 @@ class _FunctionLifter:
                 else None
             )
             phi_region = self.active_phi_headers.get(pc)
-            if phi_region is not None and condition_expression is not None:
-                self.phi_conditions[pc] = condition_expression
-                return
+            if phi_region is not None:
+                if phi_region.condition_operator is not None:
+                    condition_expression = self._boolean_chain_expression(
+                        phi_region.condition_pcs,
+                        phi_region.condition_operator,
+                    )
+                if condition_expression is not None:
+                    self.phi_conditions[pc] = condition_expression
+                    return
             chain = self.active_boolean_chains.get(pc)
             if chain is not None:
                 combined = self._boolean_chain_expression(

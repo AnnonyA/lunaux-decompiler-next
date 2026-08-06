@@ -1,18 +1,17 @@
 name: Apply symbol recovery v0.10 corrections
 
 on:
-  push:
+  pull_request:
     branches:
-      - feature/symbol-recovery-v010
-    paths:
-      - "scripts/apply_symbol_recovery_v010.py"
-      - ".github/workflows/apply-symbol-recovery-v010.yml"
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   apply:
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

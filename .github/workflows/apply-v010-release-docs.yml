@@ -1,4 +1,4 @@
-name: Apply v0.10 release documentation
+name: Apply v0.10 recovery release documentation
 
 on:
   pull_request:

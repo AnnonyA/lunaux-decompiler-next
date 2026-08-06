@@ -29,6 +29,7 @@ _CONDITIONAL_OPS = frozenset(
         "JUMPXEQKS",
     }
 )
+_IGNORED_OPS = frozenset({"NOP", "COVERAGE"})
 _UNCONDITIONAL_JUMPS = frozenset({"JUMP", "JUMPBACK", "JUMPX"})
 _FOR_OPS = frozenset(
     {
@@ -108,11 +109,10 @@ def _group_loops(loops: Sequence[NaturalLoop]) -> tuple[NaturalLoop, ...]:
         for member in members:
             body.update(member.body)
             exits.update(member.exits)
-        latch = max(member.latch for member in members)
         merged.append(
             NaturalLoop(
                 header=header,
-                latch=latch,
+                latch=max(member.latch for member in members),
                 body=frozenset(body),
                 exits=frozenset(exits),
             )
@@ -141,6 +141,16 @@ def _contains_for_loop(
         instruction.name in _FOR_OPS
         for block_start in body
         for instruction in analysis.block_by_start[block_start].instructions
+    )
+
+
+def _condition_only(block: BasicBlock) -> bool:
+    terminator = block.terminator
+    if terminator is None or terminator.name not in _CONDITIONAL_OPS:
+        return False
+    return all(
+        instruction is terminator or instruction.name in _IGNORED_OPS
+        for instruction in block.instructions
     )
 
 
@@ -177,14 +187,6 @@ def _edge_kind(
     if fallthrough == target:
         return "fallthrough"
     return None
-
-
-def _terminator_pc(
-    analysis: ControlFlowAnalysis,
-    block_start: int,
-) -> int | None:
-    terminator = analysis.block_by_start[block_start].terminator
-    return terminator.pc if terminator is not None else None
 
 
 def _latch_blocks(
@@ -236,21 +238,21 @@ def _classify_region(
     continue_target = header
     kind: LoopKind
 
-    if header_terminator is not None and header_terminator.name in _CONDITIONAL_OPS:
+    if _condition_only(header_block):
+        assert header_terminator is not None
         taken, fallthrough = _branch_edges(analysis, header_block)
         inside = [target for target in (taken, fallthrough) if target in body and target != header]
         outside = [
             target for target in (taken, fallthrough) if target is not None and target not in body
         ]
-        if len(inside) == 1 and len(outside) == 1:
-            if close_pc is None or close_pc != outside[0]:
-                return None
-            kind = "while"
-            body_start = inside[0]
-            condition_pc = header_terminator.pc
-            condition_block = header
-        else:
+        if len(inside) != 1 or len(outside) != 1:
             return None
+        if close_pc is None or close_pc != outside[0]:
+            return None
+        kind = "while"
+        body_start = inside[0]
+        condition_pc = header_terminator.pc
+        condition_block = header
     else:
         conditional_latches = []
         for latch_start in latch_blocks:
@@ -284,6 +286,9 @@ def _classify_region(
     backedge_pcs: set[int] = set()
     break_pcs: set[int] = set()
     continue_pcs: set[int] = set()
+    condition_sources = {condition_block} if condition_block is not None else set()
+    if kind == "while":
+        condition_sources.add(header)
 
     for source in body:
         block = analysis.block_by_start[source]
@@ -297,13 +302,10 @@ def _classify_region(
                     backedge_pcs.add(terminator.pc)
                 elif source != condition_block:
                     continue_pcs.add(terminator.pc)
-            elif target == close_pc:
-                if source not in {header, condition_block}:
-                    break_pcs.add(terminator.pc)
+            elif target == close_pc and source not in condition_sources:
+                break_pcs.add(terminator.pc)
 
-    if kind == "repeat" and condition_pc is not None:
-        backedge_pcs.add(condition_pc)
-    if kind == "while" and condition_pc is not None:
+    if kind in {"repeat", "while"} and condition_pc is not None:
         backedge_pcs.add(condition_pc)
 
     return AdvancedLoopRegion(

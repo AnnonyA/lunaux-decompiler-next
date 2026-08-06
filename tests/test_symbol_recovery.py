@@ -125,7 +125,7 @@ def test_parameter_names_use_numbered_native_type_families() -> None:
         0: "num1",
         1: "bool1",
         2: "str1",
-        3: "arg4",
+        3: "arg1",
         4: "vec1",
         5: "buf1",
     }

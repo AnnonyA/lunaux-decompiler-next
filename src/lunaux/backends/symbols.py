@@ -632,6 +632,30 @@ def build_symbol_recovery(
             add_definition_type(pc, instruction.a, "class", 94, "NEWCLASS result")
         elif name in {"CALL", "CALLFB"}:
             previous = previous_by_next_pc.get(pc)
+            if (
+                previous is None
+                or previous.name not in {"NAMECALL", "NAMECALLUDATA"}
+                or previous.a != instruction.a
+            ):
+                previous = None
+                for candidate in reversed(instructions):
+                    if candidate.pc >= pc:
+                        continue
+                    if candidate.name in {
+                        "CALL",
+                        "CALLFB",
+                        "RETURN",
+                        "JUMP",
+                        "JUMPBACK",
+                        "JUMPX",
+                    }:
+                        break
+                    if (
+                        candidate.name in {"NAMECALL", "NAMECALLUDATA"}
+                        and candidate.a == instruction.a
+                    ):
+                        previous = candidate
+                        break
             method: str | None = None
             if (
                 previous is not None
@@ -787,6 +811,7 @@ def build_symbol_recovery(
 
     used_names: defaultdict[str, int] = defaultdict(int)
     family_counts: defaultdict[str, int] = defaultdict(int)
+    argument_count = 0
     generic_count = 0
     symbols: dict[SSAValue, RecoveredSymbol] = {}
 
@@ -806,8 +831,9 @@ def build_symbol_recovery(
             family = _type_family(best_type.text if best_type else None)
             if value.kind == "entry" and value.register < proto.num_params:
                 if family is None:
-                    base = f"arg{value.register + 1}"
-                    candidate = _Candidate(base, 36, "parameter position")
+                    argument_count += 1
+                    base = f"arg{argument_count}"
+                    candidate = _Candidate(base, 36, "untyped parameter family")
                 else:
                     family_base, numbered = family
                     family_counts[family_base] += 1

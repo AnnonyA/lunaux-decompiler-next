@@ -23,6 +23,13 @@ class DecompileOptions(BaseModel):
         default=True,
         alias="InlineSingleUseTemporaries",
     )
+    smart_variable_names: bool = Field(default=True, alias="SmartVariableNames")
+    infer_types: bool = Field(default=True, alias="InferTypes")
+    show_recovered_symbols: bool = Field(
+        default=False,
+        alias="ShowRecoveredSymbols",
+    )
+    recover_classes: bool = Field(default=True, alias="RecoverClasses")
     max_output_characters: int = Field(
         default=4_000_000,
         alias="MaxOutputCharacters",
@@ -40,4 +47,8 @@ class DecompileOptions(BaseModel):
             "PreserveForStep": self.preserve_for_step,
             "UseIfExpression": self.use_if_expression,
             "InlineSingleUseTemporaries": self.inline_single_use_temporaries,
+            "SmartVariableNames": self.smart_variable_names,
+            "InferTypes": self.infer_types,
+            "ShowRecoveredSymbols": self.show_recovered_symbols,
+            "RecoverClasses": self.recover_classes,
         }

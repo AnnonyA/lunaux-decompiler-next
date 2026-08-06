@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal
 
@@ -113,7 +113,7 @@ class SSAProgram:
     entry_values: Mapping[int, SSAValue]
     use_counts: Mapping[SSAValue, int]
     definitions: Mapping[tuple[int, int], SSAValue]
-    multi_values: SSAMultiValuePlan
+    multi_values: SSAMultiValuePlan = field(default_factory=SSAMultiValuePlan.empty)
 
     def instruction_at(self, pc: int) -> SSAInstruction | None:
         return self.instructions.get(pc)

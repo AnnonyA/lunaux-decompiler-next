@@ -165,6 +165,8 @@ State-machine regions have priority over loop, boolean-chain, phi-expression, an
 
 Advanced loops then run on the remaining CFG. Existing expression AST, SSA inlining, table reconstruction, class recovery, contextual functions, Roblox typing, and callback recovery continue to process instructions inside emitted loop and machine bodies.
 
+Cyclic CFGs also receive bounded flow-sensitive type analysis. When its worklist cannot converge within a budget proportional to the function graph, LunaUX discards that function's flow refinements and continues with conservative base typing instead of blocking or keeping a partial fixed point.
+
 ## Public API
 
 The loop pass exports:

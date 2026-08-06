@@ -9,11 +9,11 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
-path = Path("src/lunaux/backends/state_machine.py")
-text = path.read_text(encoding="utf-8")
+state_path = Path("src/lunaux/backends/state_machine.py")
+state_text = state_path.read_text(encoding="utf-8")
 
-text = replace_once(
-    text,
+state_text = replace_once(
+    state_text,
     '''        if selector.match_target not in loop_body:
             return None
 ''',
@@ -22,8 +22,8 @@ text = replace_once(
 ''',
     "selector target ownership",
 )
-text = replace_once(
-    text,
+state_text = replace_once(
+    state_text,
     '''    if block.start_pc not in loop_body:
         return None
 
@@ -33,8 +33,8 @@ text = replace_once(
 ''',
     "terminal case location",
 )
-text = replace_once(
-    text,
+state_text = replace_once(
+    state_text,
     '''    if target == dispatcher_header:
         if len(state_assignments) != 1:
 ''',
@@ -43,8 +43,8 @@ text = replace_once(
 ''',
     "transition case loop ownership",
 )
-text = replace_once(
-    text,
+state_text = replace_once(
+    state_text,
     '''def _exclusive_state_register(
     analysis: ControlFlowAnalysis,
     loop_body: frozenset[int],
@@ -57,8 +57,8 @@ text = replace_once(
 ''',
     "exclusive block parameter",
 )
-text = replace_once(
-    text,
+state_text = replace_once(
+    state_text,
     '''    for block_start in loop_body:
         for instruction in analysis.block_by_start[block_start].instructions:
 ''',
@@ -67,8 +67,36 @@ text = replace_once(
 ''',
     "exclusive block iteration",
 )
-text = replace_once(
-    text,
+state_text = replace_once(
+    state_text,
+    '''def _group_loops(loops: Sequence[NaturalLoop]) -> tuple[NaturalLoop, ...]:
+''',
+    '''def _group_loops(
+    analysis: ControlFlowAnalysis,
+    loops: Sequence[NaturalLoop],
+) -> tuple[NaturalLoop, ...]:
+''',
+    "state grouped loop signature",
+)
+state_text = replace_once(
+    state_text,
+    '''        body = frozenset(block for member in members for block in member.body)
+        exits = frozenset(edge for member in members for edge in member.exits)
+        result.append(
+''',
+    '''        body = frozenset(block for member in members for block in member.body)
+        exits = frozenset(
+            (source, target)
+            for source in body
+            for target in analysis.block_by_start[source].successors
+            if target not in body
+        )
+        result.append(
+''',
+    "state grouped loop exits",
+)
+state_text = replace_once(
+    state_text,
     '''    if not _exclusive_state_register(
         analysis,
         loop.body,
@@ -82,8 +110,8 @@ text = replace_once(
 ''',
     "owned case blocks",
 )
-text = replace_once(
-    text,
+state_text = replace_once(
+    state_text,
     '''            for block_start in loop.body
             for instruction in analysis.block_by_start[block_start].instructions
 ''',
@@ -92,5 +120,57 @@ text = replace_once(
 ''',
     "machine max pc blocks",
 )
+state_text = replace_once(
+    state_text,
+    '''        for loop in _group_loops(analysis.loops)
+''',
+    '''        for loop in _group_loops(analysis, analysis.loops)
+''',
+    "state grouped loop call",
+)
+state_path.write_text(state_text, encoding="utf-8")
 
-path.write_text(text, encoding="utf-8")
+loop_path = Path("src/lunaux/backends/advanced_loops.py")
+loop_text = loop_path.read_text(encoding="utf-8")
+loop_text = replace_once(
+    loop_text,
+    '''def _group_loops(loops: Sequence[NaturalLoop]) -> tuple[NaturalLoop, ...]:
+''',
+    '''def _group_loops(
+    analysis: ControlFlowAnalysis,
+    loops: Sequence[NaturalLoop],
+) -> tuple[NaturalLoop, ...]:
+''',
+    "advanced grouped loop signature",
+)
+loop_text = replace_once(
+    loop_text,
+    '''        body: set[int] = set()
+        exits: set[tuple[int, int]] = set()
+        for member in members:
+            body.update(member.body)
+            exits.update(member.exits)
+        merged.append(
+''',
+    '''        body: set[int] = set()
+        for member in members:
+            body.update(member.body)
+        exits = {
+            (source, target)
+            for source in body
+            for target in analysis.block_by_start[source].successors
+            if target not in body
+        }
+        merged.append(
+''',
+    "advanced grouped loop exits",
+)
+loop_text = replace_once(
+    loop_text,
+    '''        for loop in _group_loops(analysis.loops)
+''',
+    '''        for loop in _group_loops(analysis, analysis.loops)
+''',
+    "advanced grouped loop call",
+)
+loop_path.write_text(loop_text, encoding="utf-8")

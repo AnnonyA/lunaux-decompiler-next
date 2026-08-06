@@ -2,7 +2,7 @@
 
 A local Roblox Luau bytecode decompiler and disassembler with a native backend, the optional Unluau CLI, a portable Python engine, an HTTP API, a CLI, and Windows/Linux launchers.
 
-> **Version 0.11:** adds a reusable Roblox pattern registry, a pre-emission heuristic type engine, and safe non-adjacent temporary elimination.
+> **Version 0.12:** adds conservative phi elimination, boolean-chain reconstruction, and table-literal consolidation on top of the 0.11 semantic recovery pipeline.
 
 ## Engine chain
 
@@ -26,6 +26,9 @@ A crash, timeout, unsupported file, or empty result from one engine moves the re
 - Builds an AUX-aware control-flow graph with dominators, postdominators, dominance frontiers, branch joins, natural loops, and strongly connected components.
 - Computes register liveness, reaching definitions, reverse def-use chains, and conservative SSA phi placement.
 - Renames register definitions into versioned SSA values and resolves phi operands for each predecessor.
+- Converts validated two-branch phi diamonds into typed Luau `if ... then ... else ...` expressions.
+- Combines reducible short-circuit branch chains into `and` and `or` conditions without crossing side effects.
+- Consolidates straight-line `NEWTABLE` plus keyed, indexed, and `SETLIST` writes into table literals.
 - Eliminates safe adjacent single-use temporaries without duplicating evaluations or hiding named/typed debug locals.
 - Represents recovered unary, binary, table, field, index, call, and method expressions as immutable AST nodes.
 - Prints Luau expressions with formal precedence and associativity, including safe nested unary rendering.
@@ -36,6 +39,7 @@ A crash, timeout, unsupported file, or empty result from one engine moves the re
 - Infers conservative parameter, local, and return types from serialized type metadata plus data flow and known operation contracts.
 - Runs reusable opcode, property, method, constructor, and flow type heuristics before source emission.
 - Inlines single-use temporaries across short pure instruction gaps while blocking calls, mutations, branches, and source-register redefinitions.
+- Flushes pending table literals before calls, escapes, control flow, duplicate keys, dynamic keys, or ambiguous mutations.
 - Reconstructs supported v100 `NEWCLASS` and `NEWCLASSMEMBER` regions as Luau `class ... end` declarations.
 - Reconstructs common expressions, table access, calls, methods, returns, closures, numeric/generic loops, `while`/`repeat` regions, and `if`/`else` layouts using compatibility patterns plus whole-function CFG/SSA analysis.
 - Resolves modern userdata, class, fastcall, feedback, and proto operands in disassembly.

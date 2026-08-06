@@ -187,6 +187,7 @@ class MethodCallExpr(Expr):
 class TableField:
     key: Expr | None
     value: Expr
+    name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,7 +392,9 @@ def render_expression(expression: Expr) -> str:
         fields: list[str] = []
         for field in expression.fields:
             value = render_expression(field.value)
-            if field.key is None:
+            if field.name is not None and _identifier(field.name):
+                fields.append(f"{field.name} = {value}")
+            elif field.key is None:
                 fields.append(value)
             else:
                 fields.append(f"[{render_expression(field.key)}] = {value}")

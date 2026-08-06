@@ -13,6 +13,7 @@ from lunaux.backends.ast import (
     CallExpr,
     Expr,
     FieldExpr,
+    IfExpr,
     IndexExpr,
     LiteralExpr,
     MethodCallExpr,
@@ -42,7 +43,14 @@ from lunaux.backends.opcodes import (
 )
 from lunaux.backends.scopes import build_scope_tree
 from lunaux.backends.ssa import SSAValue, build_ssa
+from lunaux.backends.structuring import build_structured_recovery
 from lunaux.backends.symbols import SymbolRecovery, build_symbol_recovery
+from lunaux.backends.table_recovery import (
+    PendingTableLiteral,
+    is_table_write,
+    should_flush_tables_before,
+    table_write_target_register,
+)
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RESERVED = {
@@ -124,6 +132,10 @@ class _Options:
     show_line_defined: bool
     show_function_id: bool
     preserve_for_step: bool
+    use_if_expression: bool
+    recover_phi_expressions: bool
+    combine_boolean_conditions: bool
+    reconstruct_table_literals: bool
     inline_single_use_temporaries: bool
     smart_variable_names: bool
     infer_types: bool
@@ -138,6 +150,16 @@ class _Options:
             show_line_defined=options.get("ShowLineDefined", True),
             show_function_id=options.get("ShowFunctionId", False),
             preserve_for_step=options.get("PreserveForStep", False),
+            use_if_expression=options.get("UseIfExpression", True),
+            recover_phi_expressions=options.get("RecoverPhiExpressions", True),
+            combine_boolean_conditions=options.get(
+                "CombineBooleanConditions",
+                True,
+            ),
+            reconstruct_table_literals=options.get(
+                "ReconstructTableLiterals",
+                True,
+            ),
             inline_single_use_temporaries=options.get(
                 "InlineSingleUseTemporaries",
                 True,
@@ -424,6 +446,9 @@ class _FunctionLifter:
             len(proto.code),
             analysis=self.analysis,
         )
+        self.structured_plan = build_structured_recovery(self.ssa)
+        self.phi_conditions: dict[int, Expr] = {}
+        self.pending_tables: dict[SSAValue, PendingTableLiteral] = {}
         self.symbols: SymbolRecovery | None = None
         if (
             options.smart_variable_names
@@ -459,6 +484,38 @@ class _FunctionLifter:
         self.skip_jump_pcs: set[int] = set()
         self._analyze_control_flow()
         self._analyze_cfg_regions()
+        loop_condition_pcs = set(self.while_headers) | set(self.repeat_conditions)
+        phi_enabled = options.use_if_expression and options.recover_phi_expressions
+        self.active_phi_headers = (
+            dict(self.structured_plan.phi_by_header) if phi_enabled else {}
+        )
+        self.active_phi_joins = (
+            dict(self.structured_plan.phi_by_join) if phi_enabled else {}
+        )
+        self.captured_phi_values = (
+            self.structured_plan.captured_phi_values
+            if phi_enabled
+            else frozenset()
+        )
+        self.phi_definition_pcs = frozenset(
+            value.origin_pc
+            for value in self.captured_phi_values
+            if value.origin_pc is not None
+        )
+        self.active_boolean_chains = (
+            {
+                root: chain
+                for root, chain in self.structured_plan.boolean_by_root.items()
+                if not (set(chain.condition_pcs) & loop_condition_pcs)
+            }
+            if options.combine_boolean_conditions
+            else {}
+        )
+        self.active_structuring_skip_pcs: set[int] = set()
+        for region in self.active_phi_headers.values():
+            self.active_structuring_skip_pcs.update(region.skipped_pcs)
+        for chain in self.active_boolean_chains.values():
+            self.active_structuring_skip_pcs.update(chain.skipped_pcs)
         self.labels = self._collect_labels()
 
     def _analyze_control_flow(self) -> None:
@@ -586,6 +643,14 @@ class _FunctionLifter:
         for region in self.if_else_regions.values():
             structured_targets.add(region.else_pc)
             structured_targets.add(region.end_pc)
+        for region in self.active_phi_headers.values():
+            structured_targets.add(region.then_block)
+            structured_targets.add(region.else_block)
+            structured_targets.add(region.join_pc)
+        for chain in self.active_boolean_chains.values():
+            structured_targets.add(chain.body_start)
+            structured_targets.add(chain.false_start)
+            structured_targets.add(chain.join)
         for instruction in self.instructions:
             target = get_jump_target(instruction)
             if (
@@ -647,6 +712,9 @@ class _FunctionLifter:
     def _assign(self, register: int, expression: Expr | str, pc: int) -> None:
         resolved_expression = ensure_expr(expression)
         value = self.ssa.value_defined_at(pc, register)
+        if value is not None and value in self.captured_phi_values:
+            self.inline_expressions[value] = resolved_expression
+            return
         if (
             self.options.inline_single_use_temporaries
             and value is not None
@@ -708,6 +776,140 @@ class _FunctionLifter:
         for register, name in zip(registers, names, strict=True):
             self.register_names[register] = name
 
+    def _assign_phi_result(self, value: SSAValue, expression: Expr, pc: int) -> None:
+        if self.ssa.uses_of(value) <= 0:
+            return
+        binding = self.scope_tree.binding_for_register(value.register, pc)
+        if (
+            self.options.inline_single_use_temporaries
+            and self.ssa.uses_of(value) == 1
+            and binding is None
+        ):
+            self.inline_expressions[value] = expression
+            return
+        symbol = self.symbols.symbol_for(value) if self.symbols is not None else None
+        recovered_name = symbol.name if symbol is not None else None
+        fallback = self.register_names.get(value.register, f"v{value.register}")
+        name = _sanitize_identifier(
+            binding.name if binding is not None else recovered_name,
+            fallback,
+        )
+        type_name = symbol.type_name if symbol is not None else None
+        if type_name is None:
+            type_name = _local_type(
+                self.module,
+                self.proto,
+                value.register,
+                pc,
+            )
+        annotated = f"{name}: {type_name}" if type_name and type_name != "any" else name
+        prefix = "" if name in self.declared else "local "
+        self.out.line(
+            f"{prefix}{annotated} = {render_expression(expression)}",
+            statement=True,
+        )
+        self.declared.add(name)
+        self.register_names[value.register] = name
+
+    def _finalize_phi_regions(self, pc: int) -> None:
+        for region in self.active_phi_joins.get(pc, ()):
+            condition = self.phi_conditions.pop(region.condition_pc, None)
+            if condition is None:
+                continue
+            for assignment in region.assignments:
+                then_value = self.inline_expressions.pop(assignment.then_value, None)
+                else_value = self.inline_expressions.pop(assignment.else_value, None)
+                if then_value is None or else_value is None:
+                    continue
+                self._assign_phi_result(
+                    assignment.result,
+                    IfExpr(condition, then_value, else_value),
+                    pc,
+                )
+
+    def _flush_pending_table(self, pending: PendingTableLiteral) -> None:
+        self.pending_tables.pop(pending.value, None)
+        self._assign(
+            pending.register,
+            pending.expression(),
+            pending.definition_pc,
+        )
+
+    def _flush_pending_tables(self) -> None:
+        for pending in sorted(
+            tuple(self.pending_tables.values()),
+            key=lambda item: item.definition_pc,
+        ):
+            self._flush_pending_table(pending)
+
+    def _flush_tables_before(self, instruction: DecodedInstruction) -> None:
+        if not self.options.reconstruct_table_literals or not self.pending_tables:
+            return
+        registers = frozenset(
+            pending.register for pending in self.pending_tables.values()
+        )
+        if should_flush_tables_before(instruction, registers):
+            self._flush_pending_tables()
+
+    def _pending_table_for_write(
+        self,
+        instruction: DecodedInstruction,
+    ) -> PendingTableLiteral | None:
+        target = table_write_target_register(instruction)
+        if target is None:
+            return None
+        value = self.ssa.value_at_use(instruction.pc, target)
+        return self.pending_tables.get(value) if value is not None else None
+
+    def _record_table_write(self, instruction: DecodedInstruction) -> bool:
+        pending = self._pending_table_for_write(instruction)
+        if pending is None:
+            return False
+        pc = instruction.pc
+        success = False
+        if instruction.name in {"SETTABLEKS", "SETUDATAKS"}:
+            success = pending.add_named(
+                self._table_key(instruction),
+                self._ref_expr(instruction.a, pc),
+            )
+        elif instruction.name == "SETTABLEN":
+            success = pending.add_index(
+                instruction.c + 1,
+                self._ref_expr(instruction.a, pc),
+            )
+        elif instruction.name == "SETLIST" and instruction.c > 0:
+            count = instruction.c - 1
+            start_index = (instruction.aux or 0) + 1
+            entries = tuple(
+                (
+                    start_index + index,
+                    self._ref_expr(instruction.b + index, pc),
+                )
+                for index in range(count)
+            )
+            success = pending.add_indices(entries)
+        elif instruction.name == "SETTABLE":
+            key = self._ref_expr(instruction.c, pc)
+            if isinstance(key, LiteralExpr):
+                try:
+                    decoded = json.loads(key.text)
+                except (json.JSONDecodeError, TypeError):
+                    decoded = None
+                if isinstance(decoded, str):
+                    success = pending.add_named(
+                        decoded,
+                        self._ref_expr(instruction.a, pc),
+                    )
+                elif key.text.isdigit():
+                    success = pending.add_index(
+                        int(key.text),
+                        self._ref_expr(instruction.a, pc),
+                    )
+        if success:
+            return True
+        self._flush_pending_table(pending)
+        return False
+
     def _close_blocks(self, pc: int) -> None:
         if pc in self.else_transitions:
             end_pc = self.else_transitions.pop(pc)
@@ -761,35 +963,59 @@ class _FunctionLifter:
         )
         return CallExpr(function, args)
 
-    def _conditional_body(self, instruction: DecodedInstruction) -> str | None:
+    def _conditional_expr(self, instruction: DecodedInstruction) -> Expr | None:
         name = instruction.name
         if name == "JUMPIF":
-            return f"not {self._ref(instruction.a, instruction.pc)}"
+            return UnaryExpr("not", self._ref_expr(instruction.a, instruction.pc))
         if name == "JUMPIFNOT":
-            return self._ref(instruction.a, instruction.pc)
+            return self._ref_expr(instruction.a, instruction.pc)
         if name in _COMPARISON_FALLTHROUGH:
             rhs_register = (instruction.aux or 0) & 0xFF
-            return (
-                f"{self._ref(instruction.a, instruction.pc)} "
-                f"{_COMPARISON_FALLTHROUGH[name]} "
-                f"{self._ref(rhs_register, instruction.pc)}"
+            return BinaryExpr(
+                self._ref_expr(instruction.a, instruction.pc),
+                _COMPARISON_FALLTHROUGH[name],
+                self._ref_expr(rhs_register, instruction.pc),
             )
         if name.startswith("JUMPXEQK"):
             if name == "JUMPXEQKNIL":
-                rhs = "nil"
+                rhs = LiteralExpr("nil")
             elif name == "JUMPXEQKB":
-                rhs = "true" if (instruction.aux or 0) & 1 else "false"
+                rhs = LiteralExpr("true" if (instruction.aux or 0) & 1 else "false")
             else:
-                rhs = _constant_expr(
-                    self.proto,
-                    (instruction.aux or 0) & 0xFFFFFF,
+                rhs = source_expr(
+                    _constant_expr(
+                        self.proto,
+                        (instruction.aux or 0) & 0xFFFFFF,
+                    )
                 )
             fallthrough_operator = "==" if instruction.aux_not else "~="
-            return (
-                f"{self._ref(instruction.a, instruction.pc)} "
-                f"{fallthrough_operator} {rhs}"
+            return BinaryExpr(
+                self._ref_expr(instruction.a, instruction.pc),
+                fallthrough_operator,
+                rhs,
             )
         return None
+
+    def _conditional_body(self, instruction: DecodedInstruction) -> str | None:
+        expression = self._conditional_expr(instruction)
+        return render_expression(expression) if expression is not None else None
+
+    def _boolean_chain_expression(self, condition_pcs: tuple[int, ...], operator: str) -> Expr | None:
+        expressions: list[Expr] = []
+        for condition_pc in condition_pcs:
+            instruction = self.instruction_by_pc.get(condition_pc)
+            if instruction is None:
+                return None
+            expression = self._conditional_expr(instruction)
+            if expression is None:
+                return None
+            expressions.append(expression)
+        if not expressions:
+            return None
+        combined = expressions[0]
+        for expression in expressions[1:]:
+            combined = BinaryExpr(combined, operator, expression)
+        return combined
 
     def _handle_loop_prep(self, instruction: DecodedInstruction) -> bool:
         if instruction.name == "FORNPREP":
@@ -918,12 +1144,19 @@ class _FunctionLifter:
             self.out.line("-- upvalues: " + ", ".join(typed))
 
         for instruction in self.instructions:
+            self._finalize_phi_regions(instruction.pc)
+            self._flush_tables_before(instruction)
             self._close_blocks(instruction.pc)
             opened_loop = self._open_structured_loop(instruction)
             if instruction.pc in self.labels:
                 self.out.line(f"-- L{instruction.pc:04d}")
 
             if instruction.pc in self.class_plan.skipped_instruction_pcs:
+                continue
+            if (
+                instruction.pc in self.active_structuring_skip_pcs
+                and instruction.pc not in self.phi_definition_pcs
+            ):
                 continue
             if instruction.pc in self.repeat_conditions:
                 condition = self._conditional_body(instruction)
@@ -937,6 +1170,8 @@ class _FunctionLifter:
                 continue
             self._lift_instruction(instruction)
 
+        self._finalize_phi_regions(len(self.proto.code))
+        self._flush_pending_tables()
         self._close_blocks(len(self.proto.code))
         for target in sorted(self.block_closures):
             self._close_blocks(target)
@@ -984,6 +1219,12 @@ class _FunctionLifter:
         name = instruction.name
         pc = instruction.pc
         expression: Expr | str
+        if (
+            self.options.reconstruct_table_literals
+            and is_table_write(instruction)
+            and self._record_table_write(instruction)
+        ):
+            return
         if name in {"NOP", "BREAK", "COVERAGE", "NATIVECALL", "PREPVARARGS"}:
             return
         if name == "LOADNIL":
@@ -1123,7 +1364,16 @@ class _FunctionLifter:
                 )
             self._assign(instruction.a, expression, pc)
         elif name == "NEWTABLE":
-            self._assign(instruction.a, TableExpr(), pc)
+            value = self.ssa.value_defined_at(pc, instruction.a)
+            if self.options.reconstruct_table_literals and value is not None:
+                self.pending_tables[value] = PendingTableLiteral(
+                    value=value,
+                    register=instruction.a,
+                    definition_pc=pc,
+                )
+                self.register_names.setdefault(instruction.a, f"v{instruction.a}")
+            else:
+                self._assign(instruction.a, TableExpr(), pc)
         elif name == "DUPTABLE":
             self._assign(instruction.a, _constant_expr(self.proto, instruction.d), pc)
         elif name == "SETLIST":
@@ -1237,7 +1487,29 @@ class _FunctionLifter:
             return
         elif name in _CONDITIONAL_OPS:
             target = _jump_target(instruction)
-            condition = self._conditional_body(instruction)
+            condition_expression = self._conditional_expr(instruction)
+            condition = (
+                render_expression(condition_expression)
+                if condition_expression is not None
+                else None
+            )
+            phi_region = self.active_phi_headers.get(pc)
+            if phi_region is not None and condition_expression is not None:
+                self.phi_conditions[pc] = condition_expression
+                return
+            chain = self.active_boolean_chains.get(pc)
+            if chain is not None:
+                combined = self._boolean_chain_expression(
+                    chain.condition_pcs,
+                    chain.operator,
+                )
+                if combined is not None:
+                    self.out.open(f"if {render_expression(combined)} then")
+                    if chain.has_else:
+                        self.else_transitions[chain.false_start] = chain.join
+                    else:
+                        self.block_closures[chain.join].append("end")
+                    return
             region = self.if_else_regions.get(pc)
             if condition is None or target <= pc:
                 self.out.line(f"-- {name} to L{target:04d}")

@@ -149,7 +149,7 @@ def match_method_call(
             "CollectionService GetTagged literal pattern",
         )
 
-    fixed: Final[dict[str, tuple[str, str, int]]] = {
+    fixed: Final[dict[str, tuple[str, str | None, int]]] = {
         "GetPlayers": ("players", "{Player}", 84),
         "GetChildren": ("children", "{Instance}", 82),
         "GetDescendants": ("descendants", "{Instance}", 82),

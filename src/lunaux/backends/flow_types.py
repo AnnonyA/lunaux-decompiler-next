@@ -185,6 +185,26 @@ def _call_origin(
     return instruction
 
 
+def _canonical_value(
+    instructions_by_pc: Mapping[int, DecodedInstruction],
+    program: SSAProgram,
+    value: SSAValue | None,
+    seen: frozenset[SSAValue] = frozenset(),
+) -> SSAValue | None:
+    if value is None or value.origin_pc is None or value in seen:
+        return value
+    instruction = instructions_by_pc.get(value.origin_pc)
+    if instruction is None or instruction.name != "MOVE":
+        return value
+    source = program.value_at_use(instruction.pc, instruction.b)
+    return _canonical_value(
+        instructions_by_pc,
+        program,
+        source,
+        seen | frozenset({value}),
+    )
+
+
 def _without_nil(type_name: str | None) -> str | None:
     if not type_name or type_name in {"any", "nil"}:
         return None
@@ -272,9 +292,13 @@ def _predicate_target(
     if namecall is not None:
         namecall_instruction, method = namecall
         if method == "IsA" and call.b > 2:
-            receiver = program.value_at_use(
-                namecall_instruction.pc,
-                namecall_instruction.b,
+            receiver = _canonical_value(
+                instructions_by_pc,
+                program,
+                program.value_at_use(
+                    namecall_instruction.pc,
+                    namecall_instruction.b,
+                ),
             )
             class_name = _literal_string(
                 proto,
@@ -288,7 +312,11 @@ def _predicate_target(
     path = _value_path(proto, instructions_by_pc, program, function)
     if path not in {"assert"} or call.b <= 1:
         return None
-    argument = program.value_at_use(call.pc, call.a + 1)
+    argument = _canonical_value(
+        instructions_by_pc,
+        program,
+        program.value_at_use(call.pc, call.a + 1),
+    )
     if argument is None:
         return None
     return argument, "truthy", "asserted value"
@@ -309,7 +337,11 @@ def _apply_post_instruction_refinement(
     path = _value_path(proto, instructions_by_pc, program, function)
     if path != "assert" or instruction.b <= 1:
         return
-    argument = program.value_at_use(instruction.pc, instruction.a + 1)
+    argument = _canonical_value(
+        instructions_by_pc,
+        program,
+        program.value_at_use(instruction.pc, instruction.a + 1),
+    )
     narrowed = _without_nil(base_types.get(argument)) if argument is not None else None
     _set_fact(environment, argument, narrowed, instruction.pc, "assert removes nil")
 
@@ -334,7 +366,11 @@ def _branch_environments(
         return result
 
     if instruction.name == "JUMPXEQKNIL":
-        nil_value = program.value_at_use(instruction.pc, instruction.a)
+        nil_value = _canonical_value(
+            instructions_by_pc,
+            program,
+            program.value_at_use(instruction.pc, instruction.a),
+        )
         equality_block = fallthrough if instruction.aux_not else taken
         non_nil_block = taken if instruction.aux_not else fallthrough
         _set_fact(
@@ -356,8 +392,16 @@ def _branch_environments(
 
     if instruction.name in {"JUMPIFEQ", "JUMPIFNOTEQ"}:
         rhs_register = (instruction.aux or 0) & 0xFF
-        left = program.value_at_use(instruction.pc, instruction.a)
-        right = program.value_at_use(instruction.pc, rhs_register)
+        left = _canonical_value(
+            instructions_by_pc,
+            program,
+            program.value_at_use(instruction.pc, instruction.a),
+        )
+        right = _canonical_value(
+            instructions_by_pc,
+            program,
+            program.value_at_use(instruction.pc, rhs_register),
+        )
         left_origin = (
             instructions_by_pc.get(left.origin_pc) if left and left.origin_pc is not None else None
         )
@@ -392,7 +436,11 @@ def _branch_environments(
             function = program.value_at_use(call.pc, call.a)
             path = _value_path(proto, instructions_by_pc, program, function)
             if path in {"type", "typeof"} and call.b > 1:
-                argument = program.value_at_use(call.pc, call.a + 1)
+                argument = _canonical_value(
+                    instructions_by_pc,
+                    program,
+                    program.value_at_use(call.pc, call.a + 1),
+                )
                 equality_block = fallthrough if instruction.aux_not else taken
                 _set_fact(
                     result[equality_block],
@@ -404,7 +452,11 @@ def _branch_environments(
         return result
 
     if instruction.name in {"JUMPIF", "JUMPIFNOT"}:
-        condition_value = program.value_at_use(instruction.pc, instruction.a)
+        condition_value = _canonical_value(
+            instructions_by_pc,
+            program,
+            program.value_at_use(instruction.pc, instruction.a),
+        )
         truth_block = taken if instruction.name == "JUMPIF" else fallthrough
         predicate = _predicate_target(
             proto,

@@ -571,12 +571,15 @@ def build_symbol_recovery(
                     "known import type",
                 )
         elif name in {"GETTABLEKS", "GETUDATAKS"}:
-            index = (
+            field_index = (
                 instruction.userdata_constant_index
                 if name == "GETUDATAKS"
                 else instruction.aux
             )
-            key = _constant_string(proto, index if index is not None else -1)
+            key = _constant_string(
+                proto,
+                field_index if field_index is not None else -1,
+            )
             add_definition_name(pc, instruction.a, key, 68, "field name evidence")
             add_definition_type(
                 pc,
@@ -638,10 +641,10 @@ def build_symbol_recovery(
                 or previous.a != instruction.a
             ):
                 previous = None
-                for candidate in reversed(instructions):
-                    if candidate.pc >= pc:
+                for previous_instruction in reversed(instructions):
+                    if previous_instruction.pc >= pc:
                         continue
-                    if candidate.name in {
+                    if previous_instruction.name in {
                         "CALL",
                         "CALLFB",
                         "RETURN",
@@ -651,10 +654,11 @@ def build_symbol_recovery(
                     }:
                         break
                     if (
-                        candidate.name in {"NAMECALL", "NAMECALLUDATA"}
-                        and candidate.a == instruction.a
+                        previous_instruction.name
+                        in {"NAMECALL", "NAMECALLUDATA"}
+                        and previous_instruction.a == instruction.a
                     ):
-                        previous = candidate
+                        previous = previous_instruction
                         break
             method: str | None = None
             if (
@@ -833,12 +837,16 @@ def build_symbol_recovery(
                 if family is None:
                     argument_count += 1
                     base = f"arg{argument_count}"
-                    candidate = _Candidate(base, 36, "untyped parameter family")
+                    generated_name = _Candidate(
+                        base,
+                        36,
+                        "untyped parameter family",
+                    )
                 else:
                     family_base, numbered = family
                     family_counts[family_base] += 1
                     suffix = family_counts[family_base] if numbered else ""
-                    candidate = _Candidate(
+                    generated_name = _Candidate(
                         f"{family_base}{suffix}",
                         58,
                         "generated from parameter type",
@@ -848,7 +856,7 @@ def build_symbol_recovery(
                 family_base, numbered = family
                 family_counts[family_base] += 1
                 suffix = family_counts[family_base] if numbered else ""
-                candidate = _Candidate(
+                generated_name = _Candidate(
                     f"{family_base}{suffix}",
                     48,
                     "generated from inferred type",
@@ -856,8 +864,13 @@ def build_symbol_recovery(
                 )
             else:
                 generic_count += 1
-                candidate = _Candidate(f"var{generic_count}", 20, "generic fallback", True)
-            best_name = candidate
+                generated_name = _Candidate(
+                    f"var{generic_count}",
+                    20,
+                    "generic fallback",
+                    True,
+                )
+            best_name = generated_name
 
         base_name = best_name.text
         used_names[base_name] += 1

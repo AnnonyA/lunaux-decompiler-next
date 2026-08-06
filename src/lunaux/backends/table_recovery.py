@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Final
 
 from lunaux.backends.analysis import register_access
-from lunaux.backends.ast import Expr, LiteralExpr, TableExpr, TableField
+from lunaux.backends.ast import Expr, LiteralExpr, TableExpr, TableField, render_expression
 from lunaux.backends.opcodes import DecodedInstruction
 from lunaux.backends.ssa import SSAValue
 
@@ -50,14 +50,30 @@ _SAFE_GAP_OPS: Final[frozenset[str]] = frozenset(
         "LENGTH",
         "CONCAT",
         "NEWTABLE",
+        "DUPTABLE",
     }
 )
+
+TableIdentity = tuple[str, str | int]
 
 
 @dataclass(frozen=True, slots=True)
 class TableEntry:
-    key: str | int
+    key: Expr | None
     value: Expr
+    name: str | None = None
+    array_index: int | None = None
+    dependencies: frozenset[SSAValue] = frozenset()
+
+    @property
+    def identity(self) -> TableIdentity:
+        if self.name is not None:
+            return ("name", self.name)
+        if self.array_index is not None:
+            return ("index", self.array_index)
+        if self.key is None:
+            return ("open", "tail")
+        return ("expr", render_expression(self.key))
 
 
 @dataclass(slots=True)
@@ -65,59 +81,178 @@ class PendingTableLiteral:
     value: SSAValue
     register: int
     definition_pc: int
+    assignment_pc: int | None = None
+    template_kind: str | None = None
     entries: list[TableEntry] = field(default_factory=list)
-    _keys: set[str | int] = field(default_factory=set)
+    open_tail: TableEntry | None = None
+    dependencies: set[SSAValue] = field(default_factory=set)
+    contained_values: set[SSAValue] = field(default_factory=set)
+    _positions: dict[TableIdentity, int] = field(default_factory=dict)
 
-    def add_named(self, key: str, value: Expr) -> bool:
-        if key in self._keys:
+    def __post_init__(self) -> None:
+        self.contained_values.add(self.value)
+
+    @property
+    def emit_pc(self) -> int:
+        return self.assignment_pc if self.assignment_pc is not None else self.definition_pc
+
+    @property
+    def dependency_registers(self) -> frozenset[int]:
+        return frozenset(value.register for value in self.dependencies)
+
+    def rebind(self, value: SSAValue, register: int, pc: int) -> None:
+        previous = self.value
+        self.value = value
+        self.register = register
+        self.assignment_pc = pc
+        self.contained_values.discard(previous)
+        self.contained_values.add(value)
+
+    def can_adopt(self, child: PendingTableLiteral) -> bool:
+        if child is self:
             return False
-        self._keys.add(key)
-        self.entries.append(TableEntry(key=key, value=value))
+        if self.value in child.contained_values:
+            return False
+        return child.value not in self.contained_values
+
+    def adopt(self, child: PendingTableLiteral) -> bool:
+        if not self.can_adopt(child):
+            return False
+        self.dependencies.update(child.dependencies)
+        self.contained_values.update(child.contained_values)
         return True
 
-    def add_index(self, index: int, value: Expr) -> bool:
-        if index <= 0 or index in self._keys:
+    def _store(self, entry: TableEntry) -> bool:
+        if self.open_tail is not None:
             return False
-        self._keys.add(index)
-        self.entries.append(TableEntry(key=index, value=value))
+        position = self._positions.get(entry.identity)
+        if position is None:
+            self._positions[entry.identity] = len(self.entries)
+            self.entries.append(entry)
+        else:
+            self.entries[position] = entry
+        self.dependencies.update(entry.dependencies)
         return True
 
-    def add_indices(self, entries: tuple[tuple[int, Expr], ...]) -> bool:
-        indices = tuple(index for index, _value in entries)
-        if any(index <= 0 for index in indices):
+    def add_named(
+        self,
+        key: str,
+        value: Expr,
+        dependencies: frozenset[SSAValue] = frozenset(),
+    ) -> bool:
+        return self._store(
+            TableEntry(
+                key=LiteralExpr(json.dumps(key, ensure_ascii=False)),
+                value=value,
+                name=key,
+                dependencies=dependencies,
+            )
+        )
+
+    def add_index(
+        self,
+        index: int,
+        value: Expr,
+        dependencies: frozenset[SSAValue] = frozenset(),
+    ) -> bool:
+        if index <= 0:
             return False
-        if len(set(indices)) != len(indices):
+        return self._store(
+            TableEntry(
+                key=LiteralExpr(str(index)),
+                value=value,
+                array_index=index,
+                dependencies=dependencies,
+            )
+        )
+
+    def add_dynamic(
+        self,
+        key: Expr,
+        value: Expr,
+        dependencies: frozenset[SSAValue] = frozenset(),
+    ) -> bool:
+        if isinstance(key, LiteralExpr):
+            try:
+                decoded = json.loads(key.text)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                decoded = None
+            if isinstance(decoded, str):
+                return self.add_named(decoded, value, dependencies)
+            if isinstance(decoded, int) and not isinstance(decoded, bool) and decoded > 0:
+                return self.add_index(decoded, value, dependencies)
+            if (
+                isinstance(decoded, float)
+                and decoded.is_integer()
+                and decoded > 0
+            ):
+                return self.add_index(int(decoded), value, dependencies)
+        return self._store(
+            TableEntry(
+                key=key,
+                value=value,
+                dependencies=dependencies,
+            )
+        )
+
+    def add_indices(
+        self,
+        entries: tuple[tuple[int, Expr, frozenset[SSAValue]], ...],
+    ) -> bool:
+        if self.open_tail is not None or any(index <= 0 for index, _value, _deps in entries):
             return False
-        if any(index in self._keys for index in indices):
+        for index, value, dependencies in entries:
+            if not self.add_index(index, value, dependencies):
+                return False
+        return True
+
+    def can_add_open_tail(self, start_index: int) -> bool:
+        if self.open_tail is not None or start_index <= 0:
             return False
-        for index, value in entries:
-            self._keys.add(index)
-            self.entries.append(TableEntry(key=index, value=value))
+        numeric_indices = {
+            entry.array_index
+            for entry in self.entries
+            if entry.array_index is not None
+        }
+        return numeric_indices == set(range(1, start_index))
+
+    def add_open_tail(
+        self,
+        start_index: int,
+        value: Expr,
+        dependencies: frozenset[SSAValue] = frozenset(),
+    ) -> bool:
+        if not self.can_add_open_tail(start_index):
+            return False
+        self.open_tail = TableEntry(
+            key=None,
+            value=value,
+            array_index=start_index,
+            dependencies=dependencies,
+        )
+        self.dependencies.update(dependencies)
         return True
 
     def expression(self) -> TableExpr:
         fields: list[TableField] = []
         next_array_index = 1
         for entry in self.entries:
-            if isinstance(entry.key, str):
+            if entry.name is not None:
                 fields.append(
                     TableField(
-                        key=LiteralExpr(json.dumps(entry.key, ensure_ascii=False)),
+                        key=entry.key,
                         value=entry.value,
-                        name=entry.key,
+                        name=entry.name,
                     )
                 )
                 continue
-            if entry.key == next_array_index:
+            if entry.array_index == next_array_index:
                 fields.append(TableField(key=None, value=entry.value))
                 next_array_index += 1
-            else:
-                fields.append(
-                    TableField(
-                        key=LiteralExpr(str(entry.key)),
-                        value=entry.value,
-                    )
-                )
+                continue
+            fields.append(TableField(key=entry.key, value=entry.value))
+        if self.open_tail is not None:
+            fields.append(TableField(key=None, value=self.open_tail.value))
         return TableExpr(tuple(fields))
 
 
@@ -129,21 +264,37 @@ def table_write_target_register(instruction: DecodedInstruction) -> int | None:
     return None
 
 
+def table_write_source_registers(instruction: DecodedInstruction) -> frozenset[int]:
+    if instruction.name == "SETTABLE":
+        return frozenset({instruction.a, instruction.c})
+    if instruction.name in {"SETTABLEKS", "SETUDATAKS", "SETTABLEN"}:
+        return frozenset({instruction.a})
+    if instruction.name == "SETLIST":
+        count = instruction.c - 1 if instruction.c > 0 else 1
+        return frozenset(range(instruction.b, instruction.b + count))
+    return frozenset()
+
+
 def is_table_write(instruction: DecodedInstruction) -> bool:
     return instruction.name in _TABLE_WRITE_OPS
+
+
+def is_safe_table_gap(instruction: DecodedInstruction) -> bool:
+    return instruction.name in _SAFE_GAP_OPS
 
 
 def should_flush_tables_before(
     instruction: DecodedInstruction,
     pending_registers: frozenset[int],
+    dependency_registers: frozenset[int] = frozenset(),
 ) -> bool:
     if not pending_registers:
         return False
     access = register_access(instruction)
     target = table_write_target_register(instruction)
-    pending_uses = access.uses & pending_registers
-    if access.definitions & pending_registers:
+    if access.definitions & (pending_registers | dependency_registers):
         return True
+    pending_uses = access.uses & pending_registers
     if pending_uses:
         if target is None or target not in pending_registers:
             return True
@@ -152,4 +303,4 @@ def should_flush_tables_before(
         return False
     if instruction.name in _TABLE_WRITE_OPS:
         return True
-    return instruction.name not in _SAFE_GAP_OPS
+    return not is_safe_table_gap(instruction)

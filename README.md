@@ -2,7 +2,7 @@
 
 A local Roblox Luau bytecode decompiler and disassembler with a native backend, the optional Unluau CLI, a portable Python engine, an HTTP API, a CLI, and Windows/Linux launchers.
 
-> **Version 0.12:** adds conservative phi elimination, boolean-chain reconstruction, and table-literal consolidation on top of the 0.11 semantic recovery pipeline.
+> **Version 0.13:** expands table recovery into an ownership- and SSA-aware reconstruction pass for nested tables, templates, dynamic keys, deterministic overwrites, aliases, and open `SETLIST` tails.
 
 ## Engine chain
 
@@ -28,7 +28,7 @@ A crash, timeout, unsupported file, or empty result from one engine moves the re
 - Renames register definitions into versioned SSA values and resolves phi operands for each predecessor.
 - Converts validated two-branch phi diamonds into typed Luau `if ... then ... else ...` expressions.
 - Combines reducible short-circuit branch chains into `and` and `or` conditions without crossing side effects.
-- Consolidates straight-line `NEWTABLE` plus keyed, indexed, and `SETLIST` writes into table literals.
+- Reconstructs full table constructors from `NEWTABLE` and `DUPTABLE`, including nested tables, named/indexed/dynamic keys, fixed `SETLIST` ranges, and final open call or vararg tails.
 - Eliminates safe adjacent single-use temporaries without duplicating evaluations or hiding named/typed debug locals.
 - Represents recovered unary, binary, table, field, index, call, and method expressions as immutable AST nodes.
 - Prints Luau expressions with formal precedence and associativity, including safe nested unary rendering.
@@ -39,7 +39,7 @@ A crash, timeout, unsupported file, or empty result from one engine moves the re
 - Infers conservative parameter, local, and return types from serialized type metadata plus data flow and known operation contracts.
 - Runs reusable opcode, property, method, constructor, and flow type heuristics before source emission.
 - Inlines single-use temporaries across short pure instruction gaps while blocking calls, mutations, branches, and source-register redefinitions.
-- Flushes pending table literals before calls, escapes, control flow, duplicate keys, dynamic keys, or ambiguous mutations.
+- Tracks table ownership, aliases, contained tables, and SSA dependencies; it materializes constructors before escapes, cycles, dependency redefinitions, unsafe calls, control flow, or ambiguous stack-top writes.
 - Reconstructs supported v100 `NEWCLASS` and `NEWCLASSMEMBER` regions as Luau `class ... end` declarations.
 - Reconstructs common expressions, table access, calls, methods, returns, closures, numeric/generic loops, `while`/`repeat` regions, and `if`/`else` layouts using compatibility patterns plus whole-function CFG/SSA analysis.
 - Resolves modern userdata, class, fastcall, feedback, and proto operands in disassembly.
@@ -81,6 +81,35 @@ local function func(
     -- reconstructed body
 end
 ```
+
+### Full table reconstruction
+
+Version 0.13 treats table construction as an ownership problem instead of only an adjacent-instruction pattern. A child table is absorbed into its parent only when every use is either part of its own construction or the single parent insertion. Independent tables may be built in an interleaved instruction stream without forcing either constructor to close early.
+
+```luau
+local config = {
+    Name = "Sword",
+    Stats = {
+        Damage = 25,
+        Critical = true,
+    },
+    [dynamicKey] = dynamicValue,
+    "Fire",
+    collectMore(),
+}
+```
+
+Recovered constructors may include:
+
+- `SETTABLEKS` and `SETUDATAKS` named fields;
+- `SETTABLEN` and fixed `SETLIST` array ranges;
+- arbitrary `SETTABLE` keys rendered as `[expression] = value`;
+- `DUPTABLE` key templates and constant-valued templates;
+- deterministic overwrites before the table is observed;
+- single-use `MOVE` aliases;
+- a final multiple-return call or `...` tail when the open `SETLIST` range is contiguous.
+
+Self-references, shared children, calls that can observe pending state, noncontiguous open ranges, dependency redefinitions, and ambiguous escapes keep the conservative statement form.
 
 ### Class recovery
 
@@ -278,6 +307,9 @@ environment.LUNAUX_OPTIONS = environment.LUNAUX_OPTIONS or {
     ShowFunctionId = false,
     PreserveForStep = false,
     UseIfExpression = true,
+    RecoverPhiExpressions = true,
+    CombineBooleanConditions = true,
+    ReconstructTableLiterals = true,
     InlineSingleUseTemporaries = true,
     SmartVariableNames = true,
     InferTypes = true,
@@ -393,7 +425,14 @@ All decompiling options can be placed inside `LUNAUX_OPTIONS` or sent in the JSO
 | `ShowFunctionId` | `false` | Include the original function/prototype identifier. `ShowLineDefined` should also be enabled. |
 | `PreserveForStep` | `false` | Keep the explicit step in numeric loops, including a step of `1`. |
 | `UseIfExpression` | `true` | Prefer `if ... then ... else ...` expressions instead of equivalent `and`/`or` expressions. |
+| `RecoverPhiExpressions` | `true` | Convert validated two-way SSA phi diamonds into Luau `if` expressions. |
+| `CombineBooleanConditions` | `true` | Combine reducible short-circuit jump chains into `and` and `or`. |
+| `ReconstructTableLiterals` | `true` | Recover owned table-construction regions, including nested tables, templates, dynamic keys, aliases, overwrites, and supported `SETLIST` tails. |
 | `InlineSingleUseTemporaries` | `true` | Fold safe adjacent SSA temporaries into their single consumer. Disable for more literal register-oriented output. |
+| `SmartVariableNames` | `true` | Select names from debug metadata, SSA relationships, imports, fields, types, and Roblox API evidence. |
+| `InferTypes` | `true` | Infer conservative parameter, local, expression, and return types. |
+| `ShowRecoveredSymbols` | `false` | Emit comments describing recovered SSA names, types, and evidence. |
+| `RecoverClasses` | `true` | Reconstruct validated experimental class regions as Luau class syntax. |
 | `MaxOutputCharacters` | `4000000` | Maximum generated output length. Accepted range: 1,000 to 20,000,000 characters. |
 
 The exact effect of formatting options can vary by backend. Unsupported options are preserved for compatibility but may not change every engine's output.

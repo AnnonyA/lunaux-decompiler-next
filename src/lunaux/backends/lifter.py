@@ -47,8 +47,9 @@ from lunaux.backends.structuring import build_structured_recovery
 from lunaux.backends.symbols import SymbolRecovery, build_symbol_recovery
 from lunaux.backends.table_recovery import (
     PendingTableLiteral,
+    is_safe_table_gap,
     is_table_write,
-    should_flush_tables_before,
+    table_write_source_registers,
     table_write_target_register,
 )
 
@@ -449,6 +450,10 @@ class _FunctionLifter:
         self.structured_plan = build_structured_recovery(self.ssa)
         self.phi_conditions: dict[int, Expr] = {}
         self.pending_tables: dict[SSAValue, PendingTableLiteral] = {}
+        self.pending_open_table_values: dict[
+            int,
+            tuple[Expr, frozenset[SSAValue], int],
+        ] = {}
         self.symbols: SymbolRecovery | None = None
         if (
             options.smart_variable_names
@@ -475,6 +480,14 @@ class _FunctionLifter:
         self.previous_by_next_pc = {
             instruction.pc + instruction.size: instruction
             for instruction in self.instructions
+        }
+        self.next_instruction_by_pc = {
+            instruction.pc: next_instruction
+            for instruction, next_instruction in zip(
+                self.instructions,
+                self.instructions[1:],
+                strict=False,
+            )
         }
         self.while_headers: dict[int, tuple[int, DecodedInstruction]] = {}
         self.while_back_pcs: set[int] = set()
@@ -830,28 +843,29 @@ class _FunctionLifter:
                 )
 
     def _flush_pending_table(self, pending: PendingTableLiteral) -> None:
+        if self.pending_tables.get(pending.value) is not pending:
+            return
         self.pending_tables.pop(pending.value, None)
         self._assign(
             pending.register,
             pending.expression(),
-            pending.definition_pc,
+            pending.emit_pc,
         )
 
     def _flush_pending_tables(self) -> None:
         for pending in sorted(
             tuple(self.pending_tables.values()),
-            key=lambda item: item.definition_pc,
+            key=lambda item: (item.definition_pc, item.emit_pc),
         ):
             self._flush_pending_table(pending)
 
-    def _flush_tables_before(self, instruction: DecodedInstruction) -> None:
-        if not self.options.reconstruct_table_literals or not self.pending_tables:
-            return
-        registers = frozenset(
-            pending.register for pending in self.pending_tables.values()
-        )
-        if should_flush_tables_before(instruction, registers):
-            self._flush_pending_tables()
+    def _pending_table_for_register(
+        self,
+        pc: int,
+        register: int,
+    ) -> PendingTableLiteral | None:
+        value = self.ssa.value_at_use(pc, register)
+        return self.pending_tables.get(value) if value is not None else None
 
     def _pending_table_for_write(
         self,
@@ -860,8 +874,180 @@ class _FunctionLifter:
         target = table_write_target_register(instruction)
         if target is None:
             return None
-        value = self.ssa.value_at_use(instruction.pc, target)
-        return self.pending_tables.get(value) if value is not None else None
+        return self._pending_table_for_register(instruction.pc, target)
+
+    def _pending_table_for_move(
+        self,
+        instruction: DecodedInstruction,
+    ) -> PendingTableLiteral | None:
+        if instruction.name != "MOVE":
+            return None
+        source_value = self.ssa.value_at_use(instruction.pc, instruction.b)
+        destination_value = self.ssa.value_defined_at(instruction.pc, instruction.a)
+        if source_value is None or destination_value is None:
+            return None
+        pending = self.pending_tables.get(source_value)
+        if pending is None or self.ssa.uses_of(source_value) != 1:
+            return None
+        if instruction.a in pending.dependency_registers:
+            return None
+        return pending
+
+    def _open_table_parent_for_producer(
+        self,
+        instruction: DecodedInstruction,
+    ) -> PendingTableLiteral | None:
+        next_instruction = self.next_instruction_by_pc.get(instruction.pc)
+        if (
+            next_instruction is None
+            or next_instruction.name != "SETLIST"
+            or next_instruction.c != 0
+            or next_instruction.b != instruction.a
+        ):
+            return None
+        pending = self._pending_table_for_write(next_instruction)
+        if pending is None:
+            return None
+        access = self.analysis.register_accesses[instruction.pc]
+        if pending.register in access.uses:
+            return None
+        start_index = (next_instruction.aux or 0) + 1
+        return pending if pending.can_add_open_tail(start_index) else None
+
+    def _flush_tables_before(self, instruction: DecodedInstruction) -> None:
+        if not self.options.reconstruct_table_literals or not self.pending_tables:
+            return
+        access = self.analysis.register_accesses[instruction.pc]
+        target_pending = (
+            self._pending_table_for_write(instruction)
+            if is_table_write(instruction)
+            else None
+        )
+        transfer_pending = self._pending_table_for_move(instruction)
+        open_parent = (
+            self._open_table_parent_for_producer(instruction)
+            if instruction.name in {"CALL", "CALLFB", "GETVARARGS"}
+            else None
+        )
+        write_sources = (
+            table_write_source_registers(instruction)
+            if target_pending is not None
+            else frozenset()
+        )
+
+        for pending in sorted(
+            tuple(self.pending_tables.values()),
+            key=lambda item: (item.definition_pc, item.emit_pc),
+        ):
+            if pending is transfer_pending:
+                continue
+            if pending is target_pending:
+                continue
+            if pending is open_parent:
+                continue
+            if target_pending is not None and pending.register in write_sources:
+                continue
+            if access.definitions & (
+                frozenset({pending.register}) | pending.dependency_registers
+            ):
+                self._flush_pending_table(pending)
+                continue
+            if pending.register in access.uses:
+                self._flush_pending_table(pending)
+                continue
+            if is_table_write(instruction):
+                if target_pending is None:
+                    self._flush_pending_table(pending)
+                continue
+            if not is_safe_table_gap(instruction):
+                self._flush_pending_table(pending)
+
+    def _dependencies_for_value(
+        self,
+        value: SSAValue,
+        seen: frozenset[SSAValue] = frozenset(),
+    ) -> frozenset[SSAValue]:
+        if value in seen or value.kind != "instruction":
+            return frozenset({value})
+        if value not in self.inline_expressions or value.origin_pc is None:
+            return frozenset({value})
+        instruction = self.ssa.instruction_at(value.origin_pc)
+        if instruction is None:
+            return frozenset({value})
+        dependencies: set[SSAValue] = set()
+        next_seen = seen | frozenset({value})
+        for use in instruction.uses:
+            dependencies.update(
+                self._dependencies_for_value(use.value, next_seen)
+            )
+        return frozenset(dependencies)
+
+    def _table_value_can_inline(
+        self,
+        child: PendingTableLiteral,
+        consumer_pc: int,
+    ) -> bool:
+        accounted_uses = 0
+        for ssa_instruction in self.ssa.instructions.values():
+            matching_uses = tuple(
+                use
+                for use in ssa_instruction.uses
+                if use.value == child.value
+            )
+            if not matching_uses:
+                continue
+            accounted_uses += len(matching_uses)
+            instruction = ssa_instruction.instruction
+            target = table_write_target_register(instruction)
+            if instruction.pc == consumer_pc:
+                if (
+                    not is_table_write(instruction)
+                    or child.register
+                    not in table_write_source_registers(instruction)
+                ):
+                    return False
+                continue
+            if (
+                not is_table_write(instruction)
+                or target != child.register
+                or self.ssa.value_at_use(instruction.pc, target) != child.value
+            ):
+                return False
+        return accounted_uses == self.ssa.uses_of(child.value)
+
+    def _capture_register_expression(
+        self,
+        owner: PendingTableLiteral,
+        register: int,
+        pc: int,
+        *,
+        allow_nested: bool,
+    ) -> tuple[Expr, frozenset[SSAValue]] | None:
+        value = self.ssa.value_at_use(pc, register)
+        expression: Expr
+        child = self.pending_tables.get(value) if value is not None else None
+        if child is owner:
+            return None
+        if child is not None:
+            if (
+                allow_nested
+                and value is not None
+                and self._table_value_can_inline(child, pc)
+                and owner.can_adopt(child)
+            ):
+                self.pending_tables.pop(child.value, None)
+                expression = child.expression()
+                if not owner.adopt(child):
+                    return None
+                return expression, frozenset()
+            self._flush_pending_table(child)
+        expression = self._ref_expr(register, pc)
+        dependencies = (
+            self._dependencies_for_value(value)
+            if value is not None
+            else frozenset()
+        )
+        return expression, dependencies
 
     def _record_table_write(self, instruction: DecodedInstruction) -> bool:
         pending = self._pending_table_for_write(instruction)
@@ -869,64 +1055,168 @@ class _FunctionLifter:
             return False
         pc = instruction.pc
         target = table_write_target_register(instruction)
-        if (
-            target is not None
-            and instruction.name != "SETLIST"
-            and instruction.a == target
-        ):
+        source_registers = table_write_source_registers(instruction)
+        if target is not None and target in source_registers:
             self._flush_pending_table(pending)
             return False
-        if instruction.name == "SETLIST" and instruction.c > 0:
-            count = instruction.c - 1
-            if target is not None and target in range(
-                instruction.b,
-                instruction.b + count,
-            ):
-                self._flush_pending_table(pending)
-                return False
+
         success = False
         if instruction.name in {"SETTABLEKS", "SETUDATAKS"}:
-            success = pending.add_named(
-                self._table_key(instruction),
-                self._ref_expr(instruction.a, pc),
+            captured = self._capture_register_expression(
+                pending,
+                instruction.a,
+                pc,
+                allow_nested=True,
             )
+            if captured is not None:
+                value, dependencies = captured
+                success = pending.add_named(
+                    self._table_key(instruction),
+                    value,
+                    dependencies,
+                )
         elif instruction.name == "SETTABLEN":
-            success = pending.add_index(
-                instruction.c + 1,
-                self._ref_expr(instruction.a, pc),
+            captured = self._capture_register_expression(
+                pending,
+                instruction.a,
+                pc,
+                allow_nested=True,
             )
+            if captured is not None:
+                value, dependencies = captured
+                success = pending.add_index(
+                    instruction.c + 1,
+                    value,
+                    dependencies,
+                )
+        elif instruction.name == "SETTABLE":
+            captured_key = self._capture_register_expression(
+                pending,
+                instruction.c,
+                pc,
+                allow_nested=False,
+            )
+            captured_value = self._capture_register_expression(
+                pending,
+                instruction.a,
+                pc,
+                allow_nested=True,
+            )
+            if captured_key is not None and captured_value is not None:
+                key, key_dependencies = captured_key
+                value, value_dependencies = captured_value
+                success = pending.add_dynamic(
+                    key,
+                    value,
+                    key_dependencies | value_dependencies,
+                )
         elif instruction.name == "SETLIST" and instruction.c > 0:
             count = instruction.c - 1
             start_index = (instruction.aux or 0) + 1
-            entries = tuple(
-                (
-                    start_index + index,
-                    self._ref_expr(instruction.b + index, pc),
+            entries: list[tuple[int, Expr, frozenset[SSAValue]]] = []
+            for index in range(count):
+                captured = self._capture_register_expression(
+                    pending,
+                    instruction.b + index,
+                    pc,
+                    allow_nested=True,
                 )
-                for index in range(count)
+                if captured is None:
+                    break
+                value, dependencies = captured
+                entries.append((start_index + index, value, dependencies))
+            if len(entries) == count:
+                success = pending.add_indices(tuple(entries))
+        elif instruction.name == "SETLIST" and instruction.c == 0:
+            open_captured = self.pending_open_table_values.pop(
+                instruction.b,
+                None,
             )
-            success = pending.add_indices(entries)
-        elif instruction.name == "SETTABLE":
-            key = self._ref_expr(instruction.c, pc)
-            if isinstance(key, LiteralExpr):
-                try:
-                    decoded = json.loads(key.text)
-                except (json.JSONDecodeError, TypeError):
-                    decoded = None
-                if isinstance(decoded, str):
-                    success = pending.add_named(
-                        decoded,
-                        self._ref_expr(instruction.a, pc),
-                    )
-                elif key.text.isdigit():
-                    success = pending.add_index(
-                        int(key.text),
-                        self._ref_expr(instruction.a, pc),
-                    )
+            if open_captured is not None and open_captured[2] == pc:
+                value, dependencies, _consumer_pc = open_captured
+                start_index = (instruction.aux or 0) + 1
+                success = pending.add_open_tail(
+                    start_index,
+                    value,
+                    dependencies,
+                )
+                if success:
+                    self._flush_pending_table(pending)
+                    return True
+
         if success:
             return True
         self._flush_pending_table(pending)
         return False
+
+    def _transfer_pending_table(self, instruction: DecodedInstruction) -> bool:
+        pending = self._pending_table_for_move(instruction)
+        if pending is None:
+            return False
+        destination = self.ssa.value_defined_at(instruction.pc, instruction.a)
+        if destination is None:
+            return False
+        self.pending_tables.pop(pending.value, None)
+        pending.rebind(destination, instruction.a, instruction.pc)
+        self.pending_tables[destination] = pending
+        self.register_names.setdefault(instruction.a, f"v{instruction.a}")
+        return True
+
+    def _start_pending_table(
+        self,
+        instruction: DecodedInstruction,
+    ) -> PendingTableLiteral | None:
+        value = self.ssa.value_defined_at(instruction.pc, instruction.a)
+        if value is None:
+            return None
+        template_kind: str | None = None
+        pending = PendingTableLiteral(
+            value=value,
+            register=instruction.a,
+            definition_pc=instruction.pc,
+        )
+        if instruction.name == "DUPTABLE":
+            constant = _constant(self.proto, instruction.d)
+            if constant is None or constant.kind not in {"table", "table_with_constants"}:
+                return None
+            template_kind = constant.kind
+            pending.template_kind = template_kind
+            if constant.kind == "table_with_constants" and isinstance(
+                constant.value,
+                tuple,
+            ):
+                pairs = cast(tuple[tuple[int, int], ...], constant.value)
+                for key_index, value_index in pairs:
+                    if value_index < 0:
+                        continue
+                    key = source_expr(_constant_expr(self.proto, key_index))
+                    item = source_expr(_constant_expr(self.proto, value_index))
+                    if not pending.add_dynamic(key, item):
+                        return None
+        self.pending_tables[value] = pending
+        self.register_names.setdefault(instruction.a, f"v{instruction.a}")
+        return pending
+
+    def _capture_open_table_value(
+        self,
+        instruction: DecodedInstruction,
+        expression: Expr,
+    ) -> bool:
+        parent = self._open_table_parent_for_producer(instruction)
+        next_instruction = self.next_instruction_by_pc.get(instruction.pc)
+        if parent is None or next_instruction is None:
+            return False
+        dependencies = frozenset(
+            value
+            for register in self.analysis.register_accesses[instruction.pc].uses
+            if (value := self.ssa.value_at_use(instruction.pc, register)) is not None
+        )
+        self.pending_open_table_values[instruction.a] = (
+            expression,
+            dependencies,
+            next_instruction.pc,
+        )
+        return True
 
     def _close_blocks(self, pc: int) -> None:
         if pc in self.else_transitions:
@@ -1264,6 +1554,11 @@ class _FunctionLifter:
             index = instruction.aux if instruction.aux is not None else 0
             self._assign(instruction.a, _constant_expr(self.proto, index), pc)
         elif name == "MOVE":
+            if (
+                self.options.reconstruct_table_literals
+                and self._transfer_pending_table(instruction)
+            ):
+                return
             self._assign(instruction.a, self._ref_expr(instruction.b, pc), pc)
         elif name == "GETGLOBAL":
             self._assign(
@@ -1386,19 +1681,20 @@ class _FunctionLifter:
                     expression,
                 )
             self._assign(instruction.a, expression, pc)
-        elif name == "NEWTABLE":
-            value = self.ssa.value_defined_at(pc, instruction.a)
-            if self.options.reconstruct_table_literals and value is not None:
-                self.pending_tables[value] = PendingTableLiteral(
-                    value=value,
-                    register=instruction.a,
-                    definition_pc=pc,
+        elif name in {"NEWTABLE", "DUPTABLE"}:
+            if (
+                self.options.reconstruct_table_literals
+                and self._start_pending_table(instruction) is not None
+            ):
+                return
+            if name == "DUPTABLE":
+                self._assign(
+                    instruction.a,
+                    _constant_expr(self.proto, instruction.d),
+                    pc,
                 )
-                self.register_names.setdefault(instruction.a, f"v{instruction.a}")
             else:
                 self._assign(instruction.a, TableExpr(), pc)
-        elif name == "DUPTABLE":
-            self._assign(instruction.a, _constant_expr(self.proto, instruction.d), pc)
         elif name == "SETLIST":
             if instruction.c == 0:
                 self.out.line(
@@ -1456,6 +1752,11 @@ class _FunctionLifter:
             if instruction.c == 1:
                 self.out.line(render_expression(expression), statement=True)
             elif instruction.c == 0:
+                if (
+                    self.options.reconstruct_table_literals
+                    and self._capture_open_table_value(instruction, expression)
+                ):
+                    return
                 self._assign(
                     instruction.a,
                     RawExpr(
@@ -1485,6 +1786,12 @@ class _FunctionLifter:
                 ]
                 self.out.line("return " + ", ".join(values), statement=True)
         elif name == "GETVARARGS":
+            if (
+                instruction.b == 0
+                and self.options.reconstruct_table_literals
+                and self._capture_open_table_value(instruction, source_expr("..."))
+            ):
+                return
             if instruction.b <= 2:
                 self._assign(instruction.a, "...", pc)
             else:

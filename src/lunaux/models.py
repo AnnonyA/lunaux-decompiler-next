@@ -45,6 +45,10 @@ class DecompileOptions(BaseModel):
         default=True,
         alias="RobloxAPITypes",
     )
+    contextual_functions: bool = Field(
+        default=True,
+        alias="ContextualFunctions",
+    )
     show_recovered_symbols: bool = Field(
         default=False,
         alias="ShowRecoveredSymbols",
@@ -62,6 +66,10 @@ class DecompileOptions(BaseModel):
         alias="RecoverRobloxModules",
     )
     recover_classes: bool = Field(default=True, alias="RecoverClasses")
+    recover_metatable_classes: bool = Field(
+        default=True,
+        alias="RecoverMetatableClasses",
+    )
     max_output_characters: int = Field(
         default=4_000_000,
         alias="MaxOutputCharacters",
@@ -86,9 +94,11 @@ class DecompileOptions(BaseModel):
             "InferTypes": self.infer_types,
             "FlowSensitiveTypes": self.flow_sensitive_types,
             "RobloxAPITypes": self.roblox_api_types,
+            "ContextualFunctions": self.contextual_functions,
             "ShowRecoveredSymbols": self.show_recovered_symbols,
             "RecoverRobloxEvents": self.recover_roblox_events,
             "InlineRobloxCallbacks": self.inline_roblox_callbacks,
             "RecoverRobloxModules": self.recover_roblox_modules,
             "RecoverClasses": self.recover_classes,
+            "RecoverMetatableClasses": self.recover_metatable_classes,
         }

@@ -2,7 +2,7 @@
 
 A local Roblox Luau bytecode decompiler and disassembler with a native backend, the optional Unluau CLI, a portable Python engine, an HTTP API, a CLI, and Windows/Linux launchers.
 
-> **Version 0.15:** adds flow-sensitive narrowing and an owner-aware Roblox API catalog for properties, methods, services, events, and callback parameter types on top of the 0.14 callback/module pass.
+> **Version 0.16:** recovers conservative classes built from tables and metatables, and derives function names, parameter roles, types, and return hints from assignment and callback context.
 
 ## Engine chain
 
@@ -47,6 +47,9 @@ A crash, timeout, unsupported file, or empty result from one engine moves the re
 - Inlines single-use temporaries across short pure instruction gaps while blocking calls, mutations, branches, and source-register redefinitions.
 - Tracks table ownership, aliases, contained tables, and SSA dependencies; it materializes constructors before escapes, cycles, dependency redefinitions, unsafe calls, control flow, or ambiguous stack-top writes.
 - Reconstructs supported v100 `NEWCLASS` and `NEWCLASSMEMBER` regions as Luau `class ... end` declarations.
+- Recovers conservative table/metatable classes from self `__index`, named closure members, constructors, instance methods, static methods, and metamethods.
+- Assigns contextual function names and parameter roles from class membership, table/global assignment, return position, and recognized callback contracts.
+- Keeps contextual parameter names stable throughout function bodies, including typed Roblox callbacks such as `input: InputObject` and `processed: boolean`.
 - Reconstructs common expressions, table access, calls, methods, returns, closures, numeric/generic loops, `while`/`repeat` regions, and `if`/`else` layouts using compatibility patterns plus whole-function CFG/SSA analysis.
 - Resolves modern userdata, class, fastcall, feedback, and proto operands in disassembly.
 - Never executes submitted Luau bytecode.
@@ -156,21 +159,40 @@ Recovered constructors may include:
 
 Self-references, shared children, calls that can observe pending state, noncontiguous open ranges, dependency redefinitions, and ambiguous escapes keep the conservative statement form.
 
-### Class recovery
+### Metatable classes and contextual functions
 
-When the v100 class shape and member bindings validate, `NEWCLASS` and `NEWCLASSMEMBER` are emitted as class syntax instead of anonymous table placeholders.
+Version 0.16 extends the existing experimental v100 class recovery to conservative table/metatable patterns. A table is folded only when SSA traces a self-referential `Class.__index = Class`, named closure members, and no dynamic member key that could change the recovered surface.
 
 ```luau
 class Point
+    -- recovered from metatable __index pattern
     public x
 
-    function length(self: Point): number
+    -- constructor
+    function new(x): Point
+        -- reconstructed body
+    end
+
+    function getX(self: Point)
+        return self.x
+    end
+
+    -- metamethod
+    function __tostring(self: Point): string
         -- reconstructed body
     end
 end
 ```
 
-Class construction remains a normal call expression, for example `local point: Point = Point(1)`. Unsupported or ambiguous class regions retain the conservative compatibility representation.
+Members are classified as constructors, instance methods, static methods, or metamethods. Reads and writes through `self` contribute conservative property declarations. Shared closures, computed keys, conflicting assignments, and dynamic metatables retain ordinary table/function output.
+
+The contextual function pass also derives names, parameter roles, parameter types, and return hints from class membership, named field/global assignment, return position, and recognized callback sinks. Contextual names are installed before lifting the body, so a callback rendered as `function(input: InputObject)` consistently references `input` inside the function.
+
+Use `RecoverMetatableClasses` and `ContextualFunctions` to disable either extension independently. `RecoverClasses` remains the parent switch for all class reconstruction. See [`docs/METATABLE_CLASSES_AND_CONTEXTUAL_FUNCTIONS.md`](docs/METATABLE_CLASSES_AND_CONTEXTUAL_FUNCTIONS.md).
+
+### Experimental bytecode classes
+
+When a validated v100 class shape and member binding uses `NEWCLASS` and `NEWCLASSMEMBER`, LunaUX continues to emit the same shared class model as Luau `class ... end` syntax. Unsupported or ambiguous class regions retain the conservative compatibility representation.
 
 > Bytecode does not retain comments, original formatting, every source-level construct, or all names. Smart recovery reports the best supported reconstruction; it does not claim exact original source.
 

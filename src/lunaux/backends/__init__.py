@@ -14,6 +14,20 @@ from lunaux.backends.analysis import (
 )
 from lunaux.backends.auto import AutoBackend, BackendMode, build_backend
 from lunaux.backends.base import DecompilerBackend
+from lunaux.backends.classes import (
+    ClassRecoveryPlan,
+    RecoveredClass,
+    RecoveredClassMethod,
+    collect_class_method_proto_ids,
+    recover_classes,
+)
+from lunaux.backends.contextual_functions import (
+    FunctionContext,
+    FunctionContextPlan,
+    collect_module_function_contexts,
+    parameter_names_for_types,
+    plan_contextual_functions,
+)
 from lunaux.backends.flow_types import (
     FlowTypeAnalysis,
     FlowTypeFact,
@@ -47,15 +61,20 @@ __all__ = [
     "BackendMode",
     "BasicBlock",
     "BranchRegion",
+    "ClassRecoveryPlan",
     "ControlFlowAnalysis",
     "DecompilerBackend",
     "DefUseChain",
     "FlowTypeAnalysis",
     "FlowTypeFact",
+    "FunctionContext",
+    "FunctionContextPlan",
     "NativeModuleBackend",
     "NaturalLoop",
     "PhiNode",
     "ReconstructedBackend",
+    "RecoveredClass",
+    "RecoveredClassMethod",
     "RegisterAccess",
     "RobloxEventSignature",
     "RobloxMethodSignature",
@@ -71,9 +90,14 @@ __all__ = [
     "build_ssa",
     "callback_parameter_types",
     "catalog_summary",
+    "collect_class_method_proto_ids",
+    "collect_module_function_contexts",
     "event_callback_types",
     "method_return_type",
+    "parameter_names_for_types",
+    "plan_contextual_functions",
     "property_type",
+    "recover_classes",
     "register_access",
     "render_cfg_dot",
     "render_ssa",

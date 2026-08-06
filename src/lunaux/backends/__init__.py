@@ -54,6 +54,9 @@ from lunaux.backends.roblox_api import (
 )
 from lunaux.backends.ssa import (
     SSAInstruction,
+    SSAMultiUse,
+    SSAMultiValue,
+    SSAMultiValuePlan,
     SSAPhi,
     SSAProgram,
     SSAUse,
@@ -95,6 +98,9 @@ __all__ = [
     "RobloxMethodSignature",
     "RobloxPropertySignature",
     "SSAInstruction",
+    "SSAMultiUse",
+    "SSAMultiValue",
+    "SSAMultiValuePlan",
     "SSAPhi",
     "SSAProgram",
     "SSAUse",

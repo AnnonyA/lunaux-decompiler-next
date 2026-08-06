@@ -7,10 +7,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def replace_once(path: Path, old: str, new: str) -> None:
     text = path.read_text(encoding="utf-8")
-    count = text.count(old)
-    if count != 1:
-        raise RuntimeError(f"expected one match in {path}, found {count}: {old[:80]!r}")
-    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+    if old in text:
+        path.write_text(text.replace(old, new, 1), encoding="utf-8")
+        return
+    if new in text:
+        return
+    raise RuntimeError(f"missing old and new text in {path}: {old[:80]!r}")
 
 
 lifter = ROOT / "src/lunaux/backends/lifter.py"
@@ -67,15 +69,18 @@ replace_once(
     "                symbols.get(return_value) if return_value is not None else None\n"
     "            )\n",
 )
-text = symbols.read_text(encoding="utf-8")
-text = text.replace(
-    "_constant_string(proto, instruction.aux or -1)",
-    "_constant_string(\n"
-    "                proto,\n"
-    "                instruction.aux if instruction.aux is not None else -1,\n"
-    "            )",
+replace_once(
+    symbols,
+    "            return _constant_string(proto, instruction.aux or -1)\n",
+    "            index = instruction.aux if instruction.aux is not None else -1\n"
+    "            return _constant_string(proto, index)\n",
 )
-symbols.write_text(text, encoding="utf-8")
+replace_once(
+    symbols,
+    "            key = _constant_string(proto, instruction.aux or -1)\n",
+    "            index = instruction.aux if instruction.aux is not None else -1\n"
+    "            key = _constant_string(proto, index)\n",
+)
 
 classes = ROOT / "src/lunaux/backends/classes.py"
 replace_once(

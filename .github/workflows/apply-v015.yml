@@ -1,0 +1,54 @@
+name: Apply v0.15 flow types
+
+on:
+  push:
+    branches:
+      - feature/flow-sensitive-roblox-types-v015
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Reconstruct and apply implementation
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import base64
+          import gzip
+
+          chunks = sorted(Path("scripts/.v015").glob("*.b64"))
+          payload = "".join(path.read_text(encoding="utf-8") for path in chunks)
+          Path("scripts/apply_v015.py").write_bytes(gzip.decompress(base64.b64decode(payload)))
+          PY
+          python scripts/apply_v015.py
+      - name: Install development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Format and validate
+        run: |
+          ruff format .
+          ruff check . --fix
+          ruff check .
+          mypy
+          pytest --cov=lunaux --cov-report=term-missing
+      - name: Commit permanent implementation
+        shell: bash
+        run: |
+          rm -rf scripts/.v015 scripts/apply_v015.py .github/workflows/apply-v015.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Implement flow-sensitive Roblox API typing for v0.15"
+          git push origin HEAD:feature/flow-sensitive-roblox-types-v015

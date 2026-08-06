@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# Idempotent repair retained until the generated 0.14 implementation is committed.
 path = Path(__file__).resolve().with_name("apply_v014_roblox_recovery.py")
 text = path.read_text(encoding="utf-8")
 old = '''replace_once(

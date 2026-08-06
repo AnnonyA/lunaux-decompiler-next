@@ -138,6 +138,31 @@ new_class_plan = '''        self.class_plan = (
 '''
 text = replace_once(text, old_class_plan, new_class_plan, "class/context plans")
 
+text = replace_once(
+    text,
+    '''    def _name(self, register: int, pc: int) -> str:
+        binding = self.scope_tree.binding_for_register(register, pc)
+''',
+    '''    def _name(self, register: int, pc: int) -> str:
+        if register < self.proto.num_params and register in self.register_names:
+            return self.register_names[register]
+        binding = self.scope_tree.binding_for_register(register, pc)
+''',
+    "parameter use name priority",
+)
+text = replace_once(
+    text,
+    '''    def _definition_name(self, register: int, pc: int) -> str:
+        binding = self.scope_tree.binding_for_register(register, pc)
+''',
+    '''    def _definition_name(self, register: int, pc: int) -> str:
+        if register < self.proto.num_params and register in self.register_names:
+            return self.register_names[register]
+        binding = self.scope_tree.binding_for_register(register, pc)
+''',
+    "parameter definition name priority",
+)
+
 old_callback = '''        callback_types = (
             self.callback_plan.parameter_types_by_value.get(closure_value, ())
             if closure_value is not None
@@ -388,3 +413,19 @@ new_loop = '''    for proto in module.protos:
 text = replace_once(text, old_loop, new_loop, "module prototype loop")
 
 path.write_text(text, encoding="utf-8")
+
+test_path = Path("tests/test_roblox_recovery_v014.py")
+test_text = test_path.read_text(encoding="utf-8")
+test_text = replace_once(
+    test_text,
+    '    assert ":Connect(function(arg1: InputObject)" in output\n',
+    '    assert ":Connect(function(input: InputObject)" in output\n',
+    "contextual callback header expectation",
+)
+test_text = replace_once(
+    test_text,
+    '    assert "print(arg1)" in output\n',
+    '    assert "print(input)" in output\n',
+    "contextual callback body expectation",
+)
+test_path.write_text(test_text, encoding="utf-8")

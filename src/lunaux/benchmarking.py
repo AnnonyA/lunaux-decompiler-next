@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import statistics
 import subprocess
 import time
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -16,6 +17,7 @@ from lunaux.backends.base import DecompilerBackend
 from lunaux.models import DecompileOptions
 
 _SCHEMA_VERSION = 1
+_ARTIFACT_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 class BenchmarkStatus(StrEnum):
@@ -84,16 +86,12 @@ class InProcessBackend:
                 dict(self.options),
                 case.bytecode_path.name,
             )
-        except Exception as exc:  # benchmark boundary: record backend failures
-            return BackendExecution(
-                status=BenchmarkStatus.ERROR,
-                error=f"{type(exc).__name__}: {exc}",
-            )
-        if not output.strip():
-            return BackendExecution(status=BenchmarkStatus.EMPTY_OUTPUT)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(output, encoding="utf-8", newline="\n")
-        return BackendExecution(status=BenchmarkStatus.SUCCESS, output=output)
+            if not output.strip():
+                return BackendExecution(BenchmarkStatus.EMPTY_OUTPUT)
+            _write_artifact(output_path, output)
+        except Exception as exc:  # benchmark boundary: record, then continue
+            return _failure(exc)
+        return BackendExecution(BenchmarkStatus.SUCCESS, output=output)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,12 +128,17 @@ class ExternalCommandBackend:
         output_path: Path,
         timeout_seconds: float,
     ) -> BackendExecution:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.unlink(missing_ok=True)
+        except OSError as exc:
+            return _failure(exc, "could not prepare benchmark artifact")
+
         command = tuple(
-            item.replace("{input}", str(case.bytecode_path)).replace(
+            part.replace("{input}", str(case.bytecode_path)).replace(
                 "{output}", str(output_path)
             )
-            for item in self.command
+            for part in self.command
         )
         try:
             completed = subprocess.run(
@@ -148,47 +151,35 @@ class ExternalCommandBackend:
         except subprocess.TimeoutExpired as exc:
             stderr = exc.stderr if isinstance(exc.stderr, str) else ""
             return BackendExecution(
-                status=BenchmarkStatus.TIMEOUT,
+                BenchmarkStatus.TIMEOUT,
                 stderr=stderr,
                 error=f"timed out after {timeout_seconds:g} seconds",
             )
         except OSError as exc:
-            return BackendExecution(
-                status=BenchmarkStatus.ERROR,
-                error=f"{type(exc).__name__}: {exc}",
-            )
+            return _failure(exc)
 
         if completed.returncode != 0:
             return BackendExecution(
-                status=BenchmarkStatus.ERROR,
+                BenchmarkStatus.ERROR,
                 stderr=completed.stderr,
                 return_code=completed.returncode,
                 error=f"external command exited with code {completed.returncode}",
             )
 
-        if self.output_mode == "file":
-            try:
-                output = output_path.read_text(encoding="utf-8")
-            except OSError as exc:
-                return BackendExecution(
-                    status=BenchmarkStatus.ERROR,
-                    stderr=completed.stderr,
-                    return_code=completed.returncode,
-                    error=f"could not read external output: {exc}",
-                )
-        else:
-            output = completed.stdout
-            if output.strip():
-                output_path.write_text(output, encoding="utf-8", newline="\n")
-
-        if not output.strip():
-            return BackendExecution(
-                status=BenchmarkStatus.EMPTY_OUTPUT,
-                stderr=completed.stderr,
-                return_code=completed.returncode,
+        try:
+            output = (
+                output_path.read_text(encoding="utf-8")
+                if self.output_mode == "file"
+                else completed.stdout
             )
+            if self.output_mode == "stdout" and output.strip():
+                _write_artifact(output_path, output)
+        except OSError as exc:
+            return _failure(exc, "could not read or write external output")
+
+        status = BenchmarkStatus.SUCCESS if output.strip() else BenchmarkStatus.EMPTY_OUTPUT
         return BackendExecution(
-            status=BenchmarkStatus.SUCCESS,
+            status,
             output=output,
             stderr=completed.stderr,
             return_code=completed.returncode,
@@ -209,21 +200,6 @@ class BenchmarkResult:
     return_code: int | None = None
     error: str | None = None
 
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "case_id": self.case_id,
-            "backend": self.backend,
-            "backend_version": self.backend_version,
-            "status": self.status.value,
-            "elapsed_ms": round(self.elapsed_ms, 3),
-            "output_characters": self.output_characters,
-            "output_sha256": self.output_sha256,
-            "artifact": self.artifact,
-            "stderr": self.stderr,
-            "return_code": self.return_code,
-            "error": self.error,
-        }
-
 
 @dataclass(frozen=True, slots=True)
 class BenchmarkSummary:
@@ -238,20 +214,6 @@ class BenchmarkSummary:
     median_ms: float
     p95_ms: float
 
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "backend": self.backend,
-            "backend_version": self.backend_version,
-            "total": self.total,
-            "successes": self.successes,
-            "empty_outputs": self.empty_outputs,
-            "errors": self.errors,
-            "timeouts": self.timeouts,
-            "success_rate": round(self.success_rate, 6),
-            "median_ms": round(self.median_ms, 3),
-            "p95_ms": round(self.p95_ms, 3),
-        }
-
 
 @dataclass(frozen=True, slots=True)
 class BenchmarkReport:
@@ -262,13 +224,7 @@ class BenchmarkReport:
     schema_version: int = _SCHEMA_VERSION
 
     def as_dict(self) -> dict[str, object]:
-        return {
-            "schema_version": self.schema_version,
-            "generated_at": self.generated_at,
-            "manifest": self.manifest,
-            "summaries": [summary.as_dict() for summary in self.summaries],
-            "results": [result.as_dict() for result in self.results],
-        }
+        return asdict(self)
 
     def write_json(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -279,12 +235,25 @@ class BenchmarkReport:
         )
 
 
+def _failure(exc: Exception, prefix: str | None = None) -> BackendExecution:
+    detail = f"{type(exc).__name__}: {exc}"
+    return BackendExecution(
+        BenchmarkStatus.ERROR,
+        error=f"{prefix}: {detail}" if prefix else detail,
+    )
+
+
+def _write_artifact(path: Path, output: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(output, encoding="utf-8", newline="\n")
+
+
 def _safe_relative_path(root: Path, raw: object, label: str) -> Path:
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError(f"{label} must be a non-empty string")
     candidate = (root / raw).resolve()
     try:
-        candidate.relative_to(root.resolve())
+        candidate.relative_to(root)
     except ValueError as exc:
         raise ValueError(f"{label} escapes the manifest directory") from exc
     return candidate
@@ -292,20 +261,13 @@ def _safe_relative_path(root: Path, raw: object, label: str) -> Path:
 
 def _optional_string(payload: Mapping[str, Any], key: str) -> str | None:
     value = payload.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str):
+    if value is not None and not isinstance(value, str):
         raise ValueError(f"{key} must be a string")
     return value
 
 
 def load_manifest(path: Path) -> tuple[BenchmarkCase, ...]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"could not load benchmark manifest: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("benchmark manifest must be a JSON object")
+    payload = _load_json_object(path, "benchmark manifest")
     if payload.get("schema_version") != _SCHEMA_VERSION:
         raise ValueError(f"benchmark manifest schema_version must be {_SCHEMA_VERSION}")
     entries = payload.get("cases")
@@ -315,50 +277,45 @@ def load_manifest(path: Path) -> tuple[BenchmarkCase, ...]:
     root = path.parent.resolve()
     cases: list[BenchmarkCase] = []
     seen: set[str] = set()
-    for index, raw_entry in enumerate(entries):
-        if not isinstance(raw_entry, dict):
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
             raise ValueError(f"cases[{index}] must be an object")
-        case_id = raw_entry.get("id")
+        case_id = entry.get("id")
         if not isinstance(case_id, str) or not case_id.strip():
             raise ValueError(f"cases[{index}].id must be a non-empty string")
         if case_id in seen:
             raise ValueError(f"duplicate benchmark case id: {case_id}")
         seen.add(case_id)
 
-        bytecode_path = _safe_relative_path(root, raw_entry.get("bytecode"), "bytecode")
-        if not bytecode_path.is_file():
-            raise ValueError(f"benchmark bytecode does not exist: {bytecode_path}")
-
-        source_value = raw_entry.get("source")
-        source_path = (
-            _safe_relative_path(root, source_value, "source")
-            if source_value is not None
+        bytecode = _safe_relative_path(root, entry.get("bytecode"), "bytecode")
+        if not bytecode.is_file():
+            raise ValueError(f"benchmark bytecode does not exist: {bytecode}")
+        source_raw = entry.get("source")
+        source = (
+            _safe_relative_path(root, source_raw, "source")
+            if source_raw is not None
             else None
         )
-        if source_path is not None and not source_path.is_file():
-            raise ValueError(f"benchmark source does not exist: {source_path}")
-
-        raw_tags = raw_entry.get("tags", [])
-        if not isinstance(raw_tags, list) or not all(isinstance(tag, str) for tag in raw_tags):
+        if source is not None and not source.is_file():
+            raise ValueError(f"benchmark source does not exist: {source}")
+        tags = entry.get("tags", [])
+        if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
             raise ValueError(f"cases[{index}].tags must be a list of strings")
         cases.append(
             BenchmarkCase(
-                case_id=case_id,
-                bytecode_path=bytecode_path,
-                source_path=source_path,
-                tags=tuple(raw_tags),
-                optimization=_optional_string(raw_entry, "optimization"),
+                case_id,
+                bytecode,
+                source,
+                tuple(tags),
+                _optional_string(entry, "optimization"),
             )
         )
     return tuple(cases)
 
 
 def load_external_backends(path: Path) -> tuple[ExternalCommandBackend, ...]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"could not load external backend configuration: {exc}") from exc
-    if not isinstance(payload, dict) or payload.get("schema_version") != _SCHEMA_VERSION:
+    payload = _load_json_object(path, "external backend configuration")
+    if payload.get("schema_version") != _SCHEMA_VERSION:
         raise ValueError(f"external backend schema_version must be {_SCHEMA_VERSION}")
     entries = payload.get("backends")
     if not isinstance(entries, list):
@@ -366,40 +323,48 @@ def load_external_backends(path: Path) -> tuple[ExternalCommandBackend, ...]:
 
     backends: list[ExternalCommandBackend] = []
     seen: set[str] = set()
-    for index, raw_entry in enumerate(entries):
-        if not isinstance(raw_entry, dict):
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
             raise ValueError(f"backends[{index}] must be an object")
-        name = raw_entry.get("name")
-        version = raw_entry.get("version", "unknown")
-        command = raw_entry.get("command")
-        output_mode = raw_entry.get("output", "stdout")
+        name = entry.get("name")
+        version = entry.get("version", "unknown")
+        command = entry.get("command")
+        output = entry.get("output", "stdout")
         if not isinstance(name, str) or not name.strip():
             raise ValueError(f"backends[{index}].name must be a non-empty string")
         if name in seen:
             raise ValueError(f"duplicate external backend name: {name}")
         seen.add(name)
-        if not isinstance(version, str):
-            raise ValueError(f"backends[{index}].version must be a string")
+        if not isinstance(version, str) or not isinstance(output, str):
+            raise ValueError(f"backends[{index}] version and output must be strings")
         if not isinstance(command, list) or not all(isinstance(part, str) for part in command):
             raise ValueError(f"backends[{index}].command must be a list of strings")
-        if not isinstance(output_mode, str):
-            raise ValueError(f"backends[{index}].output must be a string")
-        backends.append(
-            ExternalCommandBackend(
-                backend_name=name,
-                backend_version=version,
-                command=tuple(command),
-                output_mode=output_mode,
-            )
-        )
+        backends.append(ExternalCommandBackend(name, version, tuple(command), output))
     return tuple(backends)
+
+
+def _load_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"could not load {label}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    return payload
+
+
+def _artifact_component(value: str) -> str:
+    component = _ARTIFACT_RE.sub("_", value).strip("._")
+    if not component:
+        raise ValueError(f"value cannot be used as an artifact name: {value!r}")
+    return component
 
 
 def _percentile_95(values: Sequence[float]) -> float:
     if not values:
         return 0.0
     ordered = sorted(values)
-    index = max(0, min(len(ordered) - 1, int((len(ordered) - 1) * 0.95 + 0.5)))
+    index = round((len(ordered) - 1) * 0.95)
     return ordered[index]
 
 
@@ -411,22 +376,19 @@ def _summaries(results: Sequence[BenchmarkResult]) -> tuple[BenchmarkSummary, ..
     summaries: list[BenchmarkSummary] = []
     for (backend, version), items in sorted(grouped.items()):
         durations = [item.elapsed_ms for item in items]
-        success_count = sum(item.status is BenchmarkStatus.SUCCESS for item in items)
-        total = len(items)
+        successes = sum(item.status is BenchmarkStatus.SUCCESS for item in items)
         summaries.append(
             BenchmarkSummary(
-                backend=backend,
-                backend_version=version,
-                total=total,
-                successes=success_count,
-                empty_outputs=sum(
-                    item.status is BenchmarkStatus.EMPTY_OUTPUT for item in items
-                ),
-                errors=sum(item.status is BenchmarkStatus.ERROR for item in items),
-                timeouts=sum(item.status is BenchmarkStatus.TIMEOUT for item in items),
-                success_rate=success_count / total if total else 0.0,
-                median_ms=statistics.median(durations) if durations else 0.0,
-                p95_ms=_percentile_95(durations),
+                backend,
+                version,
+                len(items),
+                successes,
+                sum(item.status is BenchmarkStatus.EMPTY_OUTPUT for item in items),
+                sum(item.status is BenchmarkStatus.ERROR for item in items),
+                sum(item.status is BenchmarkStatus.TIMEOUT for item in items),
+                successes / len(items),
+                statistics.median(durations),
+                _percentile_95(durations),
             )
         )
     return tuple(summaries)
@@ -440,56 +402,63 @@ def run_benchmark(
     *,
     timeout_seconds: float = 30.0,
 ) -> BenchmarkReport:
-    if not cases:
-        raise ValueError("at least one benchmark case is required")
-    if not backends:
-        raise ValueError("at least one benchmark backend is required")
+    if not cases or not backends:
+        raise ValueError("at least one benchmark case and backend are required")
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be greater than zero")
 
-    names: set[str] = set()
-    for backend in backends:
-        if backend.name in names:
-            raise ValueError(f"duplicate benchmark backend name: {backend.name}")
-        names.add(backend.name)
+    backend_paths = _unique_artifact_names(backend.name for backend in backends)
+    case_paths = _unique_artifact_names(case.case_id for case in cases)
+    if len({backend.name for backend in backends}) != len(backends):
+        raise ValueError("benchmark backend names must be unique")
 
     results: list[BenchmarkResult] = []
     for backend in backends:
         for case in cases:
-            relative_artifact = Path(backend.name) / f"{case.case_id}.luau"
-            output_path = artifact_directory / relative_artifact
+            relative = Path(backend_paths[backend.name]) / f"{case_paths[case.case_id]}.luau"
+            output_path = artifact_directory / relative
             started = time.perf_counter()
-            execution = backend.execute(case, output_path, timeout_seconds)
+            try:
+                execution = backend.execute(case, output_path, timeout_seconds)
+            except Exception as exc:  # custom adapter boundary
+                execution = _failure(exc)
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             output = execution.output
-            artifact = str(relative_artifact.as_posix()) if output.strip() else None
             results.append(
                 BenchmarkResult(
-                    case_id=case.case_id,
-                    backend=backend.name,
-                    backend_version=backend.version,
-                    status=execution.status,
-                    elapsed_ms=elapsed_ms,
-                    output_characters=len(output),
-                    output_sha256=(
-                        hashlib.sha256(output.encode("utf-8")).hexdigest()
-                        if output
-                        else None
-                    ),
-                    artifact=artifact,
-                    stderr=execution.stderr or None,
-                    return_code=execution.return_code,
-                    error=execution.error,
+                    case.case_id,
+                    backend.name,
+                    backend.version,
+                    execution.status,
+                    elapsed_ms,
+                    len(output),
+                    hashlib.sha256(output.encode()).hexdigest() if output else None,
+                    relative.as_posix() if output.strip() else None,
+                    execution.stderr or None,
+                    execution.return_code,
+                    execution.error,
                 )
             )
 
-    ordered_results = tuple(sorted(results, key=lambda item: (item.backend, item.case_id)))
+    ordered = tuple(sorted(results, key=lambda item: (item.backend, item.case_id)))
     return BenchmarkReport(
-        generated_at=datetime.now(UTC).isoformat(),
-        manifest=str(manifest_path),
-        results=ordered_results,
-        summaries=_summaries(ordered_results),
+        datetime.now(UTC).isoformat(),
+        str(manifest_path),
+        ordered,
+        _summaries(ordered),
     )
+
+
+def _unique_artifact_names(values: Iterable[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    used: set[str] = set()
+    for value in values:
+        component = _artifact_component(value)
+        if component in used:
+            raise ValueError(f"benchmark artifact name collision: {component}")
+        used.add(component)
+        result[value] = component
+    return result
 
 
 def default_options() -> Mapping[str, bool]:

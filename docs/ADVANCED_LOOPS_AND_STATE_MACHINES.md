@@ -206,6 +206,10 @@ Both features are enabled by default:
 
 Disabling `AdvancedLoops` preserves the previous simple loop compatibility recovery. Disabling `UnflattenStateMachines` leaves dispatcher selectors and state assignments visible to the normal lifter.
 
+## Validation workflow
+
+CI uses a concurrency group scoped to the pull request or pushed ref. A newer commit cancels its obsolete matrix, preventing queued macOS jobs from older revisions from delaying validation of the current head.
+
 ## Accuracy boundary
 
 Luau bytecode does not retain the author's original loop spelling, labels, comments, or the reason a dispatcher exists. Version 0.17 reconstructs one supported semantic structure from CFG and constant data-flow evidence. It does not claim exact original source and does not attempt generalized deobfuscation of arbitrary virtual machines.

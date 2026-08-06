@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import cast
 
 from lunaux.backends.analysis import analyze_control_flow
-from lunaux.backends.classes import recover_classes
 from lunaux.backends.ast import (
     BinaryExpr,
     CallExpr,
@@ -33,6 +32,7 @@ from lunaux.backends.bytecode import (
     LuauProto,
     format_type_tag,
 )
+from lunaux.backends.classes import recover_classes
 from lunaux.backends.inlining import plan_expression_inlining
 from lunaux.backends.opcodes import (
     DecodedInstruction,

@@ -848,13 +848,11 @@ The output header reports recognized event bindings, `require` dependencies, and
 replace_once(
     readme,
     """| `InlineSingleUseTemporaries` | `true` | Fold safe adjacent SSA temporaries into their single consumer. Disable for more literal register-oriented output. |
-| `MaxOutputCharacters` | `4000000` | Maximum generated output length. Accepted range: 1,000 to 20,000,000 characters. |
 """,
     """| `InlineSingleUseTemporaries` | `true` | Fold safe adjacent SSA temporaries into their single consumer. Disable for more literal register-oriented output. |
 | `RecoverRobloxEvents` | `true` | Report recognized Roblox signal connections and event waits. |
 | `InlineRobloxCallbacks` | `true` | Inline single-owner closures into supported callback, module-field, and returned-function positions. |
 | `RecoverRobloxModules` | `true` | Recover `require` dependency paths and ModuleScript export shape. |
-| `MaxOutputCharacters` | `4000000` | Maximum generated output length. Accepted range: 1,000 to 20,000,000 characters. |
 """,
 )
 

@@ -41,6 +41,12 @@ from lunaux.backends.opcodes import (
     decode_words,
     get_jump_target,
 )
+from lunaux.backends.roblox_recovery import (
+    analyze_roblox_recovery,
+    closure_proto_id,
+    collect_inline_only_proto_ids,
+    plan_inline_callbacks,
+)
 from lunaux.backends.scopes import build_scope_tree
 from lunaux.backends.ssa import SSAValue, build_ssa
 from lunaux.backends.structuring import build_structured_recovery
@@ -141,6 +147,9 @@ class _Options:
     smart_variable_names: bool
     infer_types: bool
     show_recovered_symbols: bool
+    recover_roblox_events: bool
+    inline_roblox_callbacks: bool
+    recover_roblox_modules: bool
     recover_classes: bool
 
     @classmethod
@@ -171,6 +180,12 @@ class _Options:
                 "ShowRecoveredSymbols",
                 False,
             ),
+            recover_roblox_events=options.get("RecoverRobloxEvents", True),
+            inline_roblox_callbacks=options.get(
+                "InlineRobloxCallbacks",
+                True,
+            ),
+            recover_roblox_modules=options.get("RecoverRobloxModules", True),
             recover_classes=options.get("RecoverClasses", True),
         )
 
@@ -184,10 +199,7 @@ class _Emitter:
     def line(self, text: str = "", *, statement: bool = False) -> None:
         suffix = (
             ";"
-            if statement
-            and self.semicolons
-            and text
-            and not text.rstrip().endswith(";")
+            if statement and self.semicolons and text and not text.rstrip().endswith(";")
             else ""
         )
         self.lines.append("    " * self.indent + text + suffix)
@@ -246,12 +258,10 @@ def _class_shape_names(
 ) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
     class_name = _constant_string(proto, shape.class_name_constant) or "AnonymousClass"
     properties = tuple(
-        _constant_string(proto, index) or f"K{index}"
-        for index in shape.property_name_constants
+        _constant_string(proto, index) or f"K{index}" for index in shape.property_name_constants
     )
     methods = tuple(
-        _constant_string(proto, index) or f"K{index}"
-        for index in shape.method_name_constants
+        _constant_string(proto, index) or f"K{index}" for index in shape.method_name_constants
     )
     return class_name, properties, methods
 
@@ -260,10 +270,7 @@ def _format_vector(value: tuple[float, float, float, float]) -> str:
     x, y, z, w = value
     values = ", ".join(_format_number(item) for item in value)
     if w == 0:
-        return (
-            "Vector3.new("
-            f"{_format_number(x)}, {_format_number(y)}, {_format_number(z)})"
-        )
+        return f"Vector3.new({_format_number(x)}, {_format_number(y)}, {_format_number(z)})"
     return f"vector.create({values})"
 
 
@@ -371,9 +378,7 @@ def _local_name(proto: LuauProto, register: int, pc: int) -> str | None:
     candidates = [
         item
         for item in proto.locals
-        if item.register == register
-        and item.start_pc <= pc < item.end_pc
-        and item.name
+        if item.register == register and item.start_pc <= pc < item.end_pc and item.name
     ]
     if not candidates:
         return None
@@ -428,12 +433,17 @@ class _FunctionLifter:
         proto_names: dict[int, str],
         options: _Options,
         emitter: _Emitter,
+        *,
+        inline_only_proto_ids: frozenset[int] = frozenset(),
+        upvalue_bindings: dict[int, Expr] | None = None,
     ) -> None:
         self.module = module
         self.proto = proto
         self.proto_names = proto_names
         self.options = options
         self.out = emitter
+        self.inline_only_proto_ids = inline_only_proto_ids
+        self.upvalue_bindings = upvalue_bindings or {}
         self.scope_tree = build_scope_tree(proto)
         self.register_names: dict[int, str] = {}
         self.declared: set[str] = set()
@@ -447,6 +457,15 @@ class _FunctionLifter:
             len(proto.code),
             analysis=self.analysis,
         )
+        self.callback_plan = plan_inline_callbacks(
+            module,
+            proto,
+            self.instructions,
+            self.ssa,
+            enabled=options.inline_roblox_callbacks,
+        )
+        self.callback_expressions: dict[SSAValue, Expr] = {}
+        self.callback_dependencies: dict[SSAValue, frozenset[SSAValue]] = {}
         self.structured_plan = build_structured_recovery(self.ssa)
         self.phi_conditions: dict[int, Expr] = {}
         self.pending_tables: dict[SSAValue, PendingTableLiteral] = {}
@@ -455,11 +474,7 @@ class _FunctionLifter:
             tuple[Expr, frozenset[SSAValue], int],
         ] = {}
         self.symbols: SymbolRecovery | None = None
-        if (
-            options.smart_variable_names
-            or options.infer_types
-            or options.show_recovered_symbols
-        ):
+        if options.smart_variable_names or options.infer_types or options.show_recovered_symbols:
             self.symbols = build_symbol_recovery(
                 module,
                 proto,
@@ -474,12 +489,12 @@ class _FunctionLifter:
         )
         self.inline_plan = plan_expression_inlining(self.ssa, proto)
         self.inline_expressions: dict[SSAValue, Expr] = {}
-        self.instruction_by_pc = {
-            instruction.pc: instruction for instruction in self.instructions
+        self.instruction_by_pc = {instruction.pc: instruction for instruction in self.instructions}
+        self.instruction_index_by_pc = {
+            instruction.pc: index for index, instruction in enumerate(self.instructions)
         }
         self.previous_by_next_pc = {
-            instruction.pc + instruction.size: instruction
-            for instruction in self.instructions
+            instruction.pc + instruction.size: instruction for instruction in self.instructions
         }
         self.next_instruction_by_pc = {
             instruction.pc: next_instruction
@@ -499,21 +514,13 @@ class _FunctionLifter:
         self._analyze_cfg_regions()
         loop_condition_pcs = set(self.while_headers) | set(self.repeat_conditions)
         phi_enabled = options.use_if_expression and options.recover_phi_expressions
-        self.active_phi_headers = (
-            dict(self.structured_plan.phi_by_header) if phi_enabled else {}
-        )
-        self.active_phi_joins = (
-            dict(self.structured_plan.phi_by_join) if phi_enabled else {}
-        )
+        self.active_phi_headers = dict(self.structured_plan.phi_by_header) if phi_enabled else {}
+        self.active_phi_joins = dict(self.structured_plan.phi_by_join) if phi_enabled else {}
         self.captured_phi_values = (
-            self.structured_plan.captured_phi_values
-            if phi_enabled
-            else frozenset()
+            self.structured_plan.captured_phi_values if phi_enabled else frozenset()
         )
         self.phi_definition_pcs = frozenset(
-            value.origin_pc
-            for value in self.captured_phi_values
-            if value.origin_pc is not None
+            value.origin_pc for value in self.captured_phi_values if value.origin_pc is not None
         )
         self.active_boolean_chains = (
             {
@@ -584,15 +591,8 @@ class _FunctionLifter:
             if header is None or latch is None:
                 continue
 
-            if (
-                header.name in _CONDITIONAL_OPS
-                and latch.name in {"JUMP", "JUMPBACK", "JUMPX"}
-            ):
-                exits = sorted(
-                    target
-                    for source, target in loop.exits
-                    if source == loop.header
-                )
+            if header.name in _CONDITIONAL_OPS and latch.name in {"JUMP", "JUMPBACK", "JUMPX"}:
+                exits = sorted(target for source, target in loop.exits if source == loop.header)
                 if exits:
                     self.while_headers.setdefault(
                         header.pc,
@@ -600,10 +600,7 @@ class _FunctionLifter:
                     )
                     self.while_back_pcs.add(latch.pc)
 
-            if (
-                latch.name in _CONDITIONAL_OPS
-                and get_jump_target(latch) == loop.header
-            ):
+            if latch.name in _CONDITIONAL_OPS and get_jump_target(latch) == loop.header:
                 self.repeat_starts.setdefault(loop.header, latch.pc)
                 self.repeat_conditions.setdefault(latch.pc, latch)
 
@@ -701,9 +698,12 @@ class _FunctionLifter:
         return self.register_names.get(register, f"v{register}")
 
     def _ref_expr(self, register: int, pc: int) -> Expr:
-        if self.options.inline_single_use_temporaries:
-            value = self.ssa.value_at_use(pc, register)
-            if value is not None:
+        value = self.ssa.value_at_use(pc, register)
+        if value is not None:
+            callback = self.callback_expressions.get(value)
+            if callback is not None:
+                return callback
+            if self.options.inline_single_use_temporaries:
                 expression = self.inline_expressions.get(value)
                 if expression is not None:
                     return expression
@@ -711,6 +711,31 @@ class _FunctionLifter:
 
     def _ref(self, register: int, pc: int) -> str:
         return render_expression(self._ref_expr(register, pc))
+
+    def _transfer_inline_callback(
+        self,
+        instruction: DecodedInstruction,
+    ) -> bool:
+        if instruction.name != "MOVE":
+            return False
+        source = self.ssa.value_at_use(instruction.pc, instruction.b)
+        destination = self.ssa.value_defined_at(instruction.pc, instruction.a)
+        if (
+            source is None
+            or destination is None
+            or destination not in self.callback_plan.proto_by_value
+        ):
+            return False
+        expression = self.callback_expressions.get(source)
+        if expression is None:
+            return False
+        self.callback_expressions[destination] = expression
+        self.callback_dependencies[destination] = self.callback_dependencies.get(
+            source,
+            frozenset(),
+        )
+        self.register_names.setdefault(instruction.a, f"v{instruction.a}")
+        return True
 
     def _annotated_name(self, register: int, name: str, pc: int) -> str:
         type_name: str | None = None
@@ -919,9 +944,7 @@ class _FunctionLifter:
             return
         access = self.analysis.register_accesses[instruction.pc]
         target_pending = (
-            self._pending_table_for_write(instruction)
-            if is_table_write(instruction)
-            else None
+            self._pending_table_for_write(instruction) if is_table_write(instruction) else None
         )
         transfer_pending = self._pending_table_for_move(instruction)
         open_parent = (
@@ -930,9 +953,7 @@ class _FunctionLifter:
             else None
         )
         write_sources = (
-            table_write_source_registers(instruction)
-            if target_pending is not None
-            else frozenset()
+            table_write_source_registers(instruction) if target_pending is not None else frozenset()
         )
 
         for pending in sorted(
@@ -947,9 +968,7 @@ class _FunctionLifter:
                 continue
             if target_pending is not None and pending.register in write_sources:
                 continue
-            if access.definitions & (
-                frozenset({pending.register}) | pending.dependency_registers
-            ):
+            if access.definitions & (frozenset({pending.register}) | pending.dependency_registers):
                 self._flush_pending_table(pending)
                 continue
             if pending.register in access.uses:
@@ -967,6 +986,9 @@ class _FunctionLifter:
         value: SSAValue,
         seen: frozenset[SSAValue] = frozenset(),
     ) -> frozenset[SSAValue]:
+        callback_dependencies = self.callback_dependencies.get(value)
+        if callback_dependencies is not None:
+            return callback_dependencies
         if value in seen or value.kind != "instruction":
             return frozenset({value})
         if value not in self.inline_expressions or value.origin_pc is None:
@@ -977,9 +999,7 @@ class _FunctionLifter:
         dependencies: set[SSAValue] = set()
         next_seen = seen | frozenset({value})
         for use in instruction.uses:
-            dependencies.update(
-                self._dependencies_for_value(use.value, next_seen)
-            )
+            dependencies.update(self._dependencies_for_value(use.value, next_seen))
         return frozenset(dependencies)
 
     def _table_value_can_inline(
@@ -989,22 +1009,16 @@ class _FunctionLifter:
     ) -> bool:
         accounted_uses = 0
         for ssa_instruction in self.ssa.instructions.values():
-            matching_uses = tuple(
-                use
-                for use in ssa_instruction.uses
-                if use.value == child.value
-            )
+            matching_uses = tuple(use for use in ssa_instruction.uses if use.value == child.value)
             if not matching_uses:
                 continue
             accounted_uses += len(matching_uses)
             instruction = ssa_instruction.instruction
             target = table_write_target_register(instruction)
             if instruction.pc == consumer_pc:
-                if (
-                    not is_table_write(instruction)
-                    or child.register
-                    not in table_write_source_registers(instruction)
-                ):
+                if not is_table_write(
+                    instruction
+                ) or child.register not in table_write_source_registers(instruction):
                     return False
                 continue
             if (
@@ -1042,11 +1056,7 @@ class _FunctionLifter:
                 return expression, frozenset()
             self._flush_pending_table(child)
         expression = self._ref_expr(register, pc)
-        dependencies = (
-            self._dependencies_for_value(value)
-            if value is not None
-            else frozenset()
-        )
+        dependencies = self._dependencies_for_value(value) if value is not None else frozenset()
         return expression, dependencies
 
     def _record_table_write(self, instruction: DecodedInstruction) -> bool:
@@ -1248,22 +1258,73 @@ class _FunctionLifter:
         key = _constant_string(self.proto, index)
         return key if key is not None else f"K{index}"
 
+    def _callback_capture_bindings(
+        self,
+        instruction: DecodedInstruction,
+        child: LuauProto,
+    ) -> tuple[dict[int, Expr], frozenset[SSAValue]]:
+        bindings: dict[int, Expr] = {}
+        dependencies: set[SSAValue] = set()
+        cursor = self.instruction_index_by_pc[instruction.pc] + 1
+        for upvalue_index in range(child.num_upvalues):
+            capture = self.instructions[cursor + upvalue_index]
+            if capture.a == 2:
+                binding = self.upvalue_bindings.get(capture.b)
+                if binding is None:
+                    name = (
+                        self.proto.upvalue_names[capture.b]
+                        if capture.b < len(self.proto.upvalue_names)
+                        else None
+                    )
+                    binding = NameExpr(_sanitize_identifier(name, f"upvalue_{capture.b}"))
+            elif capture.a == 1:
+                binding = NameExpr(self._name(capture.b, capture.pc))
+                source = self.ssa.value_at_use(capture.pc, capture.b)
+                if source is not None:
+                    dependencies.update(self._dependencies_for_value(source))
+            else:
+                binding = self._ref_expr(capture.b, capture.pc)
+                source = self.ssa.value_at_use(capture.pc, capture.b)
+                if source is not None:
+                    dependencies.update(self._dependencies_for_value(source))
+            bindings[upvalue_index] = binding
+        return bindings, frozenset(dependencies)
+
+    def _anonymous_function_expr(
+        self,
+        child_id: int,
+        instruction: DecodedInstruction,
+    ) -> tuple[Expr, frozenset[SSAValue]]:
+        child = self.module.protos[child_id]
+        bindings, dependencies = self._callback_capture_bindings(
+            instruction,
+            child,
+        )
+        callback_out = _Emitter(self.options.semicolons)
+        _FunctionLifter(
+            self.module,
+            child,
+            self.proto_names,
+            self.options,
+            callback_out,
+            inline_only_proto_ids=self.inline_only_proto_ids,
+            upvalue_bindings=bindings,
+        ).lift(as_function=True, anonymous_function=True)
+        return (
+            RawExpr(callback_out.render().strip(), Precedence.ATOM),
+            dependencies,
+        )
+
     def _call_expression(self, instruction: DecodedInstruction) -> Expr:
         if instruction.a in self.pending_namecalls:
             base, method = self.pending_namecalls.pop(instruction.a)
             start = instruction.a + 2
             count = max(0, instruction.b - 2) if instruction.b else 0
-            args = tuple(
-                self._ref_expr(start + index, instruction.pc)
-                for index in range(count)
-            )
+            args = tuple(self._ref_expr(start + index, instruction.pc) for index in range(count))
             return MethodCallExpr(base, method, args)
         function = self._ref_expr(instruction.a, instruction.pc)
         if instruction.b == 0:
-            text = (
-                f"{render_expression(function)}"
-                "(... --[[ all arguments through stack top ]])"
-            )
+            text = f"{render_expression(function)}(... --[[ all arguments through stack top ]])"
             return RawExpr(text, Precedence.POSTFIX)
         args = tuple(
             self._ref_expr(instruction.a + index, instruction.pc)
@@ -1386,6 +1447,7 @@ class _FunctionLifter:
         as_function: bool,
         function_name_override: str | None = None,
         local_function: bool = True,
+        anonymous_function: bool = False,
     ) -> None:
         parameters = []
         for register in range(self.proto.num_params):
@@ -1394,11 +1456,7 @@ class _FunctionLifter:
                 if self.options.smart_variable_names and self.symbols is not None
                 else None
             )
-            name = (
-                _local_name(self.proto, register, 0)
-                or recovered_name
-                or f"arg{register + 1}"
-            )
+            name = _local_name(self.proto, register, 0) or recovered_name or f"arg{register + 1}"
             name = _sanitize_identifier(name, f"arg{register + 1}")
             parameters.append(self._annotated_name(register, name, 0))
             self.register_names[register] = name
@@ -1407,11 +1465,12 @@ class _FunctionLifter:
             parameters.append("...")
 
         if as_function:
-            function_name = (
-                function_name_override or self.proto_names[self.proto.proto_id]
-            )
-            prefix = "local function" if local_function else "function"
-            header = f"{prefix} {function_name}({', '.join(parameters)})"
+            if anonymous_function:
+                header = f"function({', '.join(parameters)})"
+            else:
+                function_name = function_name_override or self.proto_names[self.proto.proto_id]
+                prefix = "local function" if local_function else "function"
+                header = f"{prefix} {function_name}({', '.join(parameters)})"
             if (
                 self.options.infer_types
                 and self.symbols is not None
@@ -1436,13 +1495,16 @@ class _FunctionLifter:
                     self.out.line("--   " + line)
         if self.options.upvalue_comment and self.proto.num_upvalues:
             names = [
-                name or f"upvalue_{index}"
+                (
+                    render_expression(self.upvalue_bindings[index])
+                    if index in self.upvalue_bindings
+                    else name or f"upvalue_{index}"
+                )
                 for index, name in enumerate(self.proto.upvalue_names)
             ]
             if len(names) < self.proto.num_upvalues:
                 names.extend(
-                    f"upvalue_{index}"
-                    for index in range(len(names), self.proto.num_upvalues)
+                    f"upvalue_{index}" for index in range(len(names), self.proto.num_upvalues)
                 )
             typed = []
             for index, name in enumerate(names):
@@ -1459,6 +1521,8 @@ class _FunctionLifter:
         for instruction in self.instructions:
             self._finalize_phi_regions(instruction.pc)
             self._flush_tables_before(instruction)
+            if instruction.pc in self.callback_plan.capture_pcs:
+                continue
             self._close_blocks(instruction.pc)
             opened_loop = self._open_structured_loop(instruction)
             if instruction.pc in self.labels:
@@ -1490,7 +1554,8 @@ class _FunctionLifter:
             self._close_blocks(target)
         if as_function:
             self.out.close()
-            self.out.line()
+            if not anonymous_function:
+                self.out.line()
 
     def _emit_recovered_class(self, instruction: DecodedInstruction) -> bool:
         declaration = self.class_plan.at(instruction.pc)
@@ -1520,6 +1585,7 @@ class _FunctionLifter:
                 self.proto_names,
                 self.options,
                 self.out,
+                inline_only_proto_ids=self.inline_only_proto_ids,
             ).lift(
                 as_function=True,
                 function_name_override=method_name,
@@ -1554,9 +1620,10 @@ class _FunctionLifter:
             index = instruction.aux if instruction.aux is not None else 0
             self._assign(instruction.a, _constant_expr(self.proto, index), pc)
         elif name == "MOVE":
-            if (
-                self.options.reconstruct_table_literals
-                and self._transfer_pending_table(instruction)
+            if self._transfer_inline_callback(instruction):
+                return
+            if self.options.reconstruct_table_literals and self._transfer_pending_table(
+                instruction
             ):
                 return
             self._assign(instruction.a, self._ref_expr(instruction.b, pc), pc)
@@ -1581,25 +1648,31 @@ class _FunctionLifter:
                 pc,
             )
         elif name == "GETUPVAL":
-            upvalue = (
-                self.proto.upvalue_names[instruction.b]
-                if instruction.b < len(self.proto.upvalue_names)
-                else None
-            )
-            self._assign(
-                instruction.a,
-                NameExpr(
-                    _sanitize_identifier(upvalue, f"upvalue_{instruction.b}")
-                ),
-                pc,
-            )
+            binding = self.upvalue_bindings.get(instruction.b)
+            if binding is not None:
+                self._assign(instruction.a, binding, pc)
+            else:
+                upvalue = (
+                    self.proto.upvalue_names[instruction.b]
+                    if instruction.b < len(self.proto.upvalue_names)
+                    else None
+                )
+                self._assign(
+                    instruction.a,
+                    NameExpr(_sanitize_identifier(upvalue, f"upvalue_{instruction.b}")),
+                    pc,
+                )
         elif name == "SETUPVAL":
-            upvalue = (
-                self.proto.upvalue_names[instruction.b]
-                if instruction.b < len(self.proto.upvalue_names)
-                else None
-            )
-            lhs = _sanitize_identifier(upvalue, f"upvalue_{instruction.b}")
+            binding = self.upvalue_bindings.get(instruction.b)
+            if binding is not None:
+                lhs = render_expression(binding)
+            else:
+                upvalue = (
+                    self.proto.upvalue_names[instruction.b]
+                    if instruction.b < len(self.proto.upvalue_names)
+                    else None
+                )
+                lhs = _sanitize_identifier(upvalue, f"upvalue_{instruction.b}")
             self.out.line(f"{lhs} = {self._ref(instruction.a, pc)}", statement=True)
         elif name == "GETTABLE":
             expression = IndexExpr(
@@ -1713,20 +1786,21 @@ class _FunctionLifter:
                         statement=True,
                     )
         elif name in {"NEWCLOSURE", "DUPCLOSURE"}:
-            child_id: int | None = None
+            child_id = closure_proto_id(self.proto, instruction)
+            value = self.ssa.value_defined_at(pc, instruction.a)
             if (
-                name == "NEWCLOSURE"
-                and 0 <= instruction.d < len(self.proto.child_proto_ids)
+                child_id is not None
+                and value is not None
+                and value in self.callback_plan.proto_by_value
             ):
-                child_id = self.proto.child_proto_ids[instruction.d]
-            elif name == "DUPCLOSURE":
-                constant = _constant(self.proto, instruction.d)
-                if (
-                    constant
-                    and constant.kind == "closure"
-                    and isinstance(constant.value, int)
-                ):
-                    child_id = constant.value
+                expression, dependencies = self._anonymous_function_expr(
+                    child_id,
+                    instruction,
+                )
+                self.callback_expressions[value] = expression
+                self.callback_dependencies[value] = dependencies
+                self.register_names.setdefault(instruction.a, f"v{instruction.a}")
+                return
             expression = (
                 self.proto_names.get(child_id, f"proto_{child_id}")
                 if child_id is not None
@@ -1742,33 +1816,23 @@ class _FunctionLifter:
             self.register_names[instruction.a + 1] = render_expression(base)
         elif name in {"CALL", "CALLFB"}:
             if name == "CALLFB":
-                slot = (
-                    "sealed"
-                    if instruction.aux == 0xFFFFFFFF
-                    else str(instruction.aux)
-                )
+                slot = "sealed" if instruction.aux == 0xFFFFFFFF else str(instruction.aux)
                 self.out.line(f"-- call feedback slot: {slot}")
             expression = self._call_expression(instruction)
             if instruction.c == 1:
                 self.out.line(render_expression(expression), statement=True)
             elif instruction.c == 0:
-                if (
-                    self.options.reconstruct_table_literals
-                    and self._capture_open_table_value(instruction, expression)
+                if self.options.reconstruct_table_literals and self._capture_open_table_value(
+                    instruction, expression
                 ):
                     return
                 self._assign(
                     instruction.a,
-                    RawExpr(
-                        render_expression(expression)
-                        + " --[[ multiple returns ]]"
-                    ),
+                    RawExpr(render_expression(expression) + " --[[ multiple returns ]]"),
                     pc,
                 )
             else:
-                registers = list(
-                    range(instruction.a, instruction.a + instruction.c - 1)
-                )
+                registers = list(range(instruction.a, instruction.a + instruction.c - 1))
                 self._assign_many(registers, expression, pc)
         elif name == "RETURN":
             if instruction.b == 1:
@@ -1781,8 +1845,7 @@ class _FunctionLifter:
                 )
             else:
                 values = [
-                    self._ref(instruction.a + index, pc)
-                    for index in range(instruction.b - 1)
+                    self._ref(instruction.a + index, pc) for index in range(instruction.b - 1)
                 ]
                 self.out.line("return " + ", ".join(values), statement=True)
         elif name == "GETVARARGS":
@@ -1795,9 +1858,7 @@ class _FunctionLifter:
             if instruction.b <= 2:
                 self._assign(instruction.a, "...", pc)
             else:
-                registers = list(
-                    range(instruction.a, instruction.a + instruction.b - 1)
-                )
+                registers = list(range(instruction.a, instruction.a + instruction.b - 1))
                 self._assign_many(registers, "...", pc)
         elif name == "CAPTURE":
             if self.options.upvalue_comment:
@@ -1868,10 +1929,7 @@ class _FunctionLifter:
         elif name.startswith("FASTCALL"):
             target = _jump_target(instruction)
             friendly = builtin_name(instruction.a) or f"builtin_{instruction.a}"
-            self.out.line(
-                f"-- optimized call {friendly}; fallback continues at "
-                f"L{target:04d}"
-            )
+            self.out.line(f"-- optimized call {friendly}; fallback continues at L{target:04d}")
         elif name == "NEWCLASS":
             if self.options.recover_classes and self._emit_recovered_class(instruction):
                 return
@@ -1883,11 +1941,7 @@ class _FunctionLifter:
                 and isinstance(constant.value, ClassShapeConstant)
             ):
                 class_name, _, _ = _class_shape_names(self.proto, constant.value)
-            superclass = (
-                "nil"
-                if instruction.b == 0xFF
-                else self._ref(instruction.b, pc)
-            )
+            superclass = "nil" if instruction.b == 0xFF else self._ref(instruction.b, pc)
             self._assign(
                 instruction.a,
                 f"{{}} --[[ class {class_name}; superclass={superclass} ]]",
@@ -1896,8 +1950,7 @@ class _FunctionLifter:
         elif name == "NEWCLASSMEMBER":
             key = self._table_key(instruction)
             self.out.line(
-                f"{_field(self._ref(instruction.a, pc), key)} = "
-                f"{self._ref(instruction.c, pc)}",
+                f"{_field(self._ref(instruction.a, pc), key)} = {self._ref(instruction.c, pc)}",
                 statement=True,
             )
         elif name == "CLOSEUPVALS":
@@ -1924,21 +1977,52 @@ def decompile_module(
         f"{len(module.protos)} prototype(s)"
     )
     if module.userdata_types:
-        mapping = ", ".join(
-            f"{index}={name}" for index, name in module.userdata_types
-        )
+        mapping = ", ".join(f"{index}={name}" for index, name in module.userdata_types)
         out.line("-- userdata types: " + mapping)
     if module.trailing_bytes:
-        out.line(
-            f"-- Warning: {module.trailing_bytes} trailing byte(s) were not parsed"
-        )
+        out.line(f"-- Warning: {module.trailing_bytes} trailing byte(s) were not parsed")
     out.line()
 
     names = _proto_names(module)
+    inline_only_proto_ids = collect_inline_only_proto_ids(
+        module,
+        enabled=resolved.inline_roblox_callbacks,
+    )
+    main_instructions = tuple(decode_words(module.main_proto.code))
+    main_ssa = build_ssa(main_instructions, len(module.main_proto.code))
+    roblox_report = analyze_roblox_recovery(
+        module,
+        module.main_proto,
+        main_instructions,
+        main_ssa,
+    )
+    if resolved.recover_roblox_events and roblox_report.events:
+        out.line("-- Roblox events: " + ", ".join(item.display for item in roblox_report.events))
+    if resolved.recover_roblox_modules:
+        if roblox_report.dependencies:
+            out.line(
+                "-- Roblox module dependencies: "
+                + ", ".join(item.path for item in roblox_report.dependencies)
+            )
+        if roblox_report.export_kind is not None:
+            out.line("-- Roblox ModuleScript export: " + roblox_report.export_kind)
+    if (resolved.recover_roblox_events and roblox_report.events) or (
+        resolved.recover_roblox_modules
+        and (roblox_report.dependencies or roblox_report.export_kind is not None)
+    ):
+        out.line()
+
     for proto in module.protos:
-        if proto.proto_id == module.main_proto_id:
+        if proto.proto_id == module.main_proto_id or proto.proto_id in inline_only_proto_ids:
             continue
-        _FunctionLifter(module, proto, names, resolved, out).lift(as_function=True)
+        _FunctionLifter(
+            module,
+            proto,
+            names,
+            resolved,
+            out,
+            inline_only_proto_ids=inline_only_proto_ids,
+        ).lift(as_function=True)
 
     out.line("-- Main prototype")
     _FunctionLifter(
@@ -1947,6 +2031,7 @@ def decompile_module(
         names,
         resolved,
         out,
+        inline_only_proto_ids=inline_only_proto_ids,
     ).lift(as_function=False)
     return out.render()
 
@@ -1987,9 +2072,7 @@ def _describe_operand(
     elif name == "FASTCALL2K":
         descriptions.append(_constant_description(proto, instruction.aux or 0))
     elif name in {"JUMPXEQKN", "JUMPXEQKS"}:
-        descriptions.append(
-            _constant_description(proto, (instruction.aux or 0) & 0xFFFFFF)
-        )
+        descriptions.append(_constant_description(proto, (instruction.aux or 0) & 0xFFFFFF))
         descriptions.append(f"not={instruction.aux_not}")
     elif name == "JUMPXEQKB":
         descriptions.append(f"value={bool((instruction.aux or 0) & 1)}")
@@ -2002,18 +2085,14 @@ def _describe_operand(
         descriptions.append(f"target=L{target:04d}")
 
     if name.startswith("FASTCALL"):
-        descriptions.append(
-            f"builtin={builtin_name(instruction.a) or f'builtin_{instruction.a}'}"
-        )
+        descriptions.append(f"builtin={builtin_name(instruction.a) or f'builtin_{instruction.a}'}")
         if name == "FASTCALL3":
             descriptions.append(f"arg2=R{instruction.aux_a}")
             descriptions.append(f"arg3=R{instruction.aux_b}")
         elif name == "FASTCALL2":
             descriptions.append(f"arg2=R{instruction.aux_a}")
     elif name == "CAPTURE":
-        descriptions.append(
-            f"capture={_CAPTURE_NAMES.get(instruction.a, instruction.a)}"
-        )
+        descriptions.append(f"capture={_CAPTURE_NAMES.get(instruction.a, instruction.a)}")
     elif name == "FORGLOOP":
         descriptions.append(f"variables={(instruction.aux or 0) & 0xFF}")
         descriptions.append(f"ipairs={bool((instruction.aux or 0) & 0x80000000)}")
@@ -2022,25 +2101,19 @@ def _describe_operand(
         descriptions.append(f"hash_log2={instruction.b}")
     elif name == "SETLIST":
         descriptions.append(f"start={(instruction.aux or 0) + 1}")
-        descriptions.append(
-            "count=top" if instruction.c == 0 else f"count={instruction.c - 1}"
-        )
+        descriptions.append("count=top" if instruction.c == 0 else f"count={instruction.c - 1}")
     elif name == "CALLFB":
         slot = "sealed" if instruction.aux == 0xFFFFFFFF else instruction.aux
         descriptions.append(f"feedback_slot={slot}")
     elif name == "CMPPROTO":
         proto_id = instruction.aux if instruction.aux is not None else -1
         proto_name = (
-            module.protos[proto_id].debug_name
-            if 0 <= proto_id < len(module.protos)
-            else None
+            module.protos[proto_id].debug_name if 0 <= proto_id < len(module.protos) else None
         )
         descriptions.append(f"proto={proto_id}:{proto_name or '<anonymous>'}")
     elif name == "NEWCLASS":
         descriptions.append(_constant_description(proto, instruction.aux or 0))
-        descriptions.append(
-            "super=nil" if instruction.b == 0xFF else f"super=R{instruction.b}"
-        )
+        descriptions.append("super=nil" if instruction.b == 0xFF else f"super=R{instruction.b}")
     elif name == "COVERAGE":
         descriptions.append(f"hits={instruction.e}")
 
@@ -2064,10 +2137,7 @@ def _type_info_lines(
         lines.append(".typed_locals")
         for item in proto.typed_locals:
             type_name = format_type_tag(item.type_tag, module.userdata_type_map)
-            lines.append(
-                f"  R{item.register:<3} {type_name:<20} "
-                f"pc={item.start_pc}..{item.end_pc}"
-            )
+            lines.append(f"  R{item.register:<3} {type_name:<20} pc={item.start_pc}..{item.end_pc}")
     if proto.type_info_trailing:
         lines.append(".type_extension " + proto.type_info_trailing.hex())
     return lines
@@ -2083,10 +2153,7 @@ def disassemble_module(module: LuauBytecodeModule, filename: str | None) -> str:
     ]
     if module.userdata_types:
         lines.append(
-            "; userdata="
-            + ", ".join(
-                f"{index}:{name}" for index, name in module.userdata_types
-            )
+            "; userdata=" + ", ".join(f"{index}:{name}" for index, name in module.userdata_types)
         )
     for proto in module.protos:
         flags = ",".join(proto.flag_names) or "none"
@@ -2117,26 +2184,19 @@ def disassemble_module(module: LuauBytecodeModule, filename: str | None) -> str:
                     f"pc={item.start_pc}..{item.end_pc}"
                 )
         if proto.feedback_pcs:
-            lines.append(
-                ".feedback " + ", ".join(str(pc) for pc in proto.feedback_pcs)
-            )
+            lines.append(".feedback " + ", ".join(str(pc) for pc in proto.feedback_pcs))
         for instruction in proto.instructions:
             line_number = (
-                proto.line_info[instruction.pc]
-                if instruction.pc < len(proto.line_info)
-                else None
+                proto.line_info[instruction.pc] if instruction.pc < len(proto.line_info) else None
             )
             prefix = f"{line_number:5d} " if line_number is not None else "      "
             lines.append(
-                prefix
-                + instruction.render()
-                + _describe_operand(module, proto, instruction)
+                prefix + instruction.render() + _describe_operand(module, proto, instruction)
             )
         if proto.constants:
             lines.append(".constants")
             for index, constant in enumerate(proto.constants):
                 lines.append(
-                    f"  K{index:<4} {constant.kind:<22} "
-                    f"{_constant_description(proto, index)}"
+                    f"  K{index:<4} {constant.kind:<22} {_constant_description(proto, index)}"
                 )
     return "\n".join(lines).rstrip() + "\n"

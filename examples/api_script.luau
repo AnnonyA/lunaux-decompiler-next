@@ -27,6 +27,9 @@ environment.LUNAUX_OPTIONS = environment.LUNAUX_OPTIONS or {
     SmartVariableNames = true,
     InferTypes = true,
     ShowRecoveredSymbols = false,
+    RecoverRobloxEvents = true,
+    InlineRobloxCallbacks = true,
+    RecoverRobloxModules = true,
     RecoverClasses = true,
     MaxOutputCharacters = 4000000,
 }

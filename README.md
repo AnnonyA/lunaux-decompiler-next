@@ -2,7 +2,7 @@
 
 A local Roblox Luau bytecode decompiler and disassembler with a native backend, the optional Unluau CLI, a portable Python engine, an HTTP API, a CLI, and Windows/Linux launchers.
 
-> **Version 0.13:** expands table recovery into an ownership- and SSA-aware reconstruction pass for nested tables, templates, dynamic keys, deterministic overwrites, aliases, and open `SETLIST` tails.
+> **Version 0.14:** reconstructs Roblox event connections, single-owner callbacks, captured callback values, `require` dependencies, and function-valued ModuleScript exports on top of the 0.13 table pass.
 
 ## Engine chain
 
@@ -29,6 +29,10 @@ A crash, timeout, unsupported file, or empty result from one engine moves the re
 - Converts validated two-branch phi diamonds into typed Luau `if ... then ... else ...` expressions.
 - Combines reducible short-circuit branch chains into `and` and `or` conditions without crossing side effects.
 - Reconstructs full table constructors from `NEWTABLE` and `DUPTABLE`, including nested tables, named/indexed/dynamic keys, fixed `SETLIST` ranges, and final open call or vararg tails.
+- Reconstructs Roblox event connections, including `Connect`, `ConnectParallel`, `Once`, and signal waits, with `RBXScriptConnection` result evidence.
+- Inlines single-owner closures into recognized event, scheduler, action-binding, sorting, module-field, and returned-function callback positions.
+- Rebinds callback captures and follows single-use closure aliases while preserving shared callbacks as named functions.
+- Recovers `require` dependency paths, derives stable module names, reports ModuleScript export shape, and folds function-valued module tables.
 - Eliminates safe adjacent single-use temporaries without duplicating evaluations or hiding named/typed debug locals.
 - Represents recovered unary, binary, table, field, index, call, and method expressions as immutable AST nodes.
 - Prints Luau expressions with formal precedence and associativity, including safe nested unary rendering.
@@ -81,6 +85,26 @@ local function func(
     -- reconstructed body
 end
 ```
+
+### Roblox events, callbacks, and modules
+
+Version 0.14 recognizes Roblox signal connections and supported callback sinks. A closure is inlined only when SSA proves that the closure instance has one supported destination; shared or escaping callbacks keep their named prototype form.
+
+```luau
+local connection: RBXScriptConnection = button.Activated:Connect(function(input)
+    print(input)
+end)
+
+local inventoryService = require(script.Parent.InventoryService)
+
+return {
+    Start = function()
+        inventoryService:Start()
+    end,
+}
+```
+
+The output header reports recognized event bindings, `require` dependencies, and a consistent ModuleScript export kind. Captured values are rebound inside anonymous functions, and pending module tables are materialized before a capture or dependency change could alter semantics. See [`docs/ROBLOX_EVENTS_CALLBACKS_MODULES.md`](docs/ROBLOX_EVENTS_CALLBACKS_MODULES.md).
 
 ### Full table reconstruction
 
@@ -429,6 +453,9 @@ All decompiling options can be placed inside `LUNAUX_OPTIONS` or sent in the JSO
 | `CombineBooleanConditions` | `true` | Combine reducible short-circuit jump chains into `and` and `or`. |
 | `ReconstructTableLiterals` | `true` | Recover owned table-construction regions, including nested tables, templates, dynamic keys, aliases, overwrites, and supported `SETLIST` tails. |
 | `InlineSingleUseTemporaries` | `true` | Fold safe adjacent SSA temporaries into their single consumer. Disable for more literal register-oriented output. |
+| `RecoverRobloxEvents` | `true` | Report recognized Roblox signal connections and event waits. |
+| `InlineRobloxCallbacks` | `true` | Inline single-owner closures into supported callback, module-field, and returned-function positions. |
+| `RecoverRobloxModules` | `true` | Recover `require` dependency paths and ModuleScript export shape. |
 | `SmartVariableNames` | `true` | Select names from debug metadata, SSA relationships, imports, fields, types, and Roblox API evidence. |
 | `InferTypes` | `true` | Infer conservative parameter, local, expression, and return types. |
 | `ShowRecoveredSymbols` | `false` | Emit comments describing recovered SSA names, types, and evidence. |

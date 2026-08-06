@@ -481,9 +481,7 @@ def _recover_region(
 
     selector_pcs = frozenset(selector.pc for selector in selectors)
     transition_pcs = frozenset(
-        case.transition_pc
-        for case in ordered_cases
-        if case.transition_pc is not None
+        case.transition_pc for case in ordered_cases if case.transition_pc is not None
     )
     if not _exclusive_state_register(
         analysis,
@@ -507,11 +505,7 @@ def _recover_region(
         if exit_pc <= machine_max_pc:
             return None
 
-    body_pcs = {
-        pc
-        for parsed in parsed_cases
-        for pc in parsed.case.body_pcs
-    }
+    body_pcs = {pc for parsed in parsed_cases for pc in parsed.case.body_pcs}
     skipped = {
         initial_instruction.pc,
         initial_jump.pc,

@@ -193,9 +193,7 @@ def _latch_blocks(
     header: int,
 ) -> frozenset[int]:
     return frozenset(
-        source
-        for source in body
-        if header in analysis.block_by_start[source].successors
+        source for source in body if header in analysis.block_by_start[source].successors
     )
 
 
@@ -241,7 +239,9 @@ def _classify_region(
     if header_terminator is not None and header_terminator.name in _CONDITIONAL_OPS:
         taken, fallthrough = _branch_edges(analysis, header_block)
         inside = [target for target in (taken, fallthrough) if target in body and target != header]
-        outside = [target for target in (taken, fallthrough) if target is not None and target not in body]
+        outside = [
+            target for target in (taken, fallthrough) if target is not None and target not in body
+        ]
         if len(inside) == 1 and len(outside) == 1:
             if close_pc is None or close_pc != outside[0]:
                 return None

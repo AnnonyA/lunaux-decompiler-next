@@ -1,3 +1,9 @@
+from lunaux.backends.advanced_loops import (
+    AdvancedLoopPlan,
+    AdvancedLoopRegion,
+    LoopJumpAction,
+    analyze_advanced_loops,
+)
 from lunaux.backends.analysis import (
     BasicBlock,
     BranchRegion,
@@ -55,8 +61,16 @@ from lunaux.backends.ssa import (
     build_ssa,
     render_ssa,
 )
+from lunaux.backends.state_machine import (
+    StateMachineCase,
+    StateMachinePlan,
+    StateMachineRegion,
+    recover_state_machines,
+)
 
 __all__ = [
+    "AdvancedLoopPlan",
+    "AdvancedLoopRegion",
     "AutoBackend",
     "BackendMode",
     "BasicBlock",
@@ -69,6 +83,7 @@ __all__ = [
     "FlowTypeFact",
     "FunctionContext",
     "FunctionContextPlan",
+    "LoopJumpAction",
     "NativeModuleBackend",
     "NaturalLoop",
     "PhiNode",
@@ -84,6 +99,10 @@ __all__ = [
     "SSAProgram",
     "SSAUse",
     "SSAValue",
+    "StateMachineCase",
+    "StateMachinePlan",
+    "StateMachineRegion",
+    "analyze_advanced_loops",
     "analyze_control_flow",
     "analyze_flow_types",
     "build_backend",
@@ -98,6 +117,7 @@ __all__ = [
     "plan_contextual_functions",
     "property_type",
     "recover_classes",
+    "recover_state_machines",
     "register_access",
     "render_cfg_dot",
     "render_ssa",

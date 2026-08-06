@@ -54,7 +54,7 @@ A table is folded only when the pass finds all of the following evidence:
 - at least one constructor, instance method, or metamethod;
 - no dynamic-key member write that could change the class surface.
 
-The original member writes, closure creation instructions, and validated capture instructions are skipped only after the class declaration owns those closures. Shared closures and unresolved members keep their ordinary representation.
+Single-register `MOVE` aliases are canonicalized back to the owning SSA value before checking `__index`, member assignments, and closure ownership. The original member writes, closure creation instructions, and validated capture instructions are skipped only after the class declaration owns those closures. Shared closures and unresolved members keep their ordinary representation.
 
 ## Method classification
 

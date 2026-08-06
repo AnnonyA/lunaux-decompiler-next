@@ -33,7 +33,15 @@ from lunaux.backends.bytecode import (
     LuauProto,
     format_type_tag,
 )
-from lunaux.backends.classes import recover_classes
+from lunaux.backends.classes import (
+    ClassRecoveryPlan,
+    collect_class_method_proto_ids,
+    recover_classes,
+)
+from lunaux.backends.contextual_functions import (
+    collect_module_function_contexts,
+    plan_contextual_functions,
+)
 from lunaux.backends.inlining import plan_expression_inlining
 from lunaux.backends.opcodes import (
     DecodedInstruction,
@@ -148,11 +156,13 @@ class _Options:
     infer_types: bool
     flow_sensitive_types: bool
     roblox_api_types: bool
+    contextual_functions: bool
     show_recovered_symbols: bool
     recover_roblox_events: bool
     inline_roblox_callbacks: bool
     recover_roblox_modules: bool
     recover_classes: bool
+    recover_metatable_classes: bool
 
     @classmethod
     def from_backend(cls, options: dict[str, bool]) -> _Options:
@@ -180,6 +190,7 @@ class _Options:
             infer_types=options.get("InferTypes", True),
             flow_sensitive_types=options.get("FlowSensitiveTypes", True),
             roblox_api_types=options.get("RobloxAPITypes", True),
+            contextual_functions=options.get("ContextualFunctions", True),
             show_recovered_symbols=options.get(
                 "ShowRecoveredSymbols",
                 False,
@@ -191,6 +202,7 @@ class _Options:
             ),
             recover_roblox_modules=options.get("RecoverRobloxModules", True),
             recover_classes=options.get("RecoverClasses", True),
+            recover_metatable_classes=options.get("RecoverMetatableClasses", True),
         )
 
 
@@ -440,7 +452,9 @@ class _FunctionLifter:
         *,
         inline_only_proto_ids: frozenset[int] = frozenset(),
         upvalue_bindings: dict[int, Expr] | None = None,
+        parameter_name_overrides: dict[int, str] | None = None,
         parameter_type_overrides: dict[int, str] | None = None,
+        return_type_override: str | None = None,
     ) -> None:
         self.module = module
         self.proto = proto
@@ -449,7 +463,9 @@ class _FunctionLifter:
         self.out = emitter
         self.inline_only_proto_ids = inline_only_proto_ids
         self.upvalue_bindings = upvalue_bindings or {}
+        self.parameter_name_overrides = parameter_name_overrides or {}
         self.parameter_type_overrides = parameter_type_overrides or {}
+        self.return_type_override = return_type_override
         self.scope_tree = build_scope_tree(proto)
         self.register_names: dict[int, str] = {}
         self.declared: set[str] = set()
@@ -489,11 +505,25 @@ class _FunctionLifter:
                 flow_sensitive_types=options.flow_sensitive_types,
                 roblox_api_types=options.roblox_api_types,
             )
-        self.class_plan = recover_classes(
+        self.class_plan = (
+            recover_classes(
+                module,
+                proto,
+                self.instructions,
+                self.ssa,
+                recover_metatable_classes=options.recover_metatable_classes,
+            )
+            if options.recover_classes
+            else ClassRecoveryPlan.empty()
+        )
+        self.contextual_plan = plan_contextual_functions(
             module,
             proto,
             self.instructions,
             self.ssa,
+            self.class_plan,
+            callback_plan=self.callback_plan,
+            enabled=options.contextual_functions,
         )
         self.inline_plan = plan_expression_inlining(self.ssa, proto)
         self.inline_expressions: dict[SSAValue, Expr] = {}
@@ -680,6 +710,8 @@ class _FunctionLifter:
         return labels
 
     def _name(self, register: int, pc: int) -> str:
+        if register < self.proto.num_params and register in self.register_names:
+            return self.register_names[register]
         binding = self.scope_tree.binding_for_register(register, pc)
         if binding is not None:
             active = _sanitize_identifier(binding.name, f"v{register}")
@@ -693,6 +725,8 @@ class _FunctionLifter:
         return self.register_names.get(register, f"v{register}")
 
     def _definition_name(self, register: int, pc: int) -> str:
+        if register < self.proto.num_params and register in self.register_names:
+            return self.register_names[register]
         binding = self.scope_tree.binding_for_register(register, pc)
         if binding is not None:
             active = _sanitize_identifier(binding.name, f"v{register}")
@@ -747,7 +781,7 @@ class _FunctionLifter:
 
     def _annotated_name(self, register: int, name: str, pc: int) -> str:
         type_name = _local_type(self.module, self.proto, register, pc)
-        if type_name is None and pc == 0 and self.options.roblox_api_types:
+        if type_name is None and pc == 0:
             type_name = self.parameter_type_overrides.get(register)
         if type_name is None and self.options.infer_types and self.symbols is not None:
             type_name = self.symbols.type_at_definition(pc, register)
@@ -1312,14 +1346,18 @@ class _FunctionLifter:
         closure_value = self.ssa.value_defined_at(instruction.pc, instruction.a)
         callback_types = (
             self.callback_plan.parameter_types_by_value.get(closure_value, ())
-            if closure_value is not None
+            if closure_value is not None and self.options.roblox_api_types
             else ()
         )
+        context = self.contextual_plan.for_value(closure_value)
+        parameter_name_overrides = dict(context.parameter_names) if context is not None else {}
         parameter_type_overrides = {
             index: type_name
             for index, type_name in enumerate(callback_types)
             if index < child.num_params and not type_name.startswith("...")
         }
+        if context is not None:
+            parameter_type_overrides.update(context.parameter_types)
         _FunctionLifter(
             self.module,
             child,
@@ -1328,7 +1366,9 @@ class _FunctionLifter:
             callback_out,
             inline_only_proto_ids=self.inline_only_proto_ids,
             upvalue_bindings=bindings,
+            parameter_name_overrides=parameter_name_overrides,
             parameter_type_overrides=parameter_type_overrides,
+            return_type_override=context.return_type if context is not None else None,
         ).lift(as_function=True, anonymous_function=True)
         return (
             RawExpr(callback_out.render().strip(), Precedence.ATOM),
@@ -1476,7 +1516,13 @@ class _FunctionLifter:
                 if self.options.smart_variable_names and self.symbols is not None
                 else None
             )
-            name = _local_name(self.proto, register, 0) or recovered_name or f"arg{register + 1}"
+            contextual_name = self.parameter_name_overrides.get(register)
+            name = (
+                _local_name(self.proto, register, 0)
+                or contextual_name
+                or recovered_name
+                or f"arg{register + 1}"
+            )
             name = _sanitize_identifier(name, f"arg{register + 1}")
             parameters.append(self._annotated_name(register, name, 0))
             self.register_names[register] = name
@@ -1491,13 +1537,12 @@ class _FunctionLifter:
                 function_name = function_name_override or self.proto_names[self.proto.proto_id]
                 prefix = "local function" if local_function else "function"
                 header = f"{prefix} {function_name}({', '.join(parameters)})"
-            if (
-                self.options.infer_types
-                and self.symbols is not None
-                and self.symbols.return_type
-                and self.symbols.return_type != "any"
-            ):
-                header += f": {self.symbols.return_type}"
+            if self.options.infer_types:
+                return_type = self.return_type_override
+                if return_type is None and self.symbols is not None and self.symbols.return_type:
+                    return_type = self.symbols.return_type
+                if return_type and return_type != "any":
+                    header += f": {return_type}"
             self.out.open(header)
         if self.options.show_function_id:
             self.out.line(f"-- function id: {self.proto.proto_id}")
@@ -1585,9 +1630,13 @@ class _FunctionLifter:
         self.register_names[instruction.a] = class_name
         self.declared.add(class_name)
         self.out.open(f"class {class_name}")
+        if declaration.source_kind == "metatable":
+            self.out.line("-- recovered from metatable __index pattern")
         if declaration.superclass_register is not None:
             superclass = self._ref(declaration.superclass_register, instruction.pc)
             self.out.line(f"-- superclass: {superclass}")
+        elif declaration.superclass_name is not None:
+            self.out.line(f"-- superclass: {declaration.superclass_name}")
         for property_name in declaration.properties:
             property_name = _sanitize_identifier(property_name, "property")
             self.out.line(f"public {property_name}")
@@ -1598,6 +1647,12 @@ class _FunctionLifter:
             if method.proto_id is None:
                 self.out.line(f"-- unresolved method {method_name}")
                 continue
+            if method.kind == "constructor":
+                self.out.line("-- constructor")
+            elif method.kind == "static_method":
+                self.out.line("-- static method")
+            elif method.kind == "metamethod":
+                self.out.line("-- metamethod")
             child = self.module.protos[method.proto_id]
             _FunctionLifter(
                 self.module,
@@ -1606,6 +1661,9 @@ class _FunctionLifter:
                 self.options,
                 self.out,
                 inline_only_proto_ids=self.inline_only_proto_ids,
+                parameter_name_overrides=dict(method.parameter_names),
+                parameter_type_overrides=dict(method.parameter_types),
+                return_type_override=method.return_type,
             ).lift(
                 as_function=True,
                 function_name_override=method_name,
@@ -1618,6 +1676,12 @@ class _FunctionLifter:
         name = instruction.name
         pc = instruction.pc
         expression: Expr | str
+        if (
+            name in {"NEWTABLE", "DUPTABLE"}
+            and self.options.recover_classes
+            and self._emit_recovered_class(instruction)
+        ):
+            return
         if (
             self.options.reconstruct_table_literals
             and is_table_write(instruction)
@@ -2008,6 +2072,19 @@ def decompile_module(
         module,
         enabled=resolved.inline_roblox_callbacks,
     )
+    class_method_proto_ids = (
+        collect_class_method_proto_ids(
+            module,
+            recover_metatable_classes=resolved.recover_metatable_classes,
+        )
+        if resolved.recover_classes
+        else frozenset()
+    )
+    contextual_contexts = collect_module_function_contexts(
+        module,
+        recover_metatable_classes=resolved.recover_metatable_classes,
+        enabled=resolved.contextual_functions,
+    )
     main_instructions = tuple(decode_words(module.main_proto.code))
     main_ssa = build_ssa(main_instructions, len(module.main_proto.code))
     roblox_report = analyze_roblox_recovery(
@@ -2033,8 +2110,13 @@ def decompile_module(
         out.line()
 
     for proto in module.protos:
-        if proto.proto_id == module.main_proto_id or proto.proto_id in inline_only_proto_ids:
+        if (
+            proto.proto_id == module.main_proto_id
+            or proto.proto_id in inline_only_proto_ids
+            or proto.proto_id in class_method_proto_ids
+        ):
             continue
+        context = contextual_contexts.get(proto.proto_id)
         _FunctionLifter(
             module,
             proto,
@@ -2042,7 +2124,22 @@ def decompile_module(
             resolved,
             out,
             inline_only_proto_ids=inline_only_proto_ids,
-        ).lift(as_function=True)
+            parameter_name_overrides=(
+                dict(context.parameter_names) if context is not None else None
+            ),
+            parameter_type_overrides=(
+                dict(context.parameter_types) if context is not None else None
+            ),
+            return_type_override=context.return_type if context is not None else None,
+        ).lift(
+            as_function=True,
+            function_name_override=(
+                _sanitize_identifier(context.name, names[proto.proto_id])
+                if context is not None
+                else None
+            ),
+            local_function=context is None or context.kind != "global",
+        )
 
     out.line("-- Main prototype")
     _FunctionLifter(

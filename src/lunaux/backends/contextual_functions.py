@@ -486,7 +486,5 @@ def collect_module_function_contexts(
         )
         for proto_id, context in plan.by_proto.items():
             current = contexts.get(proto_id)
-            contexts[proto_id] = (
-                context if current is None else _merge_contexts(current, context)
-            )
+            contexts[proto_id] = context if current is None else _merge_contexts(current, context)
     return MappingProxyType(contexts)

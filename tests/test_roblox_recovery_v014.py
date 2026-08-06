@@ -107,8 +107,8 @@ def test_inlines_event_callback_and_recovers_connection() -> None:
     )
 
     assert "-- Roblox events: button.Activated:Connect" in output
-    assert ":Connect(function(arg1: InputObject)" in output
-    assert "print(arg1)" in output
+    assert ":Connect(function(input: InputObject)" in output
+    assert "print(input)" in output
     assert "RBXScriptConnection" in output
     assert "local function onActivated" not in output
 

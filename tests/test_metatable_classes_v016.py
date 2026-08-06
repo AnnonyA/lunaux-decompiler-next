@@ -235,6 +235,10 @@ def test_dynamic_class_member_prevents_metatable_folding() -> None:
 
 
 def test_contextual_parameter_names_are_stable_and_unique() -> None:
-    assert parameter_names_for_types(
-        ("InputObject", "boolean", "number", "number", "Player")
-    ) == ("input", "processed", "deltaTime", "deltaTime2", "player")
+    assert parameter_names_for_types(("InputObject", "boolean", "number", "number", "Player")) == (
+        "input",
+        "processed",
+        "deltaTime",
+        "deltaTime2",
+        "player",
+    )

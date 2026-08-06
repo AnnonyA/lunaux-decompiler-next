@@ -700,9 +700,7 @@ def recover_classes(
     if not instructions:
         return ClassRecoveryPlan.empty()
     instruction_by_pc = {instruction.pc: instruction for instruction in instructions}
-    instruction_index = {
-        instruction.pc: index for index, instruction in enumerate(instructions)
-    }
+    instruction_index = {instruction.pc: index for index, instruction in enumerate(instructions)}
     declarations, skipped, method_proto_ids = _recover_bytecode_classes(
         module,
         proto,

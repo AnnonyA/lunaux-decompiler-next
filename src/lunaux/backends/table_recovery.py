@@ -51,6 +51,9 @@ _SAFE_GAP_OPS: Final[frozenset[str]] = frozenset(
         "CONCAT",
         "NEWTABLE",
         "DUPTABLE",
+        "NEWCLOSURE",
+        "DUPCLOSURE",
+        "CAPTURE",
     }
 )
 
@@ -181,11 +184,7 @@ class PendingTableLiteral:
                 return self.add_named(decoded, value, dependencies)
             if isinstance(decoded, int) and not isinstance(decoded, bool) and decoded > 0:
                 return self.add_index(decoded, value, dependencies)
-            if (
-                isinstance(decoded, float)
-                and decoded.is_integer()
-                and decoded > 0
-            ):
+            if isinstance(decoded, float) and decoded.is_integer() and decoded > 0:
                 return self.add_index(int(decoded), value, dependencies)
         return self._store(
             TableEntry(
@@ -210,9 +209,7 @@ class PendingTableLiteral:
         if self.open_tail is not None or start_index <= 0:
             return False
         numeric_indices = {
-            entry.array_index
-            for entry in self.entries
-            if entry.array_index is not None
+            entry.array_index for entry in self.entries if entry.array_index is not None
         }
         return numeric_indices == set(range(1, start_index))
 

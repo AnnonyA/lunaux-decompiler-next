@@ -19,6 +19,7 @@ from lunaux.backends.roblox_patterns import (
     match_function_call,
     match_method_call,
 )
+from lunaux.backends.roblox_recovery import module_name_from_path
 from lunaux.backends.ssa import SSAProgram, SSAValue
 from lunaux.backends.type_inference import (
     infer_function_return,
@@ -185,9 +186,7 @@ class SymbolRecovery:
                 continue
             annotation = f": {symbol.type_name}" if symbol.type_name else ""
             evidence = "; ".join(symbol.evidence[:3]) or "generated fallback"
-            lines.append(
-                f"{symbol.value.name} -> {symbol.name}{annotation} [{evidence}]"
-            )
+            lines.append(f"{symbol.value.name} -> {symbol.name}{annotation} [{evidence}]")
             if len(lines) >= limit:
                 break
         return tuple(lines)
@@ -320,9 +319,7 @@ def _local_name(proto: LuauProto, register: int, pc: int) -> str | None:
     candidates = [
         item
         for item in proto.locals
-        if item.register == register
-        and item.start_pc <= pc < item.end_pc
-        and item.name
+        if item.register == register and item.start_pc <= pc < item.end_pc and item.name
     ]
     if not candidates:
         return None
@@ -571,9 +568,7 @@ def build_symbol_recovery(
                 )
         elif name in {"GETTABLEKS", "GETUDATAKS"}:
             field_index = (
-                instruction.userdata_constant_index
-                if name == "GETUDATAKS"
-                else instruction.aux
+                instruction.userdata_constant_index if name == "GETUDATAKS" else instruction.aux
             )
             key = _constant_string(
                 proto,
@@ -653,8 +648,7 @@ def build_symbol_recovery(
                     }:
                         break
                     if (
-                        previous_instruction.name
-                        in {"NAMECALL", "NAMECALLUDATA"}
+                        previous_instruction.name in {"NAMECALL", "NAMECALLUDATA"}
                         and previous_instruction.a == instruction.a
                     ):
                         previous = previous_instruction
@@ -747,8 +741,7 @@ def build_symbol_recovery(
                         f"{method} return contract",
                     )
             elif (
-                method in {"FindFirstChildOfClass", "FindFirstChildWhichIsA"}
-                and instruction.b > 2
+                method in {"FindFirstChildOfClass", "FindFirstChildWhichIsA"} and instruction.b > 2
             ):
                 argument = literal_string(program.value_at_use(pc, instruction.a + 2))
                 for register in result_registers:
@@ -793,11 +786,20 @@ def build_symbol_recovery(
             else:
                 function_value = program.value_at_use(pc, instruction.a)
                 call_path = value_path(function_value)
+                if call_path == "require" and instruction.b > 1:
+                    dependency_path = value_path(program.value_at_use(pc, instruction.a + 1))
+                    module_name = module_name_from_path(dependency_path)
+                    for register in result_registers:
+                        add_definition_name(
+                            pc,
+                            register,
+                            module_name,
+                            96,
+                            "Roblox require path",
+                        )
                 direct_arguments = (
                     tuple(
-                        literal_string(
-                            program.value_at_use(pc, instruction.a + offset)
-                        )
+                        literal_string(program.value_at_use(pc, instruction.a + offset))
                         for offset in range(1, instruction.b)
                     )
                     if instruction.b > 1
@@ -986,9 +988,7 @@ def build_symbol_recovery(
             saw_empty_return = True
         elif instruction.b == 2:
             return_value = program.value_at_use(instruction.pc, instruction.a)
-            symbol = (
-                symbols.get(return_value) if return_value is not None else None
-            )
+            symbol = symbols.get(return_value) if return_value is not None else None
             if symbol is None or symbol.type_name is None:
                 unresolved_return = True
             else:

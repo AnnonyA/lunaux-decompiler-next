@@ -68,6 +68,22 @@ def match_method_call(
         return None
     literal = _first_literal(arguments)
 
+    if method in {"Connect", "ConnectParallel", "Once"}:
+        return RobloxPatternMatch(
+            "connection",
+            "RBXScriptConnection",
+            96,
+            f"Roblox event {method} connection",
+        )
+
+    if method == "Wait":
+        return RobloxPatternMatch(
+            "eventValue",
+            None,
+            66,
+            "Roblox signal Wait result",
+        )
+
     if method == "GetService" and literal:
         service = _identifier(literal)
         return RobloxPatternMatch(
@@ -184,6 +200,31 @@ def match_function_call(
     if not path:
         return None
     literal = _first_literal(arguments)
+
+    if path == "require":
+        return RobloxPatternMatch(
+            "module",
+            None,
+            76,
+            "Roblox require dependency",
+        )
+
+    scheduled: Final[dict[str, tuple[str, str, int]]] = {
+        "task.defer": ("thread", "thread", 88),
+        "task.delay": ("thread", "thread", 88),
+        "task.spawn": ("thread", "thread", 88),
+        "coroutine.create": ("thread", "thread", 84),
+        "coroutine.wrap": ("wrapped", "function", 82),
+    }
+    scheduled_match = scheduled.get(path)
+    if scheduled_match is not None:
+        name, type_name, confidence = scheduled_match
+        return RobloxPatternMatch(
+            name,
+            type_name,
+            confidence,
+            f"Roblox callback scheduler {path}",
+        )
 
     if path == "Instance.new" and literal:
         class_name = _identifier(literal)

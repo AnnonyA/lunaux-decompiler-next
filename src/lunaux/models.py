@@ -41,6 +41,18 @@ class DecompileOptions(BaseModel):
         default=False,
         alias="ShowRecoveredSymbols",
     )
+    recover_roblox_events: bool = Field(
+        default=True,
+        alias="RecoverRobloxEvents",
+    )
+    inline_roblox_callbacks: bool = Field(
+        default=True,
+        alias="InlineRobloxCallbacks",
+    )
+    recover_roblox_modules: bool = Field(
+        default=True,
+        alias="RecoverRobloxModules",
+    )
     recover_classes: bool = Field(default=True, alias="RecoverClasses")
     max_output_characters: int = Field(
         default=4_000_000,
@@ -65,5 +77,8 @@ class DecompileOptions(BaseModel):
             "SmartVariableNames": self.smart_variable_names,
             "InferTypes": self.infer_types,
             "ShowRecoveredSymbols": self.show_recovered_symbols,
+            "RecoverRobloxEvents": self.recover_roblox_events,
+            "InlineRobloxCallbacks": self.inline_roblox_callbacks,
+            "RecoverRobloxModules": self.recover_roblox_modules,
             "RecoverClasses": self.recover_classes,
         }

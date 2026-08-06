@@ -28,11 +28,13 @@ environment.LUNAUX_OPTIONS = environment.LUNAUX_OPTIONS or {
     InferTypes = true,
     FlowSensitiveTypes = true,
     RobloxAPITypes = true,
+    ContextualFunctions = true,
     ShowRecoveredSymbols = false,
     RecoverRobloxEvents = true,
     InlineRobloxCallbacks = true,
     RecoverRobloxModules = true,
     RecoverClasses = true,
+    RecoverMetatableClasses = true,
     MaxOutputCharacters = 4000000,
 }
 

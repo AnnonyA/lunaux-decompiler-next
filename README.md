@@ -2,7 +2,7 @@
 
 A local Roblox Luau bytecode decompiler and disassembler with a native backend, the optional Unluau CLI, a portable Python engine, an HTTP API, a CLI, and Windows/Linux launchers.
 
-> **Version 0.10:** adds evidence-based symbol recovery, generated type families, conservative type inference, recovered function signatures, and Luau class reconstruction.
+> **Version 0.11:** adds a reusable Roblox pattern registry, a pre-emission heuristic type engine, and safe non-adjacent temporary elimination.
 
 ## Engine chain
 
@@ -31,8 +31,11 @@ A crash, timeout, unsupported file, or empty result from one engine moves the re
 - Prints Luau expressions with formal precedence and associativity, including safe nested unary rendering.
 - Reconstructs lexical scopes from debug ranges, including shadowing, register reuse, and typed bindings.
 - Recovers symbol names from debug metadata, SSA relationships, imports, fields, prototype bindings, and Roblox API call evidence.
+- Uses a dedicated Roblox pattern registry for services, children, tags, attributes, signals, spatial queries, constructors, players, and raycasts.
 - Generates stable type-family names such as `num1`, `bool1`, `str1`, `arg1`, `vec1`, and `buf1` when original names are absent.
 - Infers conservative parameter, local, and return types from serialized type metadata plus data flow and known operation contracts.
+- Runs reusable opcode, property, method, constructor, and flow type heuristics before source emission.
+- Inlines single-use temporaries across short pure instruction gaps while blocking calls, mutations, branches, and source-register redefinitions.
 - Reconstructs supported v100 `NEWCLASS` and `NEWCLASSMEMBER` regions as Luau `class ... end` declarations.
 - Reconstructs common expressions, table access, calls, methods, returns, closures, numeric/generic loops, `while`/`repeat` regions, and `if`/`else` layouts using compatibility patterns plus whole-function CFG/SSA analysis.
 - Resolves modern userdata, class, fastcall, feedback, and proto operands in disassembly.

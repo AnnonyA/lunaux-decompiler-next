@@ -56,6 +56,43 @@ _INLINEABLE_DEFINITIONS = frozenset(
         "CALLFB",
     }
 )
+_NON_ADJACENT_INLINEABLE_DEFINITIONS = frozenset(
+    {
+        "LOADNIL",
+        "LOADB",
+        "LOADN",
+        "LOADK",
+        "LOADKX",
+        "MOVE",
+        "ADD",
+        "SUB",
+        "MUL",
+        "DIV",
+        "MOD",
+        "POW",
+        "IDIV",
+        "ADDK",
+        "SUBK",
+        "MULK",
+        "DIVK",
+        "MODK",
+        "POWK",
+        "IDIVK",
+        "SUBRK",
+        "DIVRK",
+        "NOT",
+        "MINUS",
+        "LENGTH",
+        "CONCAT",
+    }
+)
+_REORDER_SAFE_INSTRUCTIONS = frozenset(
+    {
+        "NOP",
+        "COVERAGE",
+        *_NON_ADJACENT_INLINEABLE_DEFINITIONS,
+    }
+)
 _ATOMIC_EXPRESSION = re.compile(
     r'^(?:nil|true|false|-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?'
     r'|"(?:\\.|[^"\\])*"|[A-Za-z_][A-Za-z0-9_]*)$'
@@ -258,6 +295,32 @@ def _use_sites(program: SSAProgram) -> Mapping[SSAValue, tuple[int, ...]]:
     )
 
 
+def _safe_non_adjacent_gap(
+    program: SSAProgram,
+    definition_pc: int,
+    use_pc: int,
+) -> bool:
+    definition = program.instructions.get(definition_pc)
+    if definition is None:
+        return False
+    source_registers = set(_register_operands(definition.instruction))
+    intervening_pcs = sorted(
+        pc for pc in program.instructions if definition_pc < pc < use_pc
+    )
+    if len(intervening_pcs) > 6:
+        return False
+    for pc in intervening_pcs:
+        instruction = program.instructions[pc]
+        if instruction.instruction.name not in _REORDER_SAFE_INSTRUCTIONS:
+            return False
+        if any(
+            value.register in source_registers
+            for value in instruction.definitions
+        ):
+            return False
+    return True
+
+
 def plan_expression_inlining(
     program: SSAProgram,
     proto: LuauProto,
@@ -289,8 +352,14 @@ def plan_expression_inlining(
         consumer = program.instructions.get(use_pc)
         if consumer is None or consumer.instruction.name not in _SUPPORTED_CONSUMERS:
             continue
-        if definition_pc + definition.instruction.size != use_pc:
-            continue
+        adjacent = definition_pc + definition.instruction.size == use_pc
+        if not adjacent:
+            if (
+                definition.instruction.name
+                not in _NON_ADJACENT_INLINEABLE_DEFINITIONS
+                or not _safe_non_adjacent_gap(program, definition_pc, use_pc)
+            ):
+                continue
         definition_block = program.analysis.block_for_pc.get(definition_pc)
         use_block = program.analysis.block_for_pc.get(use_pc)
         if definition_block is None or definition_block != use_block:

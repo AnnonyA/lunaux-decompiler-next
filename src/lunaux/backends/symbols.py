@@ -15,7 +15,18 @@ from lunaux.backends.bytecode import (
     format_type_tag,
 )
 from lunaux.backends.opcodes import DecodedInstruction
+from lunaux.backends.roblox_patterns import (
+    match_function_call,
+    match_method_call,
+)
 from lunaux.backends.ssa import SSAProgram, SSAValue
+from lunaux.backends.type_inference import (
+    infer_function_return,
+    infer_instruction_type,
+    infer_method_return,
+    infer_property_type,
+    merge_types,
+)
 
 _IDENTIFIER: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RESERVED: Final[frozenset[str]] = frozenset(
@@ -358,30 +369,11 @@ def _instruction_constant(proto: LuauProto, instruction: DecodedInstruction) -> 
 
 
 def _property_type(key: str) -> str | None:
-    return _PROPERTY_TYPES.get(key)
+    return infer_property_type(key)
 
 
 def _direct_call_type(path: str | None) -> str | None:
-    if not path:
-        return None
-    if path in {"type", "typeof", "tostring"}:
-        return "string"
-    if path == "tonumber":
-        return "number?"
-    if path.startswith("math."):
-        return "number"
-    if path.startswith("string."):
-        tail = path.rsplit(".", 1)[-1]
-        if tail in {"byte", "find", "len"}:
-            return "number"
-        if tail in {"match"}:
-            return "string?"
-        return "string"
-    if path.startswith("bit32."):
-        return "number"
-    if path in {"rawget"}:
-        return "any"
-    return None
+    return infer_function_return(path)
 
 
 def _type_family(type_name: str | None) -> tuple[str, bool] | None:
@@ -402,17 +394,7 @@ def _type_family(type_name: str | None) -> tuple[str, bool] | None:
 
 
 def _union_type(types: set[str]) -> str | None:
-    values = {value for value in types if value and value != "any"}
-    if not values:
-        return None
-    if "nil" in values and len(values) == 2:
-        values.remove("nil")
-        return next(iter(values)).removesuffix("?") + "?"
-    if len(values) == 1:
-        return next(iter(values))
-    if len(values) <= 3:
-        return " | ".join(sorted(values))
-    return None
+    return merge_types(types)
 
 
 def build_symbol_recovery(
@@ -527,6 +509,23 @@ def build_symbol_recovery(
             type_name = _local_type(module, proto, definition.register, pc)
             facts[definition].add_name(debug_name, 100, "debug local name")
             facts[definition].add_type(type_name, 100, "serialized local type")
+
+        constant_kind = None
+        if name in {"LOADK", "LOADKX"}:
+            instruction_constant = _instruction_constant(proto, instruction)
+            if instruction_constant is not None:
+                constant_kind = instruction_constant.kind
+        heuristic_type = infer_instruction_type(
+            name,
+            constant_kind=constant_kind,
+        )
+        if heuristic_type is not None:
+            for definition in ssa_instruction.definitions:
+                facts[definition].add_type(
+                    heuristic_type,
+                    74,
+                    "heuristic opcode result type",
+                )
 
         if name == "MOVE":
             target = program.value_defined_at(pc, instruction.a)
@@ -677,6 +676,42 @@ def build_symbol_recovery(
                 )
 
             result_registers = [value.register for value in ssa_instruction.definitions]
+            literal_arguments = (
+                tuple(
+                    literal_string(program.value_at_use(pc, instruction.a + offset))
+                    for offset in range(2, instruction.b)
+                )
+                if instruction.b > 2
+                else ()
+            )
+            method_pattern = match_method_call(method, literal_arguments)
+            if method_pattern is not None:
+                for register in result_registers:
+                    add_definition_name(
+                        pc,
+                        register,
+                        method_pattern.name,
+                        method_pattern.confidence,
+                        method_pattern.evidence,
+                    )
+                    add_definition_type(
+                        pc,
+                        register,
+                        method_pattern.type_name,
+                        method_pattern.confidence,
+                        method_pattern.evidence,
+                    )
+            method_return = infer_method_return(method)
+            if method_return is not None and method != "Clone":
+                for register in result_registers:
+                    add_definition_type(
+                        pc,
+                        register,
+                        method_return,
+                        72,
+                        f"heuristic {method} return type",
+                    )
+
             if method == "GetService" and instruction.b > 2:
                 argument = literal_string(program.value_at_use(pc, instruction.a + 2))
                 for register in result_registers:
@@ -758,6 +793,36 @@ def build_symbol_recovery(
             else:
                 function_value = program.value_at_use(pc, instruction.a)
                 call_path = value_path(function_value)
+                direct_arguments = (
+                    tuple(
+                        literal_string(
+                            program.value_at_use(pc, instruction.a + offset)
+                        )
+                        for offset in range(1, instruction.b)
+                    )
+                    if instruction.b > 1
+                    else ()
+                )
+                function_pattern = match_function_call(
+                    call_path,
+                    direct_arguments,
+                )
+                if function_pattern is not None:
+                    for register in result_registers:
+                        add_definition_name(
+                            pc,
+                            register,
+                            function_pattern.name,
+                            function_pattern.confidence,
+                            function_pattern.evidence,
+                        )
+                        add_definition_type(
+                            pc,
+                            register,
+                            function_pattern.type_name,
+                            function_pattern.confidence,
+                            function_pattern.evidence,
+                        )
                 return_type = _direct_call_type(call_path)
                 for register in result_registers:
                     add_definition_type(pc, register, return_type, 76, "known function return")

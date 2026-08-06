@@ -43,51 +43,17 @@ jobs:
           python scripts/apply_v015.py
           python - <<'PY'
           from pathlib import Path
+          import re
 
           path = Path("src/lunaux/backends/flow_types.py")
           text = path.read_text(encoding="utf-8")
-          text = text.replace(
-              """        value: SSAValue | None = None
-          if left_origin is not None and left_origin.name == \"LOADNIL\":
-              value = right
-          elif right_origin is not None and right_origin.name == \"LOADNIL\":
-              value = left
-          if value is not None:
-              equality_block = taken if instruction.name == \"JUMPIFEQ\" else fallthrough
-              non_nil_block = fallthrough if instruction.name == \"JUMPIFEQ\" else taken
-              _set_fact(result[equality_block], value, \"nil\", instruction.pc, \"nil equality branch\")
-              _set_fact(
-                  result[non_nil_block],
-                  value,
-                  _without_nil(base_types.get(value)),
-                  instruction.pc,
-                  \"nil comparison false branch\",
-              )
-          """,
-              """        compared_value: SSAValue | None = None
-          if left_origin is not None and left_origin.name == \"LOADNIL\":
-              compared_value = right
-          elif right_origin is not None and right_origin.name == \"LOADNIL\":
-              compared_value = left
-          if compared_value is not None:
-              equality_block = taken if instruction.name == \"JUMPIFEQ\" else fallthrough
-              non_nil_block = fallthrough if instruction.name == \"JUMPIFEQ\" else taken
-              _set_fact(
-                  result[equality_block],
-                  compared_value,
-                  \"nil\",
-                  instruction.pc,
-                  \"nil equality branch\",
-              )
-              _set_fact(
-                  result[non_nil_block],
-                  compared_value,
-                  _without_nil(base_types.get(compared_value)),
-                  instruction.pc,
-                  \"nil comparison false branch\",
-              )
-          """,
-          )
+          start_marker = '    if instruction.name == "JUMPXEQKNIL":\n'
+          end_marker = '    if instruction.name in {"JUMPIFEQ", "JUMPIFNOTEQ"}:\n'
+          start = text.index(start_marker)
+          end = text.index(end_marker, start)
+          block = text[start:end]
+          block = re.sub(r"\bvalue\b", "nil_value", block)
+          text = text[:start] + block + text[end:]
           text = text.replace(
               "analyze_control_flow(instructions, len(proto.code))",
               "analyze_control_flow(tuple(instructions), len(proto.code))",

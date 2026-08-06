@@ -1,0 +1,34 @@
+name: Fix v0.13 mypy
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'feature/full-table-reconstruction-v013'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/full-table-reconstruction-v013
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply type correction
+        run: python scripts/fix_v013_mypy.py
+      - name: Commit correction
+        run: |
+          if git diff --quiet; then
+            echo "No generated changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/lunaux/backends/lifter.py
+          git commit -m "Fix v0.13 table reconstruction typing"
+          git push origin HEAD:feature/full-table-reconstruction-v013

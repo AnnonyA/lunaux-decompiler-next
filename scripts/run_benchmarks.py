@@ -5,6 +5,7 @@ from pathlib import Path
 
 from lunaux.backends.auto import build_backend
 from lunaux.benchmarking import (
+    BenchmarkBackend,
     InProcessBackend,
     default_options,
     load_external_backends,
@@ -36,7 +37,9 @@ def main() -> int:
         settings.unluau_path,
         settings.external_timeout_seconds,
     )
-    backends = [InProcessBackend(backend, default_options())]
+    backends: list[BenchmarkBackend] = [
+        InProcessBackend(backend, default_options())
+    ]
     if args.external_backends is not None:
         backends.extend(load_external_backends(args.external_backends))
 

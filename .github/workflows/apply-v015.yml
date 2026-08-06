@@ -41,6 +41,59 @@ jobs:
           Path("scripts/apply_v015.py").write_bytes(gzip.decompress(base64.b64decode(payload)))
           PY
           python scripts/apply_v015.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/lunaux/backends/flow_types.py")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace(
+              """        value: SSAValue | None = None
+          if left_origin is not None and left_origin.name == \"LOADNIL\":
+              value = right
+          elif right_origin is not None and right_origin.name == \"LOADNIL\":
+              value = left
+          if value is not None:
+              equality_block = taken if instruction.name == \"JUMPIFEQ\" else fallthrough
+              non_nil_block = fallthrough if instruction.name == \"JUMPIFEQ\" else taken
+              _set_fact(result[equality_block], value, \"nil\", instruction.pc, \"nil equality branch\")
+              _set_fact(
+                  result[non_nil_block],
+                  value,
+                  _without_nil(base_types.get(value)),
+                  instruction.pc,
+                  \"nil comparison false branch\",
+              )
+          """,
+              """        compared_value: SSAValue | None = None
+          if left_origin is not None and left_origin.name == \"LOADNIL\":
+              compared_value = right
+          elif right_origin is not None and right_origin.name == \"LOADNIL\":
+              compared_value = left
+          if compared_value is not None:
+              equality_block = taken if instruction.name == \"JUMPIFEQ\" else fallthrough
+              non_nil_block = fallthrough if instruction.name == \"JUMPIFEQ\" else taken
+              _set_fact(
+                  result[equality_block],
+                  compared_value,
+                  \"nil\",
+                  instruction.pc,
+                  \"nil equality branch\",
+              )
+              _set_fact(
+                  result[non_nil_block],
+                  compared_value,
+                  _without_nil(base_types.get(compared_value)),
+                  instruction.pc,
+                  \"nil comparison false branch\",
+              )
+          """,
+          )
+          text = text.replace(
+              "analyze_control_flow(instructions, len(proto.code))",
+              "analyze_control_flow(tuple(instructions), len(proto.code))",
+          )
+          path.write_text(text, encoding="utf-8")
+          PY
           rm -rf scripts/.v015 scripts/apply_v015.py .github/workflows/apply-v015.yml
       - name: Install development dependencies
         run: |

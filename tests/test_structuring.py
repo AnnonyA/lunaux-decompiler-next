@@ -43,6 +43,8 @@ def test_recovers_simple_phi_diamond_as_if_expression_region() -> None:
     assert len(plan.phi_regions) == 1
     region = plan.phi_regions[0]
     assert region.condition_pc == 0
+    assert region.condition_pcs == (0,)
+    assert region.condition_operator is None
     assert region.join_pc == 4
     assert len(region.assignments) == 1
     assert region.assignments[0].result.kind == "phi"
@@ -50,7 +52,7 @@ def test_recovers_simple_phi_diamond_as_if_expression_region() -> None:
     assert region.skipped_pcs == frozenset({1, 2, 3})
 
 
-def test_combines_consecutive_failure_edges_with_and() -> None:
+def test_merges_consecutive_and_conditions_into_phi_region() -> None:
     instructions = [
         _instruction(0, "JUMPIFNOT", a=0, d=3),
         _instruction(1, "JUMPIFNOT", a=1, d=2),
@@ -62,14 +64,16 @@ def test_combines_consecutive_failure_edges_with_and() -> None:
     program = build_ssa(instructions, code_size=6)
     plan = build_structured_recovery(program)
 
-    assert len(plan.boolean_chains) == 1
-    chain = plan.boolean_chains[0]
-    assert chain.operator == "and"
-    assert chain.condition_pcs == (0, 1)
-    assert chain.body_start == 2
-    assert chain.false_start == 4
-    assert chain.join == 5
-    assert chain.has_else
+    assert not plan.boolean_chains
+    assert len(plan.phi_regions) == 1
+    region = plan.phi_regions[0]
+    assert region.condition_pc == 0
+    assert region.condition_pcs == (0, 1)
+    assert region.condition_operator == "and"
+    assert region.then_block == 2
+    assert region.else_block == 4
+    assert region.join_pc == 5
+    assert {1, 2, 3, 4}.issubset(region.skipped_pcs)
 
 
 def test_combines_trivial_success_jumps_with_or() -> None:
@@ -77,13 +81,14 @@ def test_combines_trivial_success_jumps_with_or() -> None:
         _instruction(0, "JUMPIF", a=0, d=2),
         _instruction(1, "JUMP", d=3),
         _instruction(2, "NOP"),
-        _instruction(3, "JUMPIF", a=1, d=2),
+        _instruction(3, "JUMPIF", a=1, d=3),
         _instruction(4, "JUMP", d=0),
         _instruction(5, "LOADN", a=2, d=1),
-        _instruction(6, "LOADN", a=2, d=0),
-        _instruction(7, "RETURN", a=2, b=2),
+        _instruction(6, "JUMP", d=1),
+        _instruction(7, "LOADN", a=2, d=0),
+        _instruction(8, "RETURN", a=2, b=2),
     ]
-    program = build_ssa(instructions, code_size=8)
+    program = build_ssa(instructions, code_size=9)
     plan = build_structured_recovery(program)
 
     assert len(plan.boolean_chains) == 1
@@ -91,6 +96,6 @@ def test_combines_trivial_success_jumps_with_or() -> None:
     assert chain.operator == "or"
     assert chain.condition_pcs == (0, 3)
     assert chain.body_start == 5
-    assert chain.false_start == 6
-    assert chain.join == 7
+    assert chain.false_start == 7
+    assert chain.join == 8
     assert {1, 3, 4}.issubset(chain.skipped_pcs)

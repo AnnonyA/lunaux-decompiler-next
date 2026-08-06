@@ -20,6 +20,8 @@ The catalog contains conservative signatures for common services and engine clas
 
 It provides service classes, owner-aware property and method types, signal callback parameter types, and callback contracts for action binding and render-step registration. Ambiguous members require owner evidence.
 
+The catalog is a curated reconstruction aid rather than a complete or authoritative dump of every Roblox API member. Unknown, overloaded, or conflicting signatures deliberately fall back to existing heuristics or no annotation.
+
 ## Callback annotations
 
 Inline closures from 0.14 receive API parameter types when the signal or callback position is recognized. Serialized debug types still take precedence. Shared or escaping callbacks remain named functions as before.

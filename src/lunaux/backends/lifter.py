@@ -995,12 +995,13 @@ class _FunctionLifter:
                 self._ref_expr(rhs_register, instruction.pc),
             )
         if name.startswith("JUMPXEQK"):
+            rhs: Expr
             if name == "JUMPXEQKNIL":
                 rhs = LiteralExpr("nil")
             elif name == "JUMPXEQKB":
                 rhs = LiteralExpr("true" if (instruction.aux or 0) & 1 else "false")
             else:
-                rhs: Expr = source_expr(
+                rhs = source_expr(
                     _constant_expr(
                         self.proto,
                         (instruction.aux or 0) & 0xFFFFFF,

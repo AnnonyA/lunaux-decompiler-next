@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final, Literal
@@ -156,6 +156,23 @@ def _side_definitions(
     return tuple(definitions)
 
 
+def _definitions_by_value(
+    program: SSAProgram,
+    instructions: tuple[DecodedInstruction, ...],
+) -> dict[SSAValue, DecodedInstruction] | None:
+    result: dict[SSAValue, DecodedInstruction] = {}
+    for instruction in instructions:
+        definitions = register_access(instruction).definitions
+        if len(definitions) != 1:
+            return None
+        register = next(iter(definitions))
+        value = program.value_defined_at(instruction.pc, register)
+        if value is None:
+            return None
+        result[value] = instruction
+    return result
+
+
 def _phi_regions(program: SSAProgram) -> tuple[PhiIfRegion, ...]:
     analysis = program.analysis
     phis_by_block: dict[int, list[SSAPhi]] = defaultdict(list)
@@ -188,15 +205,9 @@ def _phi_regions(program: SSAProgram) -> tuple[PhiIfRegion, ...]:
         else_definitions = _side_definitions(else_block, join)
         if then_definitions is None or else_definitions is None:
             continue
-        then_by_value = {
-            program.value_defined_at(instruction.pc, next(iter(register_access(instruction).definitions))): instruction
-            for instruction in then_definitions
-        }
-        else_by_value = {
-            program.value_defined_at(instruction.pc, next(iter(register_access(instruction).definitions))): instruction
-            for instruction in else_definitions
-        }
-        if None in then_by_value or None in else_by_value:
+        then_by_value = _definitions_by_value(program, then_definitions)
+        else_by_value = _definitions_by_value(program, else_definitions)
+        if then_by_value is None or else_by_value is None:
             continue
 
         assignments: list[PhiIfAssignment] = []

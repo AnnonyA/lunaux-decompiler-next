@@ -131,7 +131,7 @@ def _raw_proto(bytecode: bytes) -> LuauBytecodeModule:
 
 
 class ReconstructedBackend:
-    """Portable reconstruction with CFG, SSA, structured conditions, phi recovery, and table literals."""
+    """Portable reconstruction with structured CFG, SSA, phi, and table recovery."""
 
     @property
     def name(self) -> str:

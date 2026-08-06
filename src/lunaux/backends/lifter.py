@@ -803,9 +803,11 @@ class _FunctionLifter:
                 pc,
             )
         annotated = f"{name}: {type_name}" if type_name and type_name != "any" else name
-        prefix = "" if name in self.declared else "local "
+        is_new = name not in self.declared
+        lhs = annotated if is_new else name
+        prefix = "local " if is_new else ""
         self.out.line(
-            f"{prefix}{annotated} = {render_expression(expression)}",
+            f"{prefix}{lhs} = {render_expression(expression)}",
             statement=True,
         )
         self.declared.add(name)
@@ -866,6 +868,22 @@ class _FunctionLifter:
         if pending is None:
             return False
         pc = instruction.pc
+        target = table_write_target_register(instruction)
+        if (
+            target is not None
+            and instruction.name != "SETLIST"
+            and instruction.a == target
+        ):
+            self._flush_pending_table(pending)
+            return False
+        if instruction.name == "SETLIST" and instruction.c > 0:
+            count = instruction.c - 1
+            if target is not None and target in range(
+                instruction.b,
+                instruction.b + count,
+            ):
+                self._flush_pending_table(pending)
+                return False
         success = False
         if instruction.name in {"SETTABLEKS", "SETUDATAKS"}:
             success = pending.add_named(
@@ -1000,7 +1018,11 @@ class _FunctionLifter:
         expression = self._conditional_expr(instruction)
         return render_expression(expression) if expression is not None else None
 
-    def _boolean_chain_expression(self, condition_pcs: tuple[int, ...], operator: str) -> Expr | None:
+    def _boolean_chain_expression(
+        self,
+        condition_pcs: tuple[int, ...],
+        operator: str,
+    ) -> Expr | None:
         expressions: list[Expr] = []
         for condition_pc in condition_pcs:
             instruction = self.instruction_by_pc.get(condition_pc)

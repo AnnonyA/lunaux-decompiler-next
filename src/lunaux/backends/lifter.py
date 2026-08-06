@@ -962,6 +962,59 @@ class _FunctionLifter:
             if not is_safe_table_gap(instruction):
                 self._flush_pending_table(pending)
 
+    def _dependencies_for_value(
+        self,
+        value: SSAValue,
+        seen: frozenset[SSAValue] = frozenset(),
+    ) -> frozenset[SSAValue]:
+        if value in seen or value.kind != "instruction":
+            return frozenset({value})
+        if value not in self.inline_expressions or value.origin_pc is None:
+            return frozenset({value})
+        instruction = self.ssa.instruction_at(value.origin_pc)
+        if instruction is None:
+            return frozenset({value})
+        dependencies: set[SSAValue] = set()
+        next_seen = seen | frozenset({value})
+        for use in instruction.uses:
+            dependencies.update(
+                self._dependencies_for_value(use.value, next_seen)
+            )
+        return frozenset(dependencies)
+
+    def _table_value_can_inline(
+        self,
+        child: PendingTableLiteral,
+        consumer_pc: int,
+    ) -> bool:
+        accounted_uses = 0
+        for ssa_instruction in self.ssa.instructions.values():
+            matching_uses = tuple(
+                use
+                for use in ssa_instruction.uses
+                if use.value == child.value
+            )
+            if not matching_uses:
+                continue
+            accounted_uses += len(matching_uses)
+            instruction = ssa_instruction.instruction
+            target = table_write_target_register(instruction)
+            if instruction.pc == consumer_pc:
+                if (
+                    not is_table_write(instruction)
+                    or child.register
+                    not in table_write_source_registers(instruction)
+                ):
+                    return False
+                continue
+            if (
+                not is_table_write(instruction)
+                or target != child.register
+                or self.ssa.value_at_use(instruction.pc, target) != child.value
+            ):
+                return False
+        return accounted_uses == self.ssa.uses_of(child.value)
+
     def _capture_register_expression(
         self,
         owner: PendingTableLiteral,
@@ -978,7 +1031,7 @@ class _FunctionLifter:
             if (
                 allow_nested
                 and value is not None
-                and self.ssa.uses_of(value) == 1
+                and self._table_value_can_inline(child, pc)
                 and owner.can_adopt(child)
             ):
                 self.pending_tables.pop(child.value, None)
@@ -988,7 +1041,11 @@ class _FunctionLifter:
                 return expression, frozenset()
             self._flush_pending_table(child)
         expression = self._ref_expr(register, pc)
-        dependencies = frozenset({value}) if value is not None else frozenset()
+        dependencies = (
+            self._dependencies_for_value(value)
+            if value is not None
+            else frozenset()
+        )
         return expression, dependencies
 
     def _record_table_write(self, instruction: DecodedInstruction) -> bool:

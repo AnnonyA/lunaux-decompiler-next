@@ -62,7 +62,8 @@ return {
 
 The output header reports recovered module dependencies and whether the main
 prototype consistently exports a table, function, required module, or another
-value.
+value. Dynamic require targets remain explicit expressions instead of receiving
+an invented module path.
 
 ## Conservative barriers
 

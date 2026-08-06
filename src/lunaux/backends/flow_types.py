@@ -499,8 +499,14 @@ def analyze_flow_types(
     edge_out: dict[tuple[int, int], dict[SSAValue, _EnvFact]] = {}
     queue: deque[int] = deque([resolved_analysis.entry])
     queued = {resolved_analysis.entry}
+    edge_count = sum(len(block.successors) for block in resolved_analysis.blocks)
+    convergence_budget = max(64, len(resolved_analysis.blocks) * max(1, edge_count) * 8)
+    processed_blocks = 0
 
     while queue:
+        processed_blocks += 1
+        if processed_blocks > convergence_budget:
+            return FlowTypeAnalysis.empty()
         block_start = queue.popleft()
         queued.discard(block_start)
         block = resolved_analysis.block_by_start[block_start]

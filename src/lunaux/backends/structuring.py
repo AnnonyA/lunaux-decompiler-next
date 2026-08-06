@@ -32,9 +32,7 @@ _CONDITIONAL_OPS: Final[frozenset[str]] = frozenset(
     }
 )
 _IGNORED_OPS: Final[frozenset[str]] = frozenset({"NOP", "COVERAGE"})
-_UNCONDITIONAL_JUMPS: Final[frozenset[str]] = frozenset(
-    {"JUMP", "JUMPBACK", "JUMPX"}
-)
+_UNCONDITIONAL_JUMPS: Final[frozenset[str]] = frozenset({"JUMP", "JUMPBACK", "JUMPX"})
 _PURE_PHI_VALUE_OPS: Final[frozenset[str]] = frozenset(
     {
         "LOADNIL",
@@ -308,10 +306,12 @@ def _and_chain(
     conditions = [root]
     failure = root.taken
     current = root
+    visited_headers = {root.header}
     while True:
         candidate = branch_by_header.get(current.fallthrough)
-        if candidate is None or candidate.taken != failure:
+        if candidate is None or candidate.header in visited_headers or candidate.taken != failure:
             break
+        visited_headers.add(candidate.header)
         block = analysis.block_by_start[candidate.header]
         reachable_predecessors = block.predecessors & analysis.reachable
         if len(reachable_predecessors) != 1 or not _condition_only(block):
@@ -347,10 +347,12 @@ def _or_chain(
     conditions = [root]
     skipped_pcs = set(skipped)
     current = root
+    visited_headers = {root.header}
     while True:
         candidate = branch_by_header.get(current.taken)
-        if candidate is None:
+        if candidate is None or candidate.header in visited_headers:
             break
+        visited_headers.add(candidate.header)
         block = analysis.block_by_start[candidate.header]
         reachable_predecessors = block.predecessors & analysis.reachable
         if len(reachable_predecessors) != 1 or not _condition_only(block):
@@ -466,9 +468,7 @@ def build_structured_recovery(program: SSAProgram) -> StructuredRecoveryPlan:
 
     return StructuredRecoveryPlan(
         phi_regions=phi_regions,
-        phi_by_header=MappingProxyType(
-            {region.condition_pc: region for region in phi_regions}
-        ),
+        phi_by_header=MappingProxyType({region.condition_pc: region for region in phi_regions}),
         phi_by_join=MappingProxyType(
             {
                 join: tuple(sorted(regions, key=lambda item: item.condition_pc))
@@ -477,9 +477,7 @@ def build_structured_recovery(program: SSAProgram) -> StructuredRecoveryPlan:
         ),
         captured_phi_values=frozenset(captured_values),
         boolean_chains=boolean_chains,
-        boolean_by_root=MappingProxyType(
-            {chain.root_pc: chain for chain in boolean_chains}
-        ),
+        boolean_by_root=MappingProxyType({chain.root_pc: chain for chain in boolean_chains}),
         skipped_condition_pcs=frozenset(skipped_condition_pcs),
         skipped_structuring_pcs=frozenset(skipped_structuring_pcs),
     )

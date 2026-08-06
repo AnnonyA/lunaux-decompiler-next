@@ -127,7 +127,7 @@ def _raw_proto(bytecode: bytes) -> LuauBytecodeModule:
 
 
 class ReconstructedBackend:
-    """Portable CFG/SSA reconstruction with contextual functions and class recovery."""
+    """Portable CFG/SSA reconstruction with advanced control-flow recovery."""
 
     @property
     def name(self) -> str:
@@ -135,7 +135,7 @@ class ReconstructedBackend:
 
     @property
     def version(self) -> str:
-        return "0.16.0"
+        return "0.17.0"
 
     def decompile(
         self,

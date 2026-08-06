@@ -27,6 +27,11 @@ class DecompileOptions(BaseModel):
         default=True,
         alias="CombineBooleanConditions",
     )
+    advanced_loops: bool = Field(default=True, alias="AdvancedLoops")
+    unflatten_state_machines: bool = Field(
+        default=True,
+        alias="UnflattenStateMachines",
+    )
     reconstruct_table_literals: bool = Field(
         default=True,
         alias="ReconstructTableLiterals",
@@ -88,6 +93,8 @@ class DecompileOptions(BaseModel):
             "UseIfExpression": self.use_if_expression,
             "RecoverPhiExpressions": self.recover_phi_expressions,
             "CombineBooleanConditions": self.combine_boolean_conditions,
+            "AdvancedLoops": self.advanced_loops,
+            "UnflattenStateMachines": self.unflatten_state_machines,
             "ReconstructTableLiterals": self.reconstruct_table_literals,
             "InlineSingleUseTemporaries": self.inline_single_use_temporaries,
             "SmartVariableNames": self.smart_variable_names,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Final, Literal
 
@@ -88,6 +88,8 @@ class PhiIfAssignment:
 @dataclass(frozen=True, slots=True)
 class PhiIfRegion:
     condition_pc: int
+    condition_pcs: tuple[int, ...]
+    condition_operator: Literal["and", "or"] | None
     join_pc: int
     then_block: int
     else_block: int
@@ -247,9 +249,12 @@ def _phi_regions(program: SSAProgram) -> tuple[PhiIfRegion, ...]:
                 and get_jump_target(terminator) == join
             ):
                 skipped_pcs.add(terminator.pc)
+        condition_pc = header.terminator.pc
         regions.append(
             PhiIfRegion(
-                condition_pc=header.terminator.pc,
+                condition_pc=condition_pc,
+                condition_pcs=(condition_pc,),
+                condition_operator=None,
                 join_pc=join,
                 then_block=branch.fallthrough,
                 else_block=branch.taken,
@@ -282,6 +287,19 @@ def _follow_trivial_jump(
     return target, frozenset({terminator.pc})
 
 
+def _condition_pcs(
+    analysis: ControlFlowAnalysis,
+    conditions: list[BranchRegion],
+) -> tuple[int, ...] | None:
+    result: list[int] = []
+    for condition in conditions:
+        terminator = analysis.block_by_start[condition.header].terminator
+        if terminator is None:
+            return None
+        result.append(terminator.pc)
+    return tuple(result)
+
+
 def _and_chain(
     analysis: ControlFlowAnalysis,
     root: BranchRegion,
@@ -295,18 +313,15 @@ def _and_chain(
         if candidate is None or candidate.taken != failure:
             break
         block = analysis.block_by_start[candidate.header]
-        if len(block.predecessors) != 1 or not _condition_only(block):
+        reachable_predecessors = block.predecessors & analysis.reachable
+        if len(reachable_predecessors) != 1 or not _condition_only(block):
             break
         conditions.append(candidate)
         current = candidate
     if len(conditions) < 2:
         return None
-    condition_pcs = tuple(
-        analysis.block_by_start[item.header].terminator.pc
-        for item in conditions
-        if analysis.block_by_start[item.header].terminator is not None
-    )
-    if len(condition_pcs) != len(conditions):
+    condition_pcs = _condition_pcs(analysis, conditions)
+    if condition_pcs is None:
         return None
     body_start = current.fallthrough
     join = root.join if root.join is not None else failure
@@ -337,7 +352,8 @@ def _or_chain(
         if candidate is None:
             break
         block = analysis.block_by_start[candidate.header]
-        if len(block.predecessors) != 1 or not _condition_only(block):
+        reachable_predecessors = block.predecessors & analysis.reachable
+        if len(reachable_predecessors) != 1 or not _condition_only(block):
             break
         candidate_success, candidate_skipped = _follow_trivial_jump(
             analysis,
@@ -350,12 +366,8 @@ def _or_chain(
         current = candidate
     if len(conditions) < 2:
         return None
-    condition_pcs = tuple(
-        analysis.block_by_start[item.header].terminator.pc
-        for item in conditions
-        if analysis.block_by_start[item.header].terminator is not None
-    )
-    if len(condition_pcs) != len(conditions):
+    condition_pcs = _condition_pcs(analysis, conditions)
+    if condition_pcs is None:
         return None
     if success <= max(condition_pcs):
         return None
@@ -375,11 +387,10 @@ def _or_chain(
 
 def _boolean_chains(
     analysis: ControlFlowAnalysis,
-    excluded_condition_pcs: frozenset[int],
 ) -> tuple[BooleanChain, ...]:
     branch_by_header = {branch.header: branch for branch in analysis.branches}
     chains: list[BooleanChain] = []
-    claimed: set[int] = set(excluded_condition_pcs)
+    claimed: set[int] = set()
     for root in analysis.branches:
         block = analysis.block_by_start[root.header]
         terminator = block.terminator
@@ -395,10 +406,50 @@ def _boolean_chains(
     return tuple(sorted(chains, key=lambda item: item.root_pc))
 
 
+def _merge_phi_condition_chains(
+    phi_regions: tuple[PhiIfRegion, ...],
+    boolean_chains: tuple[BooleanChain, ...],
+) -> tuple[tuple[PhiIfRegion, ...], tuple[BooleanChain, ...]]:
+    consumed_roots: set[int] = set()
+    merged_regions: list[PhiIfRegion] = []
+    for region in phi_regions:
+        matching = next(
+            (
+                chain
+                for chain in boolean_chains
+                if chain.condition_pcs[-1] == region.condition_pc
+                and chain.body_start == region.then_block
+                and chain.false_start == region.else_block
+                and chain.join == region.join_pc
+            ),
+            None,
+        )
+        if matching is None:
+            merged_regions.append(region)
+            continue
+        consumed_roots.add(matching.root_pc)
+        merged_regions.append(
+            replace(
+                region,
+                condition_pc=matching.root_pc,
+                condition_pcs=matching.condition_pcs,
+                condition_operator=matching.operator,
+                skipped_pcs=region.skipped_pcs | matching.skipped_pcs,
+            )
+        )
+    remaining_chains = tuple(
+        chain for chain in boolean_chains if chain.root_pc not in consumed_roots
+    )
+    return tuple(merged_regions), remaining_chains
+
+
 def build_structured_recovery(program: SSAProgram) -> StructuredRecoveryPlan:
     phi_regions = _phi_regions(program)
-    phi_headers = frozenset(region.condition_pc for region in phi_regions)
-    boolean_chains = _boolean_chains(program.analysis, phi_headers)
+    boolean_chains = _boolean_chains(program.analysis)
+    phi_regions, boolean_chains = _merge_phi_condition_chains(
+        phi_regions,
+        boolean_chains,
+    )
 
     phi_by_join: dict[int, list[PhiIfRegion]] = defaultdict(list)
     captured_values: set[SSAValue] = set()

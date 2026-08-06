@@ -6,6 +6,7 @@ on:
       - feature/symbol-recovery-v010
     paths:
       - "scripts/apply_symbol_recovery_v010.py"
+      - ".github/workflows/apply-symbol-recovery-v010.yml"
 
 permissions:
   contents: write

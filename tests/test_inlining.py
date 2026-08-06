@@ -115,9 +115,7 @@ def test_preserves_named_debug_locals() -> None:
         _instruction(1, "RETURN", a=0, b=2),
     ]
     program = build_ssa(instructions, code_size=2)
-    proto = _proto(
-        locals_=(LocalInfo(name="answer", start_pc=0, end_pc=2, register=0),)
-    )
+    proto = _proto(locals_=(LocalInfo(name="answer", start_pc=0, end_pc=2, register=0),))
     value = program.value_defined_at(0, 0)
 
     assert value is not None

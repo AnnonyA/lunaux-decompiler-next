@@ -3,6 +3,13 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Final
 
+from lunaux.backends.roblox_api import (
+    method_return_type as roblox_method_return_type,
+)
+from lunaux.backends.roblox_api import (
+    property_type as roblox_property_type,
+)
+
 _PROPERTY_TYPES: Final[dict[str, str]] = {
     "AbsolutePosition": "Vector2",
     "AbsoluteSize": "Vector2",
@@ -163,13 +170,31 @@ def infer_instruction_type(
     return None
 
 
-def infer_property_type(property_name: str | None) -> str | None:
+def infer_property_type(
+    property_name: str | None,
+    *,
+    owner_type: str | None = None,
+    use_roblox_api: bool = True,
+) -> str | None:
+    if use_roblox_api:
+        api_type = roblox_property_type(owner_type, property_name)
+        if api_type is not None:
+            return api_type
     return _PROPERTY_TYPES.get(property_name or "")
 
 
-def infer_method_return(method: str | None) -> str | None:
+def infer_method_return(
+    method: str | None,
+    *,
+    owner_type: str | None = None,
+    use_roblox_api: bool = True,
+) -> str | None:
     if not method:
         return None
+    if use_roblox_api:
+        api_type = roblox_method_return_type(owner_type, method)
+        if api_type is not None:
+            return api_type
     if method in {"FindFirstChildOfClass", "FindFirstChildWhichIsA"}:
         return "Instance?"
     if method in {"FindFirstAncestorOfClass", "FindFirstAncestorWhichIsA"}:

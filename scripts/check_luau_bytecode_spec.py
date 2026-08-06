@@ -17,20 +17,14 @@ _VALUE = re.compile(r"^\s*(LBC_VERSION_[A-Z]+)\s*=\s*(\d+)\s*,")
 
 
 def _enum_values(pattern: re.Pattern[str], text: str) -> tuple[str, ...]:
-    return tuple(
-        match.group(1)
-        for line in text.splitlines()
-        if (match := pattern.match(line))
-    )
+    return tuple(match.group(1) for line in text.splitlines() if (match := pattern.match(line)))
 
 
 def check_header(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
     errors: list[str] = []
 
-    upstream_opcodes = tuple(
-        name for name in _enum_values(_OPCODE, text) if name != "_COUNT"
-    )
+    upstream_opcodes = tuple(name for name in _enum_values(_OPCODE, text) if name != "_COUNT")
     if upstream_opcodes != opcode_names():
         missing = [name for name in upstream_opcodes if name not in opcode_names()]
         extra = [name for name in opcode_names() if name not in upstream_opcodes]
@@ -39,22 +33,17 @@ def check_header(path: Path) -> list[str]:
             f"; missing={missing or 'none'}; extra={extra or 'none'}"
         )
 
-    upstream_constants = tuple(
-        name for name in _enum_values(_CONSTANT, text) if name != "_COUNT"
-    )
+    upstream_constants = tuple(name for name in _enum_values(_CONSTANT, text) if name != "_COUNT")
     if upstream_constants != CONSTANT_TAG_NAMES:
         errors.append(
             "constant tag table differs from upstream"
             f"; upstream={upstream_constants}; local={CONSTANT_TAG_NAMES}"
         )
 
-    upstream_builtins = tuple(
-        name for name in _enum_values(_BUILTIN, text) if name != "_COUNT"
-    )
+    upstream_builtins = tuple(name for name in _enum_values(_BUILTIN, text) if name != "_COUNT")
     if len(upstream_builtins) != builtin_count():
         errors.append(
-            f"builtin count differs: upstream={len(upstream_builtins)} "
-            f"local={builtin_count()}"
+            f"builtin count differs: upstream={len(upstream_builtins)} local={builtin_count()}"
         )
 
     versions = {

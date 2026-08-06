@@ -9,6 +9,7 @@ from typing import Final, Literal
 
 from lunaux.backends.bytecode import LuauBytecodeModule, LuauProto
 from lunaux.backends.opcodes import DecodedInstruction, decode_words
+from lunaux.backends.roblox_api import callback_parameter_types
 from lunaux.backends.ssa import SSAInstruction, SSAProgram, SSAValue, build_ssa
 
 _EVENT_METHODS: Final[frozenset[str]] = frozenset({"Connect", "ConnectParallel", "Once", "Wait"})
@@ -40,11 +41,16 @@ _IDENTIFIER_CHUNK: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*"
 @dataclass(frozen=True, slots=True)
 class InlineCallbackPlan:
     proto_by_value: Mapping[SSAValue, int]
+    parameter_types_by_value: Mapping[SSAValue, tuple[str, ...]]
     capture_pcs: frozenset[int]
 
     @classmethod
     def empty(cls) -> InlineCallbackPlan:
-        return cls(MappingProxyType(dict[SSAValue, int]()), frozenset())
+        return cls(
+            MappingProxyType(dict[SSAValue, int]()),
+            MappingProxyType(dict[SSAValue, tuple[str, ...]]()),
+            frozenset(),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +332,38 @@ def _callback_sink(
     return register in {instruction.a + 1 + position for position in positions}
 
 
+def _callback_parameter_types_for_sink(
+    proto: LuauProto,
+    instructions: Sequence[DecodedInstruction],
+    program: SSAProgram,
+    instruction: DecodedInstruction,
+    register: int,
+) -> tuple[str, ...] | None:
+    if instruction.name not in {"CALL", "CALLFB"} or instruction.b == 0:
+        return None
+    namecall = _namecall_for_call(proto, instructions, instruction)
+    if namecall is not None:
+        namecall_instruction, method = namecall
+        positions = _METHOD_CALLBACK_ARGUMENTS.get(method, ())
+        if register not in {instruction.a + 2 + position for position in positions}:
+            return None
+        receiver = program.value_at_use(
+            namecall_instruction.pc,
+            namecall_instruction.b,
+        )
+        receiver_path = ssa_value_path(proto, instructions, program, receiver)
+        return callback_parameter_types(
+            method_name=method,
+            receiver_path=receiver_path,
+        )
+    function_value = program.value_at_use(instruction.pc, instruction.a)
+    path = ssa_value_path(proto, instructions, program, function_value)
+    positions = _FUNCTION_CALLBACK_ARGUMENTS.get(path or "", ())
+    if register not in {instruction.a + 1 + position for position in positions}:
+        return None
+    return callback_parameter_types(function_path=path)
+
+
 def plan_inline_callbacks(
     module: LuauBytecodeModule,
     proto: LuauProto,
@@ -339,6 +377,7 @@ def plan_inline_callbacks(
 
     instruction_index = {instruction.pc: index for index, instruction in enumerate(instructions)}
     proto_by_value: dict[SSAValue, int] = {}
+    parameter_types_by_value: dict[SSAValue, tuple[str, ...]] = {}
     capture_pcs: set[int] = set()
 
     for instruction in instructions:
@@ -353,6 +392,13 @@ def plan_inline_callbacks(
             continue
         use_instruction, register, chain = terminal
         sink = use_instruction.instruction
+        callback_types = _callback_parameter_types_for_sink(
+            proto,
+            instructions,
+            program,
+            sink,
+            register,
+        )
         if not (
             _table_or_return_sink(sink, register)
             or _callback_sink(proto, instructions, program, sink, register)
@@ -374,10 +420,13 @@ def plan_inline_callbacks(
 
         for item in chain:
             proto_by_value[item] = child_id
+            if callback_types:
+                parameter_types_by_value[item] = callback_types
         capture_pcs.update(captures)
 
     return InlineCallbackPlan(
         MappingProxyType(dict(proto_by_value)),
+        MappingProxyType(dict(parameter_types_by_value)),
         frozenset(capture_pcs),
     )
 

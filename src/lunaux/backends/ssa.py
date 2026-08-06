@@ -126,9 +126,7 @@ class _SSABuilder:
                 self.children[parent].append(block)
         order = {block: index for index, block in enumerate(reverse_postorder(analysis))}
         for child_blocks in self.children.values():
-            child_blocks.sort(
-                key=lambda block: order.get(block, len(order))
-            )
+            child_blocks.sort(key=lambda block: order.get(block, len(order)))
 
     def _entry_value(self, register: int) -> SSAValue:
         value = self.entry_values.get(register)
@@ -273,8 +271,7 @@ def render_ssa(program: SSAProgram) -> str:
         lines.append(f"B{block.start_pc}{suffix}:")
         for phi in phis_by_block.get(block.start_pc, []):
             operands = ", ".join(
-                f"B{predecessor}: {value.name}"
-                for predecessor, value in phi.operands.items()
+                f"B{predecessor}: {value.name}" for predecessor, value in phi.operands.items()
             )
             lines.append(f"  {phi.result.name} = phi({operands})")
         for instruction in block.instructions:
@@ -282,15 +279,9 @@ def render_ssa(program: SSAProgram) -> str:
             if ssa_instruction is None:
                 lines.append(f"  {instruction.pc:04d} {instruction.name} [unreachable]")
                 continue
-            definitions = ", ".join(
-                value.name for value in ssa_instruction.definitions
-            )
-            uses = ", ".join(
-                f"R{use.register}={use.value.name}" for use in ssa_instruction.uses
-            )
+            definitions = ", ".join(value.name for value in ssa_instruction.definitions)
+            uses = ", ".join(f"R{use.register}={use.value.name}" for use in ssa_instruction.uses)
             assignment = f"{definitions} = " if definitions else ""
             operand_suffix = f" [{uses}]" if uses else ""
-            lines.append(
-                f"  {instruction.pc:04d} {assignment}{instruction.name}{operand_suffix}"
-            )
+            lines.append(f"  {instruction.pc:04d} {assignment}{instruction.name}{operand_suffix}")
     return "\n".join(lines) + ("\n" if lines else "")

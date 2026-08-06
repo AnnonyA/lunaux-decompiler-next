@@ -36,9 +36,7 @@ def _run(arguments: list[str], *, cwd: Path | None = None) -> None:
         text=True,
     )
     if process.returncode:
-        raise InstallError(
-            f"Command failed with exit code {process.returncode}: {arguments[0]}"
-        )
+        raise InstallError(f"Command failed with exit code {process.returncode}: {arguments[0]}")
 
 
 def _capture(arguments: list[str], *, cwd: Path | None = None) -> str:
@@ -54,8 +52,7 @@ def _capture(arguments: list[str], *, cwd: Path | None = None) -> str:
     if process.returncode:
         details = (process.stderr or process.stdout).strip()
         raise InstallError(
-            f"Command failed with exit code {process.returncode}: "
-            f"{arguments[0]}: {details}"
+            f"Command failed with exit code {process.returncode}: {arguments[0]}: {details}"
         )
     return process.stdout.strip()
 
@@ -81,8 +78,7 @@ def _default_runtime() -> str:
     if sys.platform == "darwin":
         return f"osx-{architecture}"
     raise InstallError(
-        f"Could not choose a .NET runtime for {sys.platform!r}; "
-        "pass --runtime explicitly."
+        f"Could not choose a .NET runtime for {sys.platform!r}; pass --runtime explicitly."
     )
 
 
@@ -117,18 +113,21 @@ def _prepare_source(git: str, *, refresh: bool) -> None:
             ]
         )
     else:
-        has_commit = subprocess.run(
-            [
-                git,
-                "-C",
-                str(SOURCE_DIR),
-                "cat-file",
-                "-e",
-                f"{PINNED_COMMIT}^{{commit}}",
-            ],
-            check=False,
-            capture_output=True,
-        ).returncode == 0
+        has_commit = (
+            subprocess.run(
+                [
+                    git,
+                    "-C",
+                    str(SOURCE_DIR),
+                    "cat-file",
+                    "-e",
+                    f"{PINNED_COMMIT}^{{commit}}",
+                ],
+                check=False,
+                capture_output=True,
+            ).returncode
+            == 0
+        )
         if not has_commit:
             _run(
                 [
@@ -154,13 +153,9 @@ def _prepare_source(git: str, *, refresh: bool) -> None:
             PINNED_COMMIT,
         ]
     )
-    current = _capture(
-        [git, "-C", str(SOURCE_DIR), "rev-parse", "HEAD"]
-    )
+    current = _capture([git, "-C", str(SOURCE_DIR), "rev-parse", "HEAD"])
     if current != PINNED_COMMIT:
-        raise InstallError(
-            f"Unluau checkout mismatch: expected {PINNED_COMMIT}, got {current}"
-        )
+        raise InstallError(f"Unluau checkout mismatch: expected {PINNED_COMMIT}, got {current}")
 
 
 def _publish(dotnet: str, runtime: str) -> None:
@@ -235,10 +230,7 @@ def _publish(dotnet: str, runtime: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description=(
-            "Fetch the pinned Apache-2.0 Unluau source and build its CLI "
-            "for LunaUX Next."
-        )
+        description=("Fetch the pinned Apache-2.0 Unluau source and build its CLI for LunaUX Next.")
     )
     parser.add_argument(
         "--runtime",

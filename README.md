@@ -2,7 +2,7 @@
 
 A local Roblox Luau bytecode decompiler and disassembler with a native backend, the optional Unluau CLI, a portable Python engine, an HTTP API, a CLI, and Windows/Linux launchers.
 
-> **Version 0.14:** reconstructs Roblox event connections, single-owner callbacks, captured callback values, `require` dependencies, and function-valued ModuleScript exports on top of the 0.13 table pass.
+> **Version 0.15:** adds flow-sensitive narrowing and an owner-aware Roblox API catalog for properties, methods, services, events, and callback parameter types on top of the 0.14 callback/module pass.
 
 ## Engine chain
 
@@ -42,6 +42,8 @@ A crash, timeout, unsupported file, or empty result from one engine moves the re
 - Generates stable type-family names such as `num1`, `bool1`, `str1`, `arg1`, `vec1`, and `buf1` when original names are absent.
 - Infers conservative parameter, local, and return types from serialized type metadata plus data flow and known operation contracts.
 - Runs reusable opcode, property, method, constructor, and flow type heuristics before source emission.
+- Narrows optional and union values along `nil`, truthiness, `type`/`typeof`, `assert`, and `Instance:IsA` control-flow edges.
+- Uses owner-aware Roblox API signatures to type properties, method results, signals, and inline callback parameters.
 - Inlines single-use temporaries across short pure instruction gaps while blocking calls, mutations, branches, and source-register redefinitions.
 - Tracks table ownership, aliases, contained tables, and SSA dependencies; it materializes constructors before escapes, cycles, dependency redefinitions, unsafe calls, control flow, or ambiguous stack-top writes.
 - Reconstructs supported v100 `NEWCLASS` and `NEWCLASSMEMBER` regions as Luau `class ... end` declarations.
@@ -85,6 +87,25 @@ local function func(
     -- reconstructed body
 end
 ```
+
+### Flow-sensitive types and Roblox API
+
+Version 0.15 tracks type refinements per CFG edge and per SSA use instead of assigning only one type to a value for the whole function. It recognizes non-`nil` branches, truthy checks, `type`/`typeof` comparisons, `assert`, and validated `Instance:IsA("ClassName")` predicates.
+
+The Roblox API catalog is owner-aware. For example, `BasePart.Position` is `Vector3`, `TweenService:Create` returns `Tween`, and known signals provide callback parameter annotations such as `InputBegan(input: InputObject, gameProcessed: boolean)`. Ambiguous members keep the previous conservative result.
+
+```luau
+UserInputService.InputBegan:Connect(function(
+    input: InputObject,
+    gameProcessed: boolean
+)
+    if not gameProcessed then
+        print(input.KeyCode)
+    end
+end)
+```
+
+Use `FlowSensitiveTypes` and `RobloxAPITypes` to disable either layer independently. See [`docs/FLOW_TYPES_AND_ROBLOX_API.md`](docs/FLOW_TYPES_AND_ROBLOX_API.md).
 
 ### Roblox events, callbacks, and modules
 

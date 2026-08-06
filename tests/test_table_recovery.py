@@ -42,9 +42,7 @@ def test_builds_named_and_array_table_fields() -> None:
     assert pending.add_index(2, LiteralExpr('"Ice"'))
     assert pending.add_named("Name", NameExpr("other"))
 
-    assert render_expression(pending.expression()) == (
-        '{Name = other, Damage = 25, "Fire", "Ice"}'
-    )
+    assert render_expression(pending.expression()) == ('{Name = other, Damage = 25, "Fire", "Ice"}')
 
 
 def test_flushes_before_calls_and_table_escapes() -> None:

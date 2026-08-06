@@ -14,8 +14,24 @@ from lunaux.backends.analysis import (
 )
 from lunaux.backends.auto import AutoBackend, BackendMode, build_backend
 from lunaux.backends.base import DecompilerBackend
+from lunaux.backends.flow_types import (
+    FlowTypeAnalysis,
+    FlowTypeFact,
+    analyze_flow_types,
+)
 from lunaux.backends.native import NativeModuleBackend
 from lunaux.backends.reconstructed import ReconstructedBackend
+from lunaux.backends.roblox_api import (
+    RobloxEventSignature,
+    RobloxMethodSignature,
+    RobloxPropertySignature,
+    callback_parameter_types,
+    catalog_summary,
+    event_callback_types,
+    method_return_type,
+    property_type,
+    service_type,
+)
 from lunaux.backends.ssa import (
     SSAInstruction,
     SSAPhi,
@@ -34,22 +50,34 @@ __all__ = [
     "ControlFlowAnalysis",
     "DecompilerBackend",
     "DefUseChain",
+    "FlowTypeAnalysis",
+    "FlowTypeFact",
     "NativeModuleBackend",
     "NaturalLoop",
     "PhiNode",
     "ReconstructedBackend",
     "RegisterAccess",
+    "RobloxEventSignature",
+    "RobloxMethodSignature",
+    "RobloxPropertySignature",
     "SSAInstruction",
     "SSAPhi",
     "SSAProgram",
     "SSAUse",
     "SSAValue",
     "analyze_control_flow",
+    "analyze_flow_types",
     "build_backend",
     "build_ssa",
+    "callback_parameter_types",
+    "catalog_summary",
+    "event_callback_types",
+    "method_return_type",
+    "property_type",
     "register_access",
     "render_cfg_dot",
     "render_ssa",
     "reverse_postorder",
+    "service_type",
     "strongly_connected_components",
 ]

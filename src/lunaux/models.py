@@ -37,6 +37,14 @@ class DecompileOptions(BaseModel):
     )
     smart_variable_names: bool = Field(default=True, alias="SmartVariableNames")
     infer_types: bool = Field(default=True, alias="InferTypes")
+    flow_sensitive_types: bool = Field(
+        default=True,
+        alias="FlowSensitiveTypes",
+    )
+    roblox_api_types: bool = Field(
+        default=True,
+        alias="RobloxAPITypes",
+    )
     show_recovered_symbols: bool = Field(
         default=False,
         alias="ShowRecoveredSymbols",
@@ -76,6 +84,8 @@ class DecompileOptions(BaseModel):
             "InlineSingleUseTemporaries": self.inline_single_use_temporaries,
             "SmartVariableNames": self.smart_variable_names,
             "InferTypes": self.infer_types,
+            "FlowSensitiveTypes": self.flow_sensitive_types,
+            "RobloxAPITypes": self.roblox_api_types,
             "ShowRecoveredSymbols": self.show_recovered_symbols,
             "RecoverRobloxEvents": self.recover_roblox_events,
             "InlineRobloxCallbacks": self.inline_roblox_callbacks,

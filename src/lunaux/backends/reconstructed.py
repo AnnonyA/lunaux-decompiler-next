@@ -83,13 +83,9 @@ def inspect_bytecode(bytecode: bytes, *, string_limit: int = 32) -> BytecodeSumm
         size=len(bytecode),
         version=module.version if module else (bytecode[0] if bytecode else None),
         types_version=(
-            module.types_version
-            if module
-            else (bytecode[1] if len(bytecode) > 1 else None)
+            module.types_version if module else (bytecode[1] if len(bytecode) > 1 else None)
         ),
-        raw_instruction_stream=(
-            module is None and bool(bytecode) and len(bytecode) % 4 == 0
-        ),
+        raw_instruction_stream=(module is None and bool(bytecode) and len(bytecode) % 4 == 0),
         serialized_container=module is not None,
         prototype_count=len(module.protos) if module else 0,
         strings=tuple(strings),
@@ -152,16 +148,8 @@ class ReconstructedBackend:
             return _COMPATIBILITY_NOTICE + decompile_module(module, options, filename)
         if parse_error is None and len(bytecode) % 4 == 0:
             source = decompile_module(_raw_proto(bytecode), options, filename)
-            listing = "\n".join(
-                f"-- {line}" for line in disassemble_words(bytecode).splitlines()
-            )
-            return (
-                _COMPATIBILITY_NOTICE
-                + source
-                + "\n-- Raw instruction stream\n"
-                + listing
-                + "\n"
-            )
+            listing = "\n".join(f"-- {line}" for line in disassemble_words(bytecode).splitlines())
+            return _COMPATIBILITY_NOTICE + source + "\n-- Raw instruction stream\n" + listing + "\n"
         summary = inspect_bytecode(bytecode)
         label = filename or "<bytecode>"
         lines = [
@@ -171,9 +159,7 @@ class ReconstructedBackend:
         if parse_error is not None:
             lines.append(f"-- Parse error: {parse_error}")
         else:
-            lines.append(
-                "-- The input is also not a complete 32-bit instruction stream."
-            )
+            lines.append("-- The input is also not a complete 32-bit instruction stream.")
         lines.extend(
             [
                 f"-- metadata: {json.dumps(summary.as_dict(), ensure_ascii=False)}",
@@ -193,8 +179,7 @@ class ReconstructedBackend:
             "backend": self.name,
             "filename": filename,
             "note": (
-                "Input is neither a supported serialized Luau container "
-                "nor a raw word stream."
+                "Input is neither a supported serialized Luau container nor a raw word stream."
             ),
             **summary.as_dict(),
         }

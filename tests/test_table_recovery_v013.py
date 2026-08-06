@@ -88,9 +88,7 @@ def test_dynamic_keys_overwrite_and_open_tail() -> None:
     assert pending.add_open_tail(2, CallExpr(NameExpr("collect"), ()))
     assert not pending.add_named("late", LiteralExpr("3"))
 
-    assert render_expression(pending.expression()) == (
-        '{[key] = 2, "head", collect()}'
-    )
+    assert render_expression(pending.expression()) == ('{[key] = 2, "head", collect()}')
 
 
 def test_dependency_redefinition_forces_materialization() -> None:

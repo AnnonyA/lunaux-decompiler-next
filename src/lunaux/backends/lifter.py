@@ -146,6 +146,8 @@ class _Options:
     inline_single_use_temporaries: bool
     smart_variable_names: bool
     infer_types: bool
+    flow_sensitive_types: bool
+    roblox_api_types: bool
     show_recovered_symbols: bool
     recover_roblox_events: bool
     inline_roblox_callbacks: bool
@@ -176,6 +178,8 @@ class _Options:
             ),
             smart_variable_names=options.get("SmartVariableNames", True),
             infer_types=options.get("InferTypes", True),
+            flow_sensitive_types=options.get("FlowSensitiveTypes", True),
+            roblox_api_types=options.get("RobloxAPITypes", True),
             show_recovered_symbols=options.get(
                 "ShowRecoveredSymbols",
                 False,
@@ -436,6 +440,7 @@ class _FunctionLifter:
         *,
         inline_only_proto_ids: frozenset[int] = frozenset(),
         upvalue_bindings: dict[int, Expr] | None = None,
+        parameter_type_overrides: dict[int, str] | None = None,
     ) -> None:
         self.module = module
         self.proto = proto
@@ -444,6 +449,7 @@ class _FunctionLifter:
         self.out = emitter
         self.inline_only_proto_ids = inline_only_proto_ids
         self.upvalue_bindings = upvalue_bindings or {}
+        self.parameter_type_overrides = parameter_type_overrides or {}
         self.scope_tree = build_scope_tree(proto)
         self.register_names: dict[int, str] = {}
         self.declared: set[str] = set()
@@ -480,6 +486,8 @@ class _FunctionLifter:
                 proto,
                 self.instructions,
                 self.ssa,
+                flow_sensitive_types=options.flow_sensitive_types,
+                roblox_api_types=options.roblox_api_types,
             )
         self.class_plan = recover_classes(
             module,
@@ -738,13 +746,13 @@ class _FunctionLifter:
         return True
 
     def _annotated_name(self, register: int, name: str, pc: int) -> str:
-        type_name: str | None = None
-        if self.options.infer_types and self.symbols is not None:
+        type_name = _local_type(self.module, self.proto, register, pc)
+        if type_name is None and pc == 0 and self.options.roblox_api_types:
+            type_name = self.parameter_type_overrides.get(register)
+        if type_name is None and self.options.infer_types and self.symbols is not None:
             type_name = self.symbols.type_at_definition(pc, register)
             if type_name is None and pc == 0:
                 type_name = self.symbols.entry_types.get(register)
-        if type_name is None:
-            type_name = _local_type(self.module, self.proto, register, pc)
         return f"{name}: {type_name}" if type_name and type_name != "any" else name
 
     def _assign(self, register: int, expression: Expr | str, pc: int) -> None:
@@ -1301,6 +1309,17 @@ class _FunctionLifter:
             child,
         )
         callback_out = _Emitter(self.options.semicolons)
+        closure_value = self.ssa.value_defined_at(instruction.pc, instruction.a)
+        callback_types = (
+            self.callback_plan.parameter_types_by_value.get(closure_value, ())
+            if closure_value is not None
+            else ()
+        )
+        parameter_type_overrides = {
+            index: type_name
+            for index, type_name in enumerate(callback_types)
+            if index < child.num_params and not type_name.startswith("...")
+        }
         _FunctionLifter(
             self.module,
             child,
@@ -1309,6 +1328,7 @@ class _FunctionLifter:
             callback_out,
             inline_only_proto_ids=self.inline_only_proto_ids,
             upvalue_bindings=bindings,
+            parameter_type_overrides=parameter_type_overrides,
         ).lift(as_function=True, anonymous_function=True)
         return (
             RawExpr(callback_out.render().strip(), Precedence.ATOM),

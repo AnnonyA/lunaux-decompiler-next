@@ -237,7 +237,7 @@ def ssa_value_path(
 def module_name_from_path(path: str | None) -> str | None:
     if not path:
         return None
-    chunks = _IDENTIFIER_CHUNK.findall(path)
+    chunks = [str(chunk) for chunk in _IDENTIFIER_CHUNK.findall(path)]
     if not chunks:
         return None
     ignored = {"Parent", "Root", "script", "game", "workspace"}

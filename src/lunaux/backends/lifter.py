@@ -1024,6 +1024,7 @@ class _FunctionLifter:
         allow_nested: bool,
     ) -> tuple[Expr, frozenset[SSAValue]] | None:
         value = self.ssa.value_at_use(pc, register)
+        expression: Expr
         child = self.pending_tables.get(value) if value is not None else None
         if child is owner:
             return None
@@ -1127,9 +1128,12 @@ class _FunctionLifter:
             if len(entries) == count:
                 success = pending.add_indices(tuple(entries))
         elif instruction.name == "SETLIST" and instruction.c == 0:
-            captured = self.pending_open_table_values.pop(instruction.b, None)
-            if captured is not None and captured[2] == pc:
-                value, dependencies, _consumer_pc = captured
+            open_captured = self.pending_open_table_values.pop(
+                instruction.b,
+                None,
+            )
+            if open_captured is not None and open_captured[2] == pc:
+                value, dependencies, _consumer_pc = open_captured
                 start_index = (instruction.aux or 0) + 1
                 success = pending.add_open_tail(
                     start_index,

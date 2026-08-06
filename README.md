@@ -2,7 +2,7 @@
 
 A local Roblox Luau bytecode decompiler and disassembler with a native backend, the optional Unluau CLI, a portable Python engine, an HTTP API, a CLI, and Windows/Linux launchers.
 
-> **Version 0.9:** adds a structured Luau expression AST, precedence-aware printing, and lexical scope recovery on top of the CFG and SSA engine.
+> **Version 0.10:** adds evidence-based symbol recovery, generated type families, conservative type inference, recovered function signatures, and Luau class reconstruction.
 
 ## Engine chain
 
@@ -30,9 +30,68 @@ A crash, timeout, unsupported file, or empty result from one engine moves the re
 - Represents recovered unary, binary, table, field, index, call, and method expressions as immutable AST nodes.
 - Prints Luau expressions with formal precedence and associativity, including safe nested unary rendering.
 - Reconstructs lexical scopes from debug ranges, including shadowing, register reuse, and typed bindings.
+- Recovers symbol names from debug metadata, SSA relationships, imports, fields, prototype bindings, and Roblox API call evidence.
+- Generates stable type-family names such as `num1`, `bool1`, `str1`, `arg1`, `vec1`, and `buf1` when original names are absent.
+- Infers conservative parameter, local, and return types from serialized type metadata plus data flow and known operation contracts.
+- Reconstructs supported v100 `NEWCLASS` and `NEWCLASSMEMBER` regions as Luau `class ... end` declarations.
 - Reconstructs common expressions, table access, calls, methods, returns, closures, numeric/generic loops, `while`/`repeat` regions, and `if`/`else` layouts using compatibility patterns plus whole-function CFG/SSA analysis.
 - Resolves modern userdata, class, fastcall, feedback, and proto operands in disassembly.
 - Never executes submitted Luau bytecode.
+
+## Recovery quality
+
+### Latest bytecode
+
+Reads official serialized Luau bytecode v3 through v13, retained type metadata v1 through v3, and the current experimental v100 class format. Roblox opcode-byte encoding used by some clients is normalized conservatively before validation.
+
+```text
+bytecode v12 · types v3
+```
+
+### Generated names
+
+Names are selected from evidence instead of register position alone. Debug locals and prototype names have the highest priority, followed by imports, fields, string arguments to calls such as `GetService`, SSA copies, and inferred type families.
+
+```text
+num1 · bool1 · str1 · arg1 · vec1 · buf1
+```
+
+For example, a validated `game:GetService("Players")` result can be named `Players`, while a typed unnamed parameter can become `player: Player` or `num1: number`. Set `ShowRecoveredSymbols` to `true` to emit the SSA value, selected name/type, and the strongest evidence as comments in reconstructed output.
+
+### Types and inference
+
+Serialized parameter/local types are preserved. Missing types are inferred conservatively from constants, numeric/string/table opcodes, property reads, known Luau builtins, selected Roblox method contracts, moves, and SSA merges. Function return annotations are emitted only when the observed return paths agree.
+
+```luau
+local function func(
+    num1: number,
+    bool1: boolean,
+    str1: string,
+    arg1,
+    vec1: vector,
+    buf1: buffer
+): string?
+    -- reconstructed body
+end
+```
+
+### Class recovery
+
+When the v100 class shape and member bindings validate, `NEWCLASS` and `NEWCLASSMEMBER` are emitted as class syntax instead of anonymous table placeholders.
+
+```luau
+class Point
+    public x
+
+    function length(self: Point): number
+        -- reconstructed body
+    end
+end
+```
+
+Class construction remains a normal call expression, for example `local point: Point = Point(1)`. Unsupported or ambiguous class regions retain the conservative compatibility representation.
+
+> Bytecode does not retain comments, original formatting, every source-level construct, or all names. Smart recovery reports the best supported reconstruction; it does not claim exact original source.
 
 ## Quick start
 
@@ -213,6 +272,10 @@ environment.LUNAUX_OPTIONS = environment.LUNAUX_OPTIONS or {
     PreserveForStep = false,
     UseIfExpression = true,
     InlineSingleUseTemporaries = true,
+    SmartVariableNames = true,
+    InferTypes = true,
+    ShowRecoveredSymbols = false,
+    RecoverClasses = true,
     MaxOutputCharacters = 4000000,
 }
 

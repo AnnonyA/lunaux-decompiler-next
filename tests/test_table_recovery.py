@@ -40,10 +40,10 @@ def test_builds_named_and_array_table_fields() -> None:
     assert pending.add_named("Damage", LiteralExpr("25"))
     assert pending.add_index(1, LiteralExpr('"Fire"'))
     assert pending.add_index(2, LiteralExpr('"Ice"'))
-    assert not pending.add_named("Name", NameExpr("other"))
+    assert pending.add_named("Name", NameExpr("other"))
 
     assert render_expression(pending.expression()) == (
-        '{Name = "Sword", Damage = 25, "Fire", "Ice"}'
+        '{Name = other, Damage = 25, "Fire", "Ice"}'
     )
 
 

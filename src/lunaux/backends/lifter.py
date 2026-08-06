@@ -600,6 +600,24 @@ class _FunctionLifter:
             if pc not in machine_pcs
             and any(pc in region.backedge_pcs for region in self.active_advanced_loops.values())
         }
+        advanced_legacy_pcs = (
+            set(self.active_loop_actions)
+            | self.active_loop_skip_pcs
+            | {
+                region.condition_pc
+                for region in self.active_advanced_loops.values()
+                if region.condition_pc is not None
+            }
+        )
+        for header in self.active_advanced_loops:
+            self.while_headers.pop(header, None)
+            self.repeat_starts.pop(header, None)
+        self.while_back_pcs.difference_update(advanced_legacy_pcs)
+        self.repeat_conditions = {
+            pc: condition
+            for pc, condition in self.repeat_conditions.items()
+            if pc not in advanced_legacy_pcs
+        }
         loop_condition_pcs = (
             set(self.while_headers)
             | set(self.repeat_conditions)
@@ -781,6 +799,8 @@ class _FunctionLifter:
             structured_targets.add(chain.false_start)
             structured_targets.add(chain.join)
         for instruction in self.instructions:
+            if instruction.pc in self.state_machine_plan.skipped_pcs:
+                continue
             target = get_jump_target(instruction)
             if (
                 target is not None
@@ -1745,6 +1765,9 @@ class _FunctionLifter:
                 self.out.line(f"-- L{instruction.pc:04d}")
 
             if instruction.pc in self.class_plan.skipped_instruction_pcs:
+                continue
+            if instruction.pc in self.active_loop_actions:
+                self._lift_instruction(instruction)
                 continue
             if (
                 instruction.pc in self.active_structuring_skip_pcs

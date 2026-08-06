@@ -2,7 +2,7 @@
 
 A local Roblox Luau bytecode decompiler and disassembler with a native backend, the optional Unluau CLI, a portable Python engine, an HTTP API, a CLI, and Windows/Linux launchers.
 
-> **Version 0.16:** recovers conservative classes built from tables and metatables, and derives function names, parameter roles, types, and return hints from assignment and callback context.
+> **Version 0.17:** recovers advanced reducible loops with validated `break`/`continue` edges and conservatively unflattens deterministic constant-register state machines.
 
 ## Engine chain
 
@@ -28,6 +28,9 @@ A crash, timeout, unsupported file, or empty result from one engine moves the re
 - Renames register definitions into versioned SSA values and resolves phi operands for each predecessor.
 - Converts validated two-branch phi diamonds into typed Luau `if ... then ... else ...` expressions.
 - Combines reducible short-circuit branch chains into `and` and `or` conditions without crossing side effects.
+- Groups natural loops by CFG header, recomputes merged exits, and recovers pre-test, post-test, infinite, multi-latch, and nested loop regions.
+- Converts validated loop exits and re-entry edges into Luau `break` and `continue` while suppressing only the implicit closing backedge.
+- Unflattens deterministic numeric `JUMPXEQKN` state dispatchers into transition order when the state register and every transition have exclusive constant ownership.
 - Reconstructs full table constructors from `NEWTABLE` and `DUPTABLE`, including nested tables, named/indexed/dynamic keys, fixed `SETLIST` ranges, and final open call or vararg tails.
 - Reconstructs Roblox event connections, including `Connect`, `ConnectParallel`, `Once`, and signal waits, with `RBXScriptConnection` result evidence.
 - Inlines single-owner closures into recognized event, scheduler, action-binding, sorting, module-field, and returned-function callback positions.
@@ -189,6 +192,40 @@ Members are classified as constructors, instance methods, static methods, or met
 The contextual function pass also derives names, parameter roles, parameter types, and return hints from class membership, named field/global assignment, return position, and recognized callback sinks. Contextual names are installed before lifting the body, so a callback rendered as `function(input: InputObject)` consistently references `input` inside the function.
 
 Use `RecoverMetatableClasses` and `ContextualFunctions` to disable either extension independently. `RecoverClasses` remains the parent switch for all class reconstruction. See [`docs/METATABLE_CLASSES_AND_CONTEXTUAL_FUNCTIONS.md`](docs/METATABLE_CLASSES_AND_CONTEXTUAL_FUNCTIONS.md).
+
+### Advanced loops and state-machine unflattening
+
+Version 0.17 replaces adjacency-only loop recognition with a CFG-native plan. Natural loops sharing one header are merged before exits are recomputed, so multiple latches and explicit `continue` edges do not create false loop exits.
+
+```luau
+while running do
+    if shouldSkip then
+        continue
+    end
+
+    process()
+
+    if finished then
+        break
+    end
+end
+```
+
+The pass supports conservative pre-test `while`, post-test `repeat ... until`, infinite `while true do`, nested reducible loops, and conditional or unconditional `break`/`continue`. Numeric and generic `for` bytecode remains owned by the existing dedicated recovery.
+
+Version 0.17 also recognizes constant numeric state dispatchers built from `JUMPXEQKN`. When the initial state, selector chain, state register ownership, and every transition validate, physical case order is replaced with semantic transition order.
+
+```luau
+-- unflattened state machine R0; initial=0
+while true do
+    firstStep()
+    secondStep()
+end
+```
+
+Dynamic states, indirect transitions, case-local branches, state values used by ordinary logic, multiple entries, ambiguous exits, and partial or irreducible machines retain the low-level representation. The pass reconstructs a supported semantic structure; it does not claim generalized deobfuscation or exact original source.
+
+Use `AdvancedLoops` and `UnflattenStateMachines` to disable either pass independently. See [`docs/ADVANCED_LOOPS_AND_STATE_MACHINES.md`](docs/ADVANCED_LOOPS_AND_STATE_MACHINES.md).
 
 ### Experimental bytecode classes
 

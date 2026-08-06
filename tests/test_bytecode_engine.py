@@ -122,9 +122,9 @@ def test_parser_reads_strings_constants_and_main_proto() -> None:
 def test_python_engine_reconstructs_common_call() -> None:
     module = parse_bytecode(_sample_container())
     source = decompile_module(module, {}, "Example")
-    assert "local v0 = print" in source
+    assert "local print = print" in source
     assert 'local v1 = "hello"' not in source
-    assert 'v0("hello")' in source
+    assert 'print("hello")' in source
 
 
 def test_semicolon_option_is_applied() -> None:
@@ -133,8 +133,8 @@ def test_semicolon_option_is_applied() -> None:
         {"Semicolons": True},
         "Example",
     )
-    assert "local v0 = print;" in source
-    assert 'v0("hello");' in source
+    assert "local print = print;" in source
+    assert 'print("hello");' in source
 
 
 def test_disassembly_resolves_constant_names() -> None:
@@ -185,7 +185,7 @@ def test_structured_type_info_recovers_typed_local() -> None:
     typed = module.main_proto.typed_locals
     assert len(typed) == 1
     assert typed[0].register == 0
-    assert "local v0: string = 5" in decompile_module(module, {}, "typed")
+    assert "local str1: string = 5" in decompile_module(module, {}, "typed")
 
 
 def test_wip_class_bytecode_and_newclass_are_supported() -> None:

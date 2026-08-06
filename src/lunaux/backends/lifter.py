@@ -32,6 +32,7 @@ from lunaux.backends.bytecode import (
     LuauProto,
     format_type_tag,
 )
+from lunaux.backends.classes import recover_classes
 from lunaux.backends.inlining import plan_expression_inlining
 from lunaux.backends.opcodes import (
     DecodedInstruction,
@@ -41,6 +42,7 @@ from lunaux.backends.opcodes import (
 )
 from lunaux.backends.scopes import build_scope_tree
 from lunaux.backends.ssa import SSAValue, build_ssa
+from lunaux.backends.symbols import SymbolRecovery, build_symbol_recovery
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RESERVED = {
@@ -123,6 +125,10 @@ class _Options:
     show_function_id: bool
     preserve_for_step: bool
     inline_single_use_temporaries: bool
+    smart_variable_names: bool
+    infer_types: bool
+    show_recovered_symbols: bool
+    recover_classes: bool
 
     @classmethod
     def from_backend(cls, options: dict[str, bool]) -> _Options:
@@ -136,6 +142,13 @@ class _Options:
                 "InlineSingleUseTemporaries",
                 True,
             ),
+            smart_variable_names=options.get("SmartVariableNames", True),
+            infer_types=options.get("InferTypes", True),
+            show_recovered_symbols=options.get(
+                "ShowRecoveredSymbols",
+                False,
+            ),
+            recover_classes=options.get("RecoverClasses", True),
         )
 
 
@@ -411,6 +424,24 @@ class _FunctionLifter:
             len(proto.code),
             analysis=self.analysis,
         )
+        self.symbols: SymbolRecovery | None = None
+        if (
+            options.smart_variable_names
+            or options.infer_types
+            or options.show_recovered_symbols
+        ):
+            self.symbols = build_symbol_recovery(
+                module,
+                proto,
+                self.instructions,
+                self.ssa,
+            )
+        self.class_plan = recover_classes(
+            module,
+            proto,
+            self.instructions,
+            self.ssa,
+        )
         self.inline_plan = plan_expression_inlining(self.ssa, proto)
         self.inline_expressions: dict[SSAValue, Expr] = {}
         self.instruction_by_pc = {
@@ -571,6 +602,24 @@ class _FunctionLifter:
             active = _sanitize_identifier(binding.name, f"v{register}")
             self.register_names[register] = active
             return active
+        if self.options.smart_variable_names and self.symbols is not None:
+            recovered = self.symbols.name_at_use(pc, register)
+            if recovered is not None:
+                self.register_names[register] = recovered
+                return recovered
+        return self.register_names.get(register, f"v{register}")
+
+    def _definition_name(self, register: int, pc: int) -> str:
+        binding = self.scope_tree.binding_for_register(register, pc)
+        if binding is not None:
+            active = _sanitize_identifier(binding.name, f"v{register}")
+            self.register_names[register] = active
+            return active
+        if self.options.smart_variable_names and self.symbols is not None:
+            recovered = self.symbols.name_at_definition(pc, register)
+            if recovered is not None:
+                self.register_names[register] = recovered
+                return recovered
         return self.register_names.get(register, f"v{register}")
 
     def _ref_expr(self, register: int, pc: int) -> Expr:
@@ -586,7 +635,13 @@ class _FunctionLifter:
         return render_expression(self._ref_expr(register, pc))
 
     def _annotated_name(self, register: int, name: str, pc: int) -> str:
-        type_name = _local_type(self.module, self.proto, register, pc)
+        type_name: str | None = None
+        if self.options.infer_types and self.symbols is not None:
+            type_name = self.symbols.type_at_definition(pc, register)
+            if type_name is None and pc == 0:
+                type_name = self.symbols.entry_types.get(register)
+        if type_name is None:
+            type_name = _local_type(self.module, self.proto, register, pc)
         return f"{name}: {type_name}" if type_name and type_name != "any" else name
 
     def _assign(self, register: int, expression: Expr | str, pc: int) -> None:
@@ -600,7 +655,7 @@ class _FunctionLifter:
             self.inline_expressions[value] = resolved_expression
             self.register_names.setdefault(register, f"v{register}")
             return
-        name = self._name(register, pc)
+        name = self._definition_name(register, pc)
         if name in self.declared:
             lhs = name
         else:
@@ -617,7 +672,7 @@ class _FunctionLifter:
         pc: int,
     ) -> None:
         rendered_expression = render_expression(ensure_expr(expression))
-        names = [self._name(register, pc) for register in registers]
+        names = [self._definition_name(register, pc) for register in registers]
         new_flags = [name not in self.declared for name in names]
         if all(new_flags):
             annotated = [
@@ -786,10 +841,25 @@ class _FunctionLifter:
         self.block_closures[end_pc].append("end")
         return True
 
-    def lift(self, *, as_function: bool) -> None:
+    def lift(
+        self,
+        *,
+        as_function: bool,
+        function_name_override: str | None = None,
+        local_function: bool = True,
+    ) -> None:
         parameters = []
         for register in range(self.proto.num_params):
-            name = _local_name(self.proto, register, 0) or f"arg{register + 1}"
+            recovered_name = (
+                self.symbols.entry_names.get(register)
+                if self.options.smart_variable_names and self.symbols is not None
+                else None
+            )
+            name = (
+                _local_name(self.proto, register, 0)
+                or recovered_name
+                or f"arg{register + 1}"
+            )
             name = _sanitize_identifier(name, f"arg{register + 1}")
             parameters.append(self._annotated_name(register, name, 0))
             self.register_names[register] = name
@@ -798,8 +868,19 @@ class _FunctionLifter:
             parameters.append("...")
 
         if as_function:
-            function_name = self.proto_names[self.proto.proto_id]
-            self.out.open(f"local function {function_name}({', '.join(parameters)})")
+            function_name = (
+                function_name_override or self.proto_names[self.proto.proto_id]
+            )
+            prefix = "local function" if local_function else "function"
+            header = f"{prefix} {function_name}({', '.join(parameters)})"
+            if (
+                self.options.infer_types
+                and self.symbols is not None
+                and self.symbols.return_type
+                and self.symbols.return_type != "any"
+            ):
+                header += f": {self.symbols.return_type}"
+            self.out.open(header)
         if self.options.show_function_id:
             self.out.line(f"-- function id: {self.proto.proto_id}")
         if self.options.show_line_defined:
@@ -808,6 +889,12 @@ class _FunctionLifter:
             self.out.line("-- proto flags: " + ", ".join(self.proto.flag_names))
         if self.proto.cost is not None:
             self.out.line(f"-- inlining cost: {self.proto.cost}")
+        if self.options.show_recovered_symbols and self.symbols is not None:
+            report = self.symbols.report_lines()
+            if report:
+                self.out.line("-- recovered symbols:")
+                for line in report:
+                    self.out.line("--   " + line)
         if self.options.upvalue_comment and self.proto.num_upvalues:
             names = [
                 name or f"upvalue_{index}"
@@ -836,6 +923,8 @@ class _FunctionLifter:
             if instruction.pc in self.labels:
                 self.out.line(f"-- L{instruction.pc:04d}")
 
+            if instruction.pc in self.class_plan.skipped_instruction_pcs:
+                continue
             if instruction.pc in self.repeat_conditions:
                 condition = self._conditional_body(instruction)
                 self.out.close(f"until {condition or 'false'}")
@@ -854,6 +943,42 @@ class _FunctionLifter:
         if as_function:
             self.out.close()
             self.out.line()
+
+    def _emit_recovered_class(self, instruction: DecodedInstruction) -> bool:
+        declaration = self.class_plan.at(instruction.pc)
+        if declaration is None:
+            return False
+        class_name = _sanitize_identifier(declaration.name, "AnonymousClass")
+        self.register_names[instruction.a] = class_name
+        self.declared.add(class_name)
+        self.out.open(f"class {class_name}")
+        if declaration.superclass_register is not None:
+            superclass = self._ref(declaration.superclass_register, instruction.pc)
+            self.out.line(f"-- superclass: {superclass}")
+        for property_name in declaration.properties:
+            property_name = _sanitize_identifier(property_name, "property")
+            self.out.line(f"public {property_name}")
+        if declaration.properties and declaration.methods:
+            self.out.line()
+        for method in declaration.methods:
+            method_name = _sanitize_identifier(method.name, "method")
+            if method.proto_id is None:
+                self.out.line(f"-- unresolved method {method_name}")
+                continue
+            child = self.module.protos[method.proto_id]
+            _FunctionLifter(
+                self.module,
+                child,
+                self.proto_names,
+                self.options,
+                self.out,
+            ).lift(
+                as_function=True,
+                function_name_override=method_name,
+                local_function=False,
+            )
+        self.out.close()
+        return True
 
     def _lift_instruction(self, instruction: DecodedInstruction) -> None:
         name = instruction.name
@@ -1140,6 +1265,8 @@ class _FunctionLifter:
                 f"L{target:04d}"
             )
         elif name == "NEWCLASS":
+            if self.options.recover_classes and self._emit_recovered_class(instruction):
+                return
             constant = _constant(self.proto, instruction.aux or 0)
             class_name = "AnonymousClass"
             if (

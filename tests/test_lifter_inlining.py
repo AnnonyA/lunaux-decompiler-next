@@ -78,8 +78,8 @@ def test_can_disable_temporary_inlining() -> None:
         "inline.luac",
     )
 
-    assert "local v0 = 42" in source
-    assert "return v0" in source
+    assert "local num1: number = 42" in source
+    assert "return num1" in source
 
 
 def test_preserves_debug_named_local() -> None:
@@ -93,7 +93,7 @@ def test_preserves_debug_named_local() -> None:
 
     source = decompile_module(module, {}, "named.luac")
 
-    assert "local answer = 42" in source
+    assert "local answer: number = 42" in source
     assert "return answer" in source
 
 
@@ -124,8 +124,8 @@ def test_does_not_duplicate_a_value_used_twice_by_one_instruction() -> None:
 
     source = decompile_module(module, {}, "duplicate.luac")
 
-    assert "local v0 = 2" in source
-    assert "return v0 + v0" in source
+    assert "local num1: number = 2" in source
+    assert "return num1 + num1" in source
 
 
 def test_nested_unary_inlining_is_valid_luau() -> None:

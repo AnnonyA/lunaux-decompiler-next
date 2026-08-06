@@ -21,6 +21,10 @@ environment.LUNAUX_OPTIONS = environment.LUNAUX_OPTIONS or {
     PreserveForStep = false,
     UseIfExpression = true,
     InlineSingleUseTemporaries = true,
+    SmartVariableNames = true,
+    InferTypes = true,
+    ShowRecoveredSymbols = false,
+    RecoverClasses = true,
     MaxOutputCharacters = 4000000,
 }
 

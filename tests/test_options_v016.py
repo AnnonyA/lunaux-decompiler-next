@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from lunaux import __version__
 from lunaux.backends.reconstructed import ReconstructedBackend
 from lunaux.models import DecompileOptions
 
@@ -26,5 +27,5 @@ def test_v016_pascal_case_options_can_be_disabled() -> None:
     assert options.recover_metatable_classes is False
 
 
-def test_reconstructed_backend_reports_v016() -> None:
-    assert ReconstructedBackend().version == "0.16.0"
+def test_reconstructed_backend_matches_package_version() -> None:
+    assert ReconstructedBackend().version == __version__

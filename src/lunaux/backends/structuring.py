@@ -32,7 +32,9 @@ _CONDITIONAL_OPS: Final[frozenset[str]] = frozenset(
     }
 )
 _IGNORED_OPS: Final[frozenset[str]] = frozenset({"NOP", "COVERAGE"})
-_UNCONDITIONAL_JUMPS: Final[frozenset[str]] = frozenset({"JUMP", "JUMPBACK", "JUMPX"})
+_UNCONDITIONAL_JUMPS: Final[frozenset[str]] = frozenset(
+    {"JUMP", "JUMPBACK", "JUMPX"}
+)
 _PURE_PHI_VALUE_OPS: Final[frozenset[str]] = frozenset(
     {
         "LOADNIL",
@@ -464,7 +466,9 @@ def build_structured_recovery(program: SSAProgram) -> StructuredRecoveryPlan:
 
     return StructuredRecoveryPlan(
         phi_regions=phi_regions,
-        phi_by_header=MappingProxyType({region.condition_pc: region for region in phi_regions}),
+        phi_by_header=MappingProxyType(
+            {region.condition_pc: region for region in phi_regions}
+        ),
         phi_by_join=MappingProxyType(
             {
                 join: tuple(sorted(regions, key=lambda item: item.condition_pc))
@@ -473,7 +477,9 @@ def build_structured_recovery(program: SSAProgram) -> StructuredRecoveryPlan:
         ),
         captured_phi_values=frozenset(captured_values),
         boolean_chains=boolean_chains,
-        boolean_by_root=MappingProxyType({chain.root_pc: chain for chain in boolean_chains}),
+        boolean_by_root=MappingProxyType(
+            {chain.root_pc: chain for chain in boolean_chains}
+        ),
         skipped_condition_pcs=frozenset(skipped_condition_pcs),
         skipped_structuring_pcs=frozenset(skipped_structuring_pcs),
     )

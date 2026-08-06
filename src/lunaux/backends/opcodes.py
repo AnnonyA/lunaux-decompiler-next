@@ -590,14 +590,13 @@ def decode_words(
         info = opcode_info(opcode)
         if strict and info is None:
             raise ValueError(f"unknown Luau opcode {opcode} at word {pc}")
-        if (
-            strict
-            and bytecode_version is not None
-            and not opcode_supported(opcode, bytecode_version)
+        if strict and bytecode_version is not None and not opcode_supported(
+            opcode, bytecode_version
         ):
             name = opcode_name(opcode)
             raise ValueError(
-                f"opcode {name} is not valid for Luau bytecode v{bytecode_version} at word {pc}"
+                f"opcode {name} is not valid for Luau bytecode v{bytecode_version} "
+                f"at word {pc}"
             )
         expects_aux = bool(info and info.has_aux)
         if expects_aux and pc + 1 >= len(values):

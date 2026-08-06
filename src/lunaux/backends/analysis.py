@@ -154,7 +154,8 @@ def _build_blocks(
     block_for_pc: dict[int, int] = {}
     for start, end in block_ranges:
         block_instructions = tuple(
-            instruction_by_pc[pc] for pc in sorted(pc for pc in valid_pcs if start <= pc < end)
+            instruction_by_pc[pc]
+            for pc in sorted(pc for pc in valid_pcs if start <= pc < end)
         )
         if not block_instructions:
             continue
@@ -213,7 +214,9 @@ def _dominators(
             if node == entry:
                 continue
             incoming = [
-                result[pred] for pred in predecessors.get(node, frozenset()) if pred in nodes
+                result[pred]
+                for pred in predecessors.get(node, frozenset())
+                if pred in nodes
             ]
             updated = {node}
             if incoming:
@@ -240,7 +243,11 @@ def _postdominators(
         for node in sorted(nodes, reverse=True):
             if node in exits:
                 continue
-            outgoing = [result[succ] for succ in successors.get(node, frozenset()) if succ in nodes]
+            outgoing = [
+                result[succ]
+                for succ in successors.get(node, frozenset())
+                if succ in nodes
+            ]
             updated = {node}
             if outgoing:
                 updated.update(set.intersection(*outgoing))
@@ -557,8 +564,12 @@ def _liveness(
     accesses: Mapping[int, RegisterAccess],
 ) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
     block_uses, block_defs = _block_use_def(blocks, accesses)
-    live_in: dict[int, set[int]] = {block.start_pc: set() for block in blocks}
-    live_out: dict[int, set[int]] = {block.start_pc: set() for block in blocks}
+    live_in: dict[int, set[int]] = {
+        block.start_pc: set() for block in blocks
+    }
+    live_out: dict[int, set[int]] = {
+        block.start_pc: set() for block in blocks
+    }
     changed = True
     while changed:
         changed = False
@@ -634,7 +645,9 @@ def _def_use(
 
     return DefUseChain(
         reaching_definitions=MappingProxyType(reaching),
-        definition_uses=MappingProxyType({key: frozenset(value) for key, value in reverse.items()}),
+        definition_uses=MappingProxyType(
+            {key: frozenset(value) for key, value in reverse.items()}
+        ),
     )
 
 
@@ -763,7 +776,8 @@ def render_cfg_dot(analysis: ControlFlowAnalysis) -> str:
         phi_by_block[phi.block].append(phi.register)
     for block in analysis.blocks:
         instruction_names = "\\l".join(
-            f"{instruction.pc}: {instruction.name}" for instruction in block.instructions
+            f"{instruction.pc}: {instruction.name}"
+            for instruction in block.instructions
         )
         suffixes: list[str] = []
         if block.start_pc in loop_headers:

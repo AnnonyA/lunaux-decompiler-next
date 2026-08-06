@@ -43,7 +43,9 @@ class AutoBackend:
     def version(self) -> str:
         if len(self._backends) == 1:
             return self._backends[0].version
-        return ", ".join(f"{backend.name}={backend.version}" for backend in self._backends)
+        return ", ".join(
+            f"{backend.name}={backend.version}" for backend in self._backends
+        )
 
     def decompile(
         self,

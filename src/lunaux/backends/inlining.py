@@ -94,7 +94,7 @@ _REORDER_SAFE_INSTRUCTIONS = frozenset(
     }
 )
 _ATOMIC_EXPRESSION = re.compile(
-    r"^(?:nil|true|false|-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+    r'^(?:nil|true|false|-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?'
     r'|"(?:\\.|[^"\\])*"|[A-Za-z_][A-Za-z0-9_]*)$'
 )
 _SUPPORTED_CONSUMERS = frozenset(
@@ -287,7 +287,12 @@ def _use_sites(program: SSAProgram) -> Mapping[SSAValue, tuple[int, ...]]:
     for pc, instruction in program.instructions.items():
         for use in instruction.uses:
             sites[use.value].append(pc)
-    return MappingProxyType({value: tuple(sorted(set(pcs))) for value, pcs in sites.items()})
+    return MappingProxyType(
+        {
+            value: tuple(sorted(set(pcs)))
+            for value, pcs in sites.items()
+        }
+    )
 
 
 def _safe_non_adjacent_gap(
@@ -299,14 +304,19 @@ def _safe_non_adjacent_gap(
     if definition is None:
         return False
     source_registers = set(_register_operands(definition.instruction))
-    intervening_pcs = sorted(pc for pc in program.instructions if definition_pc < pc < use_pc)
+    intervening_pcs = sorted(
+        pc for pc in program.instructions if definition_pc < pc < use_pc
+    )
     if len(intervening_pcs) > 6:
         return False
     for pc in intervening_pcs:
         instruction = program.instructions[pc]
         if instruction.instruction.name not in _REORDER_SAFE_INSTRUCTIONS:
             return False
-        if any(value.register in source_registers for value in instruction.definitions):
+        if any(
+            value.register in source_registers
+            for value in instruction.definitions
+        ):
             return False
     return True
 
@@ -345,7 +355,8 @@ def plan_expression_inlining(
         adjacent = definition_pc + definition.instruction.size == use_pc
         if not adjacent:
             if (
-                definition.instruction.name not in _NON_ADJACENT_INLINEABLE_DEFINITIONS
+                definition.instruction.name
+                not in _NON_ADJACENT_INLINEABLE_DEFINITIONS
                 or not _safe_non_adjacent_gap(program, definition_pc, use_pc)
             ):
                 continue

@@ -1,0 +1,48 @@
+name: Patch v0.17 cases
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - synchronize
+      - reopened
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'feature/advanced-loops-state-machine-v017'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/advanced-loops-state-machine-v017
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Patch terminal cases
+        run: python scripts/patch_v017_cases.py
+      - name: Remove temporary patch files
+        run: rm scripts/patch_v017_cases.py .github/workflows/patch-v017.yml
+      - name: Install development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Format and validate
+        run: |
+          ruff format src/lunaux/backends/advanced_loops.py src/lunaux/backends/state_machine.py tests/test_advanced_control_flow_v017.py
+          ruff check src/lunaux/backends/advanced_loops.py src/lunaux/backends/state_machine.py tests/test_advanced_control_flow_v017.py --fix
+          ruff check .
+          mypy
+          pytest --cov=lunaux --cov-report=term-missing
+      - name: Commit permanent fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Refine advanced loop and terminal state-machine recovery"
+          git push origin HEAD:feature/advanced-loops-state-machine-v017

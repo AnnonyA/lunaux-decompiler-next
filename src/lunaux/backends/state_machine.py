@@ -10,7 +10,8 @@ from lunaux.backends.analysis import BasicBlock, ControlFlowAnalysis, NaturalLoo
 from lunaux.backends.bytecode import LuauConstant, LuauProto
 from lunaux.backends.opcodes import DecodedInstruction, get_jump_target
 
-StateValue: TypeAlias = int | float
+StateValue: TypeAlias = None | bool | int | float | str
+StateKey: TypeAlias = tuple[str, None | bool | int | float | str]
 StateMachineKind = Literal["linear", "cycle"]
 
 _IGNORED_OPS = frozenset({"NOP", "COVERAGE"})
@@ -48,7 +49,7 @@ class StateMachineCase:
     selector_pc: int
     block_start: int
     body_pcs: tuple[int, ...]
-    transition_state: StateValue | None
+    transition_state: StateValue
     transition_pc: int | None
     terminal_pc: int | None
 
@@ -113,30 +114,89 @@ def _constant(proto: LuauProto, index: int) -> LuauConstant | None:
     return None
 
 
-def _numeric_constant(proto: LuauProto, index: int) -> StateValue | None:
+def _state_key(value: StateValue) -> StateKey:
+    if value is None:
+        return "nil", None
+    if isinstance(value, bool):
+        return "boolean", value
+    if isinstance(value, str):
+        return "string", value
+    return "number", value
+
+
+def _constant_state(
+    proto: LuauProto,
+    index: int,
+    expected_kind: str | None = None,
+) -> tuple[bool, StateValue]:
     constant = _constant(proto, index)
-    if constant is None or constant.kind not in {"number", "integer"}:
-        return None
+    if constant is None:
+        return False, None
     value = constant.value
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return value
+    if constant.kind == "nil" and value is None and expected_kind is None:
+        return True, None
+    if (
+        constant.kind == "boolean"
+        and isinstance(value, bool)
+        and expected_kind is None
+    ):
+        return True, value
+    if constant.kind in {"number", "integer"}:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False, None
+        if expected_kind not in (None, "number"):
+            return False, None
+        return True, value
+    if (
+        constant.kind == "string"
+        and isinstance(value, str)
+        and expected_kind in (None, "string")
+    ):
+        return True, value
+    return False, None
 
 
 def _constant_assignment(
     proto: LuauProto,
     instruction: DecodedInstruction,
     register: int,
-) -> StateValue | None:
+) -> tuple[bool, StateValue]:
     if instruction.a != register:
-        return None
+        return False, None
+    if instruction.name == "LOADNIL":
+        return True, None
+    if instruction.name == "LOADB" and instruction.c == 0:
+        return True, bool(instruction.b)
     if instruction.name == "LOADN":
-        return instruction.d
+        return True, instruction.d
     if instruction.name == "LOADK":
-        return _numeric_constant(proto, instruction.d)
+        return _constant_state(proto, instruction.d)
     if instruction.name == "LOADKX":
-        return _numeric_constant(proto, instruction.aux or 0)
-    return None
+        return _constant_state(proto, instruction.aux or 0)
+    return False, None
+
+
+def _selector_state(
+    proto: LuauProto,
+    instruction: DecodedInstruction,
+) -> tuple[bool, StateValue]:
+    if instruction.name == "JUMPXEQKNIL":
+        return True, None
+    if instruction.name == "JUMPXEQKB":
+        return True, bool((instruction.aux or 0) & 1)
+    if instruction.name == "JUMPXEQKN":
+        return _constant_state(
+            proto,
+            (instruction.aux or 0) & 0xFFFFFF,
+            "number",
+        )
+    if instruction.name == "JUMPXEQKS":
+        return _constant_state(
+            proto,
+            (instruction.aux or 0) & 0xFFFFFF,
+            "string",
+        )
+    return False, None
 
 
 def _branch_targets(
@@ -161,15 +221,13 @@ def _selector(
     if block is None or block.terminator is None:
         return None
     terminator = block.terminator
-    if terminator.name != "JUMPXEQKN":
+    valid_state, state = _selector_state(proto, terminator)
+    if not valid_state:
         return None
     if any(
         instruction is not terminator and instruction.name not in _IGNORED_OPS
         for instruction in block.instructions
     ):
-        return None
-    state = _numeric_constant(proto, (terminator.aux or 0) & 0xFFFFFF)
-    if state is None:
         return None
     taken, fallthrough = _branch_targets(analysis, block)
     if taken is None or fallthrough is None:
@@ -211,7 +269,9 @@ def _selector_chain(
     header: int,
     loop_body: frozenset[int],
 ) -> tuple[tuple[_Selector, ...], frozenset[int]] | None:
+    del loop_body
     selectors: list[_Selector] = []
+    selector_keys: set[StateKey] = set()
     skipped_fallback_pcs: set[int] = set()
     current = header
     visited: set[int] = set()
@@ -232,8 +292,10 @@ def _selector_chain(
             return None
         if selector.match_target not in analysis.block_by_start:
             return None
-        if any(existing.state == selector.state for existing in selectors):
+        key = _state_key(selector.state)
+        if key in selector_keys:
             return None
+        selector_keys.add(key)
         selectors.append(selector)
         if selector.miss_target == header:
             break
@@ -271,7 +333,7 @@ def _initial_assignment(
     assignments = [
         instruction
         for instruction in block.instructions
-        if _constant_assignment(proto, instruction, state_register) is not None
+        if _constant_assignment(proto, instruction, state_register)[0]
     ]
     if len(assignments) != 1:
         return None
@@ -323,18 +385,18 @@ def _parse_case(
     state_assignments = [
         instruction
         for instruction in instructions[:-1]
-        if _constant_assignment(proto, instruction, selector.register) is not None
+        if _constant_assignment(proto, instruction, selector.register)[0]
     ]
     if target == dispatcher_header:
         if block.start_pc not in loop_body or len(state_assignments) != 1:
             return None
         transition_instruction = state_assignments[0]
-        transition = _constant_assignment(
+        valid_transition, transition = _constant_assignment(
             proto,
             transition_instruction,
             selector.register,
         )
-        if transition is None:
+        if not valid_transition:
             return None
         body_pcs = tuple(
             instruction.pc
@@ -374,25 +436,25 @@ def _parse_case(
 
 def _ordered_cases(
     initial_state: StateValue,
-    cases: Mapping[StateValue, StateMachineCase],
+    cases: Mapping[StateKey, StateMachineCase],
 ) -> tuple[StateMachineKind, tuple[StateMachineCase, ...]] | None:
     ordered: list[StateMachineCase] = []
-    visited: set[StateValue] = set()
+    visited: set[StateKey] = set()
     current = initial_state
 
-    while current not in visited:
-        case = cases.get(current)
+    while (key := _state_key(current)) not in visited:
+        case = cases.get(key)
         if case is None:
             return None
-        visited.add(current)
+        visited.add(key)
         ordered.append(case)
-        if case.transition_state is None:
+        if case.transition_pc is None:
             if len(visited) != len(cases):
                 return None
             return "linear", tuple(ordered)
         current = case.transition_state
 
-    if current != initial_state or len(visited) != len(cases):
+    if key != _state_key(initial_state) or len(visited) != len(cases):
         return None
     if any(case.terminal_pc is not None for case in ordered):
         return None
@@ -465,8 +527,12 @@ def _recover_region(
     if initial is None:
         return None
     initial_instruction, initial_jump = initial
-    initial_state = _constant_assignment(proto, initial_instruction, state_register)
-    if initial_state is None:
+    valid_initial_state, initial_state = _constant_assignment(
+        proto,
+        initial_instruction,
+        state_register,
+    )
+    if not valid_initial_state:
         return None
 
     parsed_cases: list[_ParsedCase] = []
@@ -478,7 +544,7 @@ def _recover_region(
         parsed_cases.append(parsed)
         case_blocks.add(parsed.case.block_start)
 
-    cases_by_state = {parsed.case.state: parsed.case for parsed in parsed_cases}
+    cases_by_state = {_state_key(parsed.case.state): parsed.case for parsed in parsed_cases}
     ordered = _ordered_cases(initial_state, cases_by_state)
     if ordered is None:
         return None
@@ -522,11 +588,12 @@ def _recover_region(
     for parsed in parsed_cases:
         skipped.update(parsed.skipped_pcs)
 
+    state_kinds = sorted({_state_key(case.state)[0] for case in ordered_cases})
     evidence = (
         f"state register R{state_register}",
-        f"constant initial state {initial_state}",
-        f"{len(ordered_cases)} constant selector cases",
-        "exclusive constant state transitions",
+        f"constant initial state {initial_state!r}",
+        f"{len(ordered_cases)} scalar selector cases ({', '.join(state_kinds)})",
+        "exclusive scalar state transitions",
         "deterministic simple cycle" if kind == "cycle" else "deterministic linear chain",
     )
     return StateMachineRegion(

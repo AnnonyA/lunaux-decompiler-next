@@ -18,5 +18,7 @@ build/
 third_party/unluau/
 tools/unluau/*
 !tools/unluau/README.md
+benchmark-report.json
+benchmark-artifacts/
 .DS_Store
 Thumbs.db

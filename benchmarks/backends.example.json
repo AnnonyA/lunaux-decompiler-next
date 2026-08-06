@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "backends": [
+    {
+      "name": "medal",
+      "version": "pin-a-release-or-commit",
+      "command": [
+        "medal",
+        "decompile",
+        "{input}",
+        "--output",
+        "{output}"
+      ],
+      "output": "file"
+    }
+  ]
+}

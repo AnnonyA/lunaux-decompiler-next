@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "replace-with-real-case-o2",
+      "bytecode": "fixtures/replace-with-real-case-o2.luac",
+      "source": "sources/replace-with-real-case.luau",
+      "optimization": "O2",
+      "tags": ["example"]
+    }
+  ]
+}

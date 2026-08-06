@@ -1,0 +1,34 @@
+name: Apply v0.11 semantic recovery
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/roblox-patterns-heuristics-v011
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply semantic recovery integration
+        run: python scripts/apply_v011_semantic_recovery.py
+      - name: Commit semantic recovery integration
+        run: |
+          if git diff --quiet; then
+            echo "No generated changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md pyproject.toml src/lunaux/__init__.py src/lunaux/backends/inlining.py src/lunaux/backends/reconstructed.py src/lunaux/backends/symbols.py
+          git commit -m "Integrate Roblox patterns, heuristic types, and safe inlining"
+          git push origin HEAD:feature/roblox-patterns-heuristics-v011

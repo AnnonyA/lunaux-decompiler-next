@@ -39,7 +39,9 @@ class UnluauBackend(DecompilerBackend):
             raise ValueError("timeout_seconds must be greater than zero")
         self._timeout_seconds = timeout_seconds
         self._command = (
-            tuple(command) if command is not None else self._resolve_command(executable_path)
+            tuple(command)
+            if command is not None
+            else self._resolve_command(executable_path)
         )
         if not self._command:
             raise LunaUXError(

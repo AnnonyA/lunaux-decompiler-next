@@ -61,7 +61,9 @@ def decode_multiplicative_opcode_words(
         normalized[pc] = (values[pc] & 0xFFFFFF00) | opcode
         size = 2 if info.has_aux else 1
         if pc + size > len(values):
-            raise ValueError(f"decoded opcode {info.name} at word {pc} is missing its AUX word")
+            raise ValueError(
+                f"decoded opcode {info.name} at word {pc} is missing its AUX word"
+            )
         pc += size
 
     return tuple(normalized)

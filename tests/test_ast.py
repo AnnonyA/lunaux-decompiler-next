@@ -109,7 +109,7 @@ def test_statement_printer_renders_nested_blocks() -> None:
             IfStatement(
                 BinaryExpr(name("answer"), ">", LiteralExpr("0")),
                 Block((ReturnStatement((name("answer"),)),)),
-                Block((RawStatement('error("invalid")'),)),
+                Block((RawStatement("error(\"invalid\")"),)),
             ),
         )
     )
@@ -119,7 +119,7 @@ def test_statement_printer_renders_nested_blocks() -> None:
         "if answer > 0 then\n"
         "    return answer\n"
         "else\n"
-        '    error("invalid")\n'
+        "    error(\"invalid\")\n"
         "end\n"
     )
 
@@ -137,7 +137,9 @@ def test_function_printer_supports_varargs_and_semicolons() -> None:
     )
 
     assert LuauPrinter(semicolons=True).render(program) == (
-        "local function collect(first, ...)\n    return first;\nend\n"
+        "local function collect(first, ...)\n"
+        "    return first;\n"
+        "end\n"
     )
 
 

@@ -195,7 +195,9 @@ class LunaUXInstaller:
         header.pack(fill=X, pady=(0, 18))
         title_box = ttk.Frame(header, style="Root.TFrame")
         title_box.pack(side=LEFT, fill=X, expand=True)
-        ttk.Label(title_box, text="LunaUX Next", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(title_box, text="LunaUX Next", style="Title.TLabel").pack(
+            anchor="w"
+        )
         ttk.Label(
             title_box,
             text="Multi-engine Roblox Luau decompiler and local API launcher",
@@ -260,7 +262,9 @@ class LunaUXInstaller:
         return label
 
     def _build_dashboard(self, parent: ttk.Frame) -> None:
-        ttk.Label(parent, text="Local service", style="PanelTitle.TLabel").pack(anchor="w")
+        ttk.Label(parent, text="Local service", style="PanelTitle.TLabel").pack(
+            anchor="w"
+        )
         ttk.Label(
             parent,
             text=(
@@ -302,7 +306,9 @@ class LunaUXInstaller:
 
         ttk.Separator(parent).pack(fill=X, pady=18)
 
-        ttk.Label(parent, text="Tools", style="PanelTitle.TLabel").pack(anchor="w")
+        ttk.Label(parent, text="Tools", style="PanelTitle.TLabel").pack(
+            anchor="w"
+        )
         tools = ttk.Frame(parent, style="Panel.TFrame")
         tools.pack(fill=X, pady=(12, 0))
         ttk.Button(
@@ -356,7 +362,9 @@ class LunaUXInstaller:
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(4, 14))
 
-        ttk.Label(parent, text="Backend mode", style="Body.TLabel").pack(anchor="w")
+        ttk.Label(parent, text="Backend mode", style="Body.TLabel").pack(
+            anchor="w"
+        )
         self.mode_var = tk.StringVar(value=self.config.backend_mode)
         mode = ttk.Combobox(
             parent,
@@ -367,7 +375,9 @@ class LunaUXInstaller:
         )
         mode.pack(anchor="w", pady=(6, 12))
 
-        ttk.Label(parent, text="luna.pyd path", style="Body.TLabel").pack(anchor="w")
+        ttk.Label(parent, text="luna.pyd path", style="Body.TLabel").pack(
+            anchor="w"
+        )
         native_row = ttk.Frame(parent, style="Panel.TFrame")
         native_row.pack(fill=X, pady=(6, 10))
         self.native_var = tk.StringVar(value=self.config.native_path)
@@ -417,12 +427,16 @@ class LunaUXInstaller:
         host_box.pack(side=LEFT, padx=(0, 18))
         ttk.Label(host_box, text="Host", style="Body.TLabel").pack(anchor="w")
         self.host_var = tk.StringVar(value=self.config.host)
-        ttk.Entry(host_box, textvariable=self.host_var, width=22).pack(pady=(6, 0))
+        ttk.Entry(host_box, textvariable=self.host_var, width=22).pack(
+            pady=(6, 0)
+        )
         port_box = ttk.Frame(server_row, style="Panel.TFrame")
         port_box.pack(side=LEFT, padx=(0, 18))
         ttk.Label(port_box, text="Port", style="Body.TLabel").pack(anchor="w")
         self.port_var = tk.StringVar(value=str(self.config.port))
-        ttk.Entry(port_box, textvariable=self.port_var, width=10).pack(pady=(6, 0))
+        ttk.Entry(port_box, textvariable=self.port_var, width=10).pack(
+            pady=(6, 0)
+        )
         timeout_box = ttk.Frame(server_row, style="Panel.TFrame")
         timeout_box.pack(side=LEFT)
         ttk.Label(
@@ -430,8 +444,12 @@ class LunaUXInstaller:
             text="External timeout (seconds)",
             style="Body.TLabel",
         ).pack(anchor="w")
-        self.timeout_var = tk.StringVar(value=str(self.config.external_timeout_seconds))
-        ttk.Entry(timeout_box, textvariable=self.timeout_var, width=12).pack(pady=(6, 0))
+        self.timeout_var = tk.StringVar(
+            value=str(self.config.external_timeout_seconds)
+        )
+        ttk.Entry(timeout_box, textvariable=self.timeout_var, width=12).pack(
+            pady=(6, 0)
+        )
 
         ttk.Button(
             parent,
@@ -443,7 +461,9 @@ class LunaUXInstaller:
     def _build_logs(self, parent: ttk.Frame) -> None:
         toolbar = ttk.Frame(parent, style="Panel.TFrame")
         toolbar.pack(fill=X, pady=(0, 8))
-        ttk.Label(toolbar, text="Activity log", style="PanelTitle.TLabel").pack(side=LEFT)
+        ttk.Label(toolbar, text="Activity log", style="PanelTitle.TLabel").pack(
+            side=LEFT
+        )
         ttk.Button(
             toolbar,
             text="Clear",
@@ -508,7 +528,9 @@ class LunaUXInstaller:
         self.busy = value
         state = "disabled" if value else "normal"
         self.install_button.configure(state=state)
-        self.start_button.configure(state=state if self.server_process is None else "disabled")
+        self.start_button.configure(
+            state=state if self.server_process is None else "disabled"
+        )
 
     def _run_background(self, task: Callable[[], None]) -> None:
         if self.busy:
@@ -558,13 +580,19 @@ class LunaUXInstaller:
         def task() -> None:
             if not self._venv_python().exists():
                 self._post("log", "Creating isolated .venv environment…")
-                code = self._run_command([sys.executable, "-m", "venv", str(VENV_DIR)])
+                code = self._run_command(
+                    [sys.executable, "-m", "venv", str(VENV_DIR)]
+                )
                 if code:
                     raise RuntimeError("Could not create the virtual environment.")
             python = str(self._venv_python())
-            if self._run_command([python, "-m", "pip", "install", "--upgrade", "pip"]):
+            if self._run_command(
+                [python, "-m", "pip", "install", "--upgrade", "pip"]
+            ):
                 raise RuntimeError("pip upgrade failed.")
-            if self._run_command([python, "-m", "pip", "install", "-e", "."]):
+            if self._run_command(
+                [python, "-m", "pip", "install", "-e", "."]
+            ):
                 raise RuntimeError("Project installation failed.")
             self._post("log", "Installation completed successfully.")
 
@@ -575,7 +603,9 @@ class LunaUXInstaller:
         env["PYTHONUTF8"] = "1"
         env["LUNAUX_BACKEND_MODE"] = self.config.backend_mode
         env["LUNAUX_BACKEND_MODULE"] = "luna"
-        env["LUNAUX_EXTERNAL_TIMEOUT_SECONDS"] = str(self.config.external_timeout_seconds)
+        env["LUNAUX_EXTERNAL_TIMEOUT_SECONDS"] = str(
+            self.config.external_timeout_seconds
+        )
         if self.config.native_path:
             env["LUNAUX_NATIVE_PATH"] = self.config.native_path
         else:
@@ -676,7 +706,9 @@ class LunaUXInstaller:
                 env=self._environment(),
             )
             if code:
-                raise RuntimeError("Diagnostics reported an error. See the Logs tab.")
+                raise RuntimeError(
+                    "Diagnostics reported an error. See the Logs tab."
+                )
 
         self._run_background(task)
 
@@ -781,17 +813,24 @@ class LunaUXInstaller:
         )
         if any(candidate.is_file() for candidate in candidates):
             return True
-        return any(shutil.which(name) for name in ("unluau", "Unluau.CLI", "Unluau.CLI.exe"))
+        return any(
+            shutil.which(name)
+            for name in ("unluau", "Unluau.CLI", "Unluau.CLI.exe")
+        )
 
     def _refresh_status(self) -> None:
         architecture = platform.machine() or "unknown"
-        self.python_value.configure(text=f"{platform.python_version()} · {architecture}")
+        self.python_value.configure(
+            text=f"{platform.python_version()} · {architecture}"
+        )
         installed = self._venv_python().exists()
         self.install_value.configure(
             text="Ready" if installed else "Not installed",
             fg=SUCCESS if installed else WARNING,
         )
-        has_native = bool(self.config.native_path and Path(self.config.native_path).is_file())
+        has_native = bool(
+            self.config.native_path and Path(self.config.native_path).is_file()
+        )
         has_unluau = self._has_unluau()
         if self.config.backend_mode == "native":
             backend_text = "Native only"
@@ -809,12 +848,17 @@ class LunaUXInstaller:
             backend_text = "Auto-detect → Python"
         self.backend_value.configure(text=backend_text)
 
-        running = self.server_process is not None and self.server_process.poll() is None
+        running = (
+            self.server_process is not None
+            and self.server_process.poll() is None
+        )
         self.server_badge.configure(
             text="●  Server running" if running else "●  Server stopped",
             fg=SUCCESS if running else MUTED,
         )
-        self.start_button.configure(state="disabled" if running or self.busy else "normal")
+        self.start_button.configure(
+            state="disabled" if running or self.busy else "normal"
+        )
         self.stop_button.configure(state="normal" if running else "disabled")
 
     def on_close(self) -> None:
@@ -824,7 +868,10 @@ class LunaUXInstaller:
 
 def main() -> int:
     if os.name != "nt":
-        print("This launcher is designed for Windows. Use `python -m lunaux` on other systems.")
+        print(
+            "This launcher is designed for Windows. "
+            "Use `python -m lunaux` on other systems."
+        )
     root = tk.Tk()
     LunaUXInstaller(root)
     root.mainloop()

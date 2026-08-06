@@ -1,0 +1,34 @@
+name: Apply v0.12 structuring
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/structured-phi-conditions-tables-v012
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply v0.12 integration
+        run: python scripts/apply_v012_structuring.py
+      - name: Commit v0.12 integration
+        run: |
+          if git diff --quiet; then
+            echo "No generated changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md pyproject.toml examples/api_script.luau src/lunaux/__init__.py src/lunaux/models.py src/lunaux/backends/ast.py src/lunaux/backends/lifter.py src/lunaux/backends/reconstructed.py
+          git commit -m "Integrate phi, boolean, and table reconstruction"
+          git push origin HEAD:feature/structured-phi-conditions-tables-v012

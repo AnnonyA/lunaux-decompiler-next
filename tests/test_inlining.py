@@ -69,13 +69,27 @@ def test_plans_adjacent_single_use_temporary() -> None:
     assert plan.candidate_for_definition(0, 0) is not None
 
 
-def test_rejects_non_adjacent_or_cross_block_uses() -> None:
+def test_allows_non_adjacent_use_across_pure_nop() -> None:
     instructions = [
         _instruction(0, "LOADN", a=0, d=42),
         _instruction(1, "NOP"),
         _instruction(2, "RETURN", a=0, b=2),
     ]
     program = build_ssa(instructions, code_size=3)
+    value = program.value_defined_at(0, 0)
+
+    assert value is not None
+    assert plan_expression_inlining(program, _proto()).should_inline(value)
+
+
+def test_rejects_non_adjacent_use_across_control_flow_block() -> None:
+    instructions = [
+        _instruction(0, "LOADN", a=0, d=42),
+        _instruction(1, "JUMP", d=1),
+        _instruction(2, "NOP"),
+        _instruction(3, "RETURN", a=0, b=2),
+    ]
+    program = build_ssa(instructions, code_size=4)
     value = program.value_defined_at(0, 0)
 
     assert value is not None

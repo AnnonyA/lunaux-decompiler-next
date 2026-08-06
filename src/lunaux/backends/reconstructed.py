@@ -139,7 +139,7 @@ class ReconstructedBackend:
 
     @property
     def version(self) -> str:
-        return "0.10.0"
+        return "0.11.0"
 
     def decompile(
         self,

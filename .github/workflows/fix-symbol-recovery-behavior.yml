@@ -1,4 +1,4 @@
-name: Fix symbol recovery behavior
+name: Fix symbol recovery behavior and regressions
 
 on:
   pull_request:

@@ -895,7 +895,8 @@ def build_symbol_recovery(
             suffix = family_counts[family_base] if numbered else ""
             entry_names[register] = f"{family_base}{suffix}"
         else:
-            entry_names[register] = f"arg{register + 1}"
+            argument_count += 1
+            entry_names[register] = f"arg{argument_count}"
 
     return_types: set[str] = set()
     saw_empty_return = False

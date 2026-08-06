@@ -124,7 +124,7 @@ def test_python_engine_reconstructs_common_call() -> None:
     source = decompile_module(module, {}, "Example")
     assert "local print = print" in source
     assert 'local v1 = "hello"' not in source
-    assert 'v0("hello")' in source
+    assert 'print("hello")' in source
 
 
 def test_semicolon_option_is_applied() -> None:
@@ -134,7 +134,7 @@ def test_semicolon_option_is_applied() -> None:
         "Example",
     )
     assert "local print = print;" in source
-    assert 'v0("hello");' in source
+    assert 'print("hello");' in source
 
 
 def test_disassembly_resolves_constant_names() -> None:

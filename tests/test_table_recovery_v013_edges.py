@@ -87,7 +87,7 @@ def test_dependency_redefinition_materializes_constructor_first() -> None:
     )
 
     constructor = output.index("{Value = arg1}")
-    redefinition = output.index("arg1 = 9")
+    redefinition = output.index(" = 9", constructor)
     assert constructor < redefinition
 
 

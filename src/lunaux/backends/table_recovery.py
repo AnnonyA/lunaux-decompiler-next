@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -81,12 +82,31 @@ class PendingTableLiteral:
         self.entries.append(TableEntry(key=index, value=value))
         return True
 
+    def add_indices(self, entries: tuple[tuple[int, Expr], ...]) -> bool:
+        indices = tuple(index for index, _value in entries)
+        if any(index <= 0 for index in indices):
+            return False
+        if len(set(indices)) != len(indices):
+            return False
+        if any(index in self._keys for index in indices):
+            return False
+        for index, value in entries:
+            self._keys.add(index)
+            self.entries.append(TableEntry(key=index, value=value))
+        return True
+
     def expression(self) -> TableExpr:
         fields: list[TableField] = []
         next_array_index = 1
         for entry in self.entries:
             if isinstance(entry.key, str):
-                fields.append(TableField(key=None, value=entry.value, name=entry.key))
+                fields.append(
+                    TableField(
+                        key=LiteralExpr(json.dumps(entry.key, ensure_ascii=False)),
+                        value=entry.value,
+                        name=entry.key,
+                    )
+                )
                 continue
             if entry.key == next_array_index:
                 fields.append(TableField(key=None, value=entry.value))

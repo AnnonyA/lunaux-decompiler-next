@@ -1,0 +1,66 @@
+name: Clean v0.15 diff
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  contents: write
+
+jobs:
+  clean:
+    if: github.head_ref == 'feature/flow-sensitive-roblox-types-v015'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/flow-sensitive-roblox-types-v015
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Restore unrelated formatting changes
+        shell: bash
+        run: |
+          git fetch origin main
+          git checkout origin/main -- \
+            installer.py \
+            scripts/check_luau_bytecode_spec.py \
+            scripts/install_unluau.py \
+            src/lunaux/backends/analysis.py \
+            src/lunaux/backends/auto.py \
+            src/lunaux/backends/bytecode.py \
+            src/lunaux/backends/inlining.py \
+            src/lunaux/backends/opcode_encoding.py \
+            src/lunaux/backends/opcodes.py \
+            src/lunaux/backends/reconstructed.py \
+            src/lunaux/backends/ssa.py \
+            src/lunaux/backends/structuring.py \
+            src/lunaux/backends/unluau.py \
+            tests/test_ast.py \
+            tests/test_bytecode_engine.py \
+            tests/test_inlining.py \
+            tests/test_table_recovery.py \
+            tests/test_table_recovery_v013.py
+          rm .github/workflows/cleanup-v015.yml
+      - name: Validate cleaned implementation
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          ruff check .
+          mypy
+          pytest --cov=lunaux --cov-report=term-missing
+      - name: Commit cleaned diff
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Remove unrelated formatting changes from v0.15"
+          git push origin HEAD:feature/flow-sensitive-roblox-types-v015

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal
 
@@ -14,6 +14,10 @@ from lunaux.backends.analysis import (
 from lunaux.backends.opcodes import DecodedInstruction
 
 SSAValueKind = Literal["entry", "instruction", "phi"]
+SSAMultiValueKind = Literal["call", "varargs"]
+SSAMultiUseKind = Literal["arguments", "return", "setlist"]
+
+_MULTI_VALUE_PASSTHROUGH_OPS = frozenset({"NOP", "COVERAGE"})
 
 
 @dataclass(frozen=True, order=True, slots=True)
@@ -26,6 +30,54 @@ class SSAValue:
     @property
     def name(self) -> str:
         return f"R{self.register}.{self.version}"
+
+
+@dataclass(frozen=True, order=True, slots=True)
+class SSAMultiValue:
+    origin_pc: int
+    base_register: int
+    kind: SSAMultiValueKind
+
+    @property
+    def name(self) -> str:
+        return f"T{self.origin_pc}"
+
+
+@dataclass(frozen=True, slots=True)
+class SSAMultiUse:
+    consumer_pc: int
+    base_register: int
+    kind: SSAMultiUseKind
+    value: SSAMultiValue
+    prefix_registers: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SSAMultiValuePlan:
+    values: tuple[SSAMultiValue, ...]
+    uses: tuple[SSAMultiUse, ...]
+    by_origin_pc: Mapping[int, SSAMultiValue]
+    by_consumer_pc: Mapping[int, SSAMultiUse]
+
+    @classmethod
+    def empty(cls) -> SSAMultiValuePlan:
+        return cls(
+            values=(),
+            uses=(),
+            by_origin_pc=MappingProxyType({}),
+            by_consumer_pc=MappingProxyType({}),
+        )
+
+    def value_at(self, pc: int) -> SSAMultiValue | None:
+        return self.by_origin_pc.get(pc)
+
+    def use_at(self, pc: int) -> SSAMultiUse | None:
+        return self.by_consumer_pc.get(pc)
+
+    @property
+    def unresolved_values(self) -> tuple[SSAMultiValue, ...]:
+        consumed = {use.value for use in self.uses}
+        return tuple(value for value in self.values if value not in consumed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +113,7 @@ class SSAProgram:
     entry_values: Mapping[int, SSAValue]
     use_counts: Mapping[SSAValue, int]
     definitions: Mapping[tuple[int, int], SSAValue]
+    multi_values: SSAMultiValuePlan = field(default_factory=SSAMultiValuePlan.empty)
 
     def instruction_at(self, pc: int) -> SSAInstruction | None:
         return self.instructions.get(pc)
@@ -76,6 +129,12 @@ class SSAProgram:
 
     def value_defined_at(self, pc: int, register: int) -> SSAValue | None:
         return self.definitions.get((pc, register))
+
+    def multi_value_at(self, pc: int) -> SSAMultiValue | None:
+        return self.multi_values.value_at(pc)
+
+    def multi_use_at(self, pc: int) -> SSAMultiUse | None:
+        return self.multi_values.use_at(pc)
 
     def uses_of(self, value: SSAValue) -> int:
         return self.use_counts.get(value, 0)
@@ -94,6 +153,79 @@ class _PhiBuilder:
     register: int
     result: SSAValue | None
     operands: dict[int, SSAValue]
+
+
+def _multi_value_producer(instruction: DecodedInstruction) -> SSAMultiValue | None:
+    if instruction.name in {"CALL", "CALLFB"} and instruction.c == 0:
+        return SSAMultiValue(
+            origin_pc=instruction.pc,
+            base_register=instruction.a,
+            kind="call",
+        )
+    if instruction.name == "GETVARARGS" and instruction.b == 0:
+        return SSAMultiValue(
+            origin_pc=instruction.pc,
+            base_register=instruction.a,
+            kind="varargs",
+        )
+    return None
+
+
+def _multi_value_consumer(
+    instruction: DecodedInstruction,
+) -> tuple[SSAMultiUseKind, int] | None:
+    if instruction.name in {"CALL", "CALLFB"} and instruction.b == 0:
+        return "arguments", instruction.a + 1
+    if instruction.name == "RETURN" and instruction.b == 0:
+        return "return", instruction.a
+    if instruction.name == "SETLIST" and instruction.c == 0:
+        return "setlist", instruction.b
+    return None
+
+
+def _analyze_multi_values(analysis: ControlFlowAnalysis) -> SSAMultiValuePlan:
+    values: list[SSAMultiValue] = []
+    uses: list[SSAMultiUse] = []
+
+    for block in analysis.blocks:
+        if block.start_pc not in analysis.reachable:
+            continue
+        pending: SSAMultiValue | None = None
+        for instruction in block.instructions:
+            producer = _multi_value_producer(instruction)
+            consumer = _multi_value_consumer(instruction)
+            consumed = False
+
+            if consumer is not None and pending is not None:
+                kind, base_register = consumer
+                if pending.base_register >= base_register:
+                    uses.append(
+                        SSAMultiUse(
+                            consumer_pc=instruction.pc,
+                            base_register=base_register,
+                            kind=kind,
+                            value=pending,
+                            prefix_registers=tuple(
+                                range(base_register, pending.base_register)
+                            ),
+                        )
+                    )
+                    consumed = True
+
+            if producer is not None:
+                values.append(producer)
+                pending = producer
+            elif consumed:
+                pending = None
+            elif instruction.name not in _MULTI_VALUE_PASSTHROUGH_OPS:
+                pending = None
+
+    return SSAMultiValuePlan(
+        values=tuple(values),
+        uses=tuple(uses),
+        by_origin_pc=MappingProxyType({value.origin_pc: value for value in values}),
+        by_consumer_pc=MappingProxyType({use.consumer_pc: use for use in uses}),
+    )
 
 
 class _SSABuilder:
@@ -126,9 +258,7 @@ class _SSABuilder:
                 self.children[parent].append(block)
         order = {block: index for index, block in enumerate(reverse_postorder(analysis))}
         for child_blocks in self.children.values():
-            child_blocks.sort(
-                key=lambda block: order.get(block, len(order))
-            )
+            child_blocks.sort(key=lambda block: order.get(block, len(order)))
 
     def _entry_value(self, register: int) -> SSAValue:
         value = self.entry_values.get(register)
@@ -248,6 +378,7 @@ class _SSABuilder:
                 }
             ),
             definitions=MappingProxyType(dict(sorted(self.definitions.items()))),
+            multi_values=_analyze_multi_values(self.analysis),
         )
 
 
@@ -259,6 +390,21 @@ def build_ssa(
 ) -> SSAProgram:
     resolved_analysis = analysis or analyze_control_flow(tuple(instructions), code_size)
     return _SSABuilder(resolved_analysis).build()
+
+
+def _multi_value_suffix(program: SSAProgram, pc: int) -> str:
+    value = program.multi_value_at(pc)
+    use = program.multi_use_at(pc)
+    parts: list[str] = []
+    if use is not None:
+        prefix = ", ".join(f"R{register}" for register in use.prefix_registers)
+        prefix_text = f" after [{prefix}]" if prefix else ""
+        parts.append(f"MULTRET {use.kind} consumes {use.value.name}{prefix_text}")
+    if value is not None:
+        parts.append(
+            f"{value.name}=MULTRET<{value.kind}> R{value.base_register}..top"
+        )
+    return " ; " + " ; ".join(parts) if parts else ""
 
 
 def render_ssa(program: SSAProgram) -> str:
@@ -290,7 +436,9 @@ def render_ssa(program: SSAProgram) -> str:
             )
             assignment = f"{definitions} = " if definitions else ""
             operand_suffix = f" [{uses}]" if uses else ""
+            multi_suffix = _multi_value_suffix(program, instruction.pc)
             lines.append(
-                f"  {instruction.pc:04d} {assignment}{instruction.name}{operand_suffix}"
+                f"  {instruction.pc:04d} {assignment}{instruction.name}"
+                f"{operand_suffix}{multi_suffix}"
             )
     return "\n".join(lines) + ("\n" if lines else "")

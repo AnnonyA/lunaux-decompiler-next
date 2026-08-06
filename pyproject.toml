@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lunaux-next"
-version = "0.19.0.dev0"
-description = "A multi-engine Luau decompiler with advanced loops, scalar state-machine unflattening, metatable classes, Roblox semantics, CFG, and SSA"
+version = "0.20.0.dev0"
+description = "A multi-engine Luau decompiler with MULTRET-aware SSA, advanced control-flow recovery, Roblox semantics, and differential benchmarking"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }

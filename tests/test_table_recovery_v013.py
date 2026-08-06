@@ -131,8 +131,7 @@ def test_decompiles_nested_dynamic_and_fixed_list_tables() -> None:
         _abc("NEWTABLE", a=5),
         0,
         _ad("LOADN", a=6, d=11),
-        _abc("SETLIST", a=5, b=0, c=1),
-        0,
+        _abc("SETTABLEN", a=6, b=5, c=0),
         _abc("SETLIST", a=0, b=5, c=2),
         0,
         _abc("RETURN", a=0, b=2),
@@ -142,9 +141,8 @@ def test_decompiles_nested_dynamic_and_fixed_list_tables() -> None:
 
     assert "Child = {Value = 7}" in output
     assert '["dynamic-key"] = 9' in output
-    assert "11" in output
+    assert "{11}" in output
     assert ".Child =" not in output
-    assert "["dynamic-key"] = 9" in output
 
 
 def test_decompiles_duptable_template_and_deterministic_overwrite() -> None:

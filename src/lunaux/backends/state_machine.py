@@ -10,8 +10,8 @@ from lunaux.backends.analysis import BasicBlock, ControlFlowAnalysis, NaturalLoo
 from lunaux.backends.bytecode import LuauConstant, LuauProto
 from lunaux.backends.opcodes import DecodedInstruction, get_jump_target
 
-StateValue: TypeAlias = None | bool | int | float | str
-StateKey: TypeAlias = tuple[str, None | bool | int | float | str]
+StateValue: TypeAlias = bool | int | float | str | None
+StateKey: TypeAlias = tuple[str, bool | int | float | str | None]
 StateMachineKind = Literal["linear", "cycle"]
 
 _IGNORED_OPS = frozenset({"NOP", "COVERAGE"})

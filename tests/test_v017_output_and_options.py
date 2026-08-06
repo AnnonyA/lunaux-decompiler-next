@@ -142,8 +142,8 @@ def test_v017_options_versions_and_public_exports() -> None:
     assert options.unflatten_state_machines is False
     assert options.to_backend_dict()["AdvancedLoops"] is False
     assert options.to_backend_dict()["UnflattenStateMachines"] is False
-    assert __version__ == "0.17.0"
-    assert ReconstructedBackend().version == "0.17.0"
+    assert __version__.startswith("0.19.")
+    assert ReconstructedBackend().version == __version__
     assert AdvancedLoopPlan.empty().regions == ()
     assert StateMachinePlan.empty().regions == ()
     assert callable(analyze_advanced_loops)

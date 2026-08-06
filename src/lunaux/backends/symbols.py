@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final
@@ -234,8 +234,8 @@ class _Facts:
         return _best(self.types.values())
 
 
-def _best(values: object) -> _Candidate | None:
-    candidates = list(values)  # type: ignore[arg-type]
+def _best(values: Iterable[_Candidate]) -> _Candidate | None:
+    candidates = list(values)
     if not candidates:
         return None
     return max(candidates, key=lambda item: (item.score, -len(item.text), item.text))
@@ -463,7 +463,8 @@ def build_symbol_recovery(
         if instruction is None:
             return None
         if instruction.name == "GETGLOBAL":
-            return _constant_string(proto, instruction.aux or -1)
+            index = instruction.aux if instruction.aux is not None else -1
+            return _constant_string(proto, index)
         if instruction.name == "GETIMPORT":
             path = _import_path(proto, instruction.aux)
             return ".".join(path) if path else None
@@ -548,7 +549,8 @@ def build_symbol_recovery(
                 "constant table kind",
             )
         elif name == "GETGLOBAL":
-            key = _constant_string(proto, instruction.aux or -1)
+            index = instruction.aux if instruction.aux is not None else -1
+            key = _constant_string(proto, index)
             add_definition_name(pc, instruction.a, key, 78, "global name")
             add_definition_type(
                 pc,
@@ -681,7 +683,10 @@ def build_symbol_recovery(
                         68,
                         f"{method} return contract",
                     )
-            elif method in {"FindFirstChildOfClass", "FindFirstChildWhichIsA"} and instruction.b > 2:
+            elif (
+                method in {"FindFirstChildOfClass", "FindFirstChildWhichIsA"}
+                and instruction.b > 2
+            ):
                 argument = literal_string(program.value_at_use(pc, instruction.a + 2))
                 for register in result_registers:
                     add_definition_name(
@@ -724,8 +729,8 @@ def build_symbol_recovery(
                     facts[definition].add_name("clone", 58, "Clone result")
             else:
                 function_value = program.value_at_use(pc, instruction.a)
-                path = value_path(function_value)
-                return_type = _direct_call_type(path)
+                call_path = value_path(function_value)
+                return_type = _direct_call_type(call_path)
                 for register in result_registers:
                     add_definition_type(pc, register, return_type, 76, "known function return")
 
@@ -875,8 +880,10 @@ def build_symbol_recovery(
         if instruction.b == 1:
             saw_empty_return = True
         elif instruction.b == 2:
-            value = program.value_at_use(instruction.pc, instruction.a)
-            symbol = symbols.get(value) if value is not None else None
+            return_value = program.value_at_use(instruction.pc, instruction.a)
+            symbol = (
+                symbols.get(return_value) if return_value is not None else None
+            )
             if symbol is None or symbol.type_name is None:
                 unresolved_return = True
             else:

@@ -13,6 +13,13 @@ from lunaux.backends.bytecode import (
 from lunaux.backends.opcodes import DecodedInstruction
 from lunaux.backends.ssa import SSAProgram, SSAValue
 
+ClassValueDetails = tuple[
+    DecodedInstruction,
+    str,
+    tuple[str, ...],
+    tuple[str, ...],
+]
+
 
 @dataclass(frozen=True, slots=True)
 class RecoveredClassMethod:
@@ -110,7 +117,7 @@ def recover_classes(
     program: SSAProgram,
 ) -> ClassRecoveryPlan:
     instruction_by_pc = {instruction.pc: instruction for instruction in instructions}
-    class_values: dict[SSAValue, tuple[DecodedInstruction, str, tuple[str, ...], tuple[str, ...]]] = {}
+    class_values: dict[SSAValue, ClassValueDetails] = {}
 
     for instruction in instructions:
         if instruction.name != "NEWCLASS":
@@ -133,7 +140,8 @@ def recover_classes(
         class_value = program.value_at_use(instruction.pc, instruction.a)
         if class_value not in class_values:
             continue
-        key = _constant_string(proto, instruction.aux or -1) or f"member_{instruction.pc}"
+        key_index = instruction.aux if instruction.aux is not None else -1
+        key = _constant_string(proto, key_index) or f"member_{instruction.pc}"
         source_value = program.value_at_use(instruction.pc, instruction.c)
         child_id, closure_pc = _closure_proto_id(
             module,
@@ -160,9 +168,9 @@ def recover_classes(
             skipped.add(closure_pc)
 
     declarations: dict[int, RecoveredClass] = {}
-    for value, details in class_values.items():
-        instruction, class_name, properties, shape_methods = details
-        recovered_methods = methods_by_class[value]
+    for class_value, class_details in class_values.items():
+        instruction, class_name, properties, shape_methods = class_details
+        recovered_methods = methods_by_class[class_value]
         recovered_names = {method.name for method in recovered_methods}
         for method_name in shape_methods:
             if method_name not in recovered_names:

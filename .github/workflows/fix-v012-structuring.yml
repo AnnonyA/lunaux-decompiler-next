@@ -1,0 +1,34 @@
+name: Fix v0.12 structuring
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/structured-phi-conditions-tables-v012
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply structuring corrections
+        run: python scripts/fix_v012_structuring.py
+      - name: Commit corrections
+        run: |
+          if git diff --quiet; then
+            echo "No generated changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/lunaux/backends/structuring.py src/lunaux/backends/lifter.py
+          git commit -m "Merge boolean chains into phi recovery"
+          git push origin HEAD:feature/structured-phi-conditions-tables-v012

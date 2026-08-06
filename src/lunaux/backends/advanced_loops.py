@@ -97,7 +97,10 @@ class AdvancedLoopPlan:
         return self.actions.get(pc)
 
 
-def _group_loops(loops: Sequence[NaturalLoop]) -> tuple[NaturalLoop, ...]:
+def _group_loops(
+    analysis: ControlFlowAnalysis,
+    loops: Sequence[NaturalLoop],
+) -> tuple[NaturalLoop, ...]:
     by_header: dict[int, list[NaturalLoop]] = defaultdict(list)
     for loop in loops:
         by_header[loop.header].append(loop)
@@ -105,10 +108,14 @@ def _group_loops(loops: Sequence[NaturalLoop]) -> tuple[NaturalLoop, ...]:
     merged: list[NaturalLoop] = []
     for header, members in sorted(by_header.items()):
         body: set[int] = set()
-        exits: set[tuple[int, int]] = set()
         for member in members:
             body.update(member.body)
-            exits.update(member.exits)
+        exits = {
+            (source, target)
+            for source in body
+            for target in analysis.block_by_start[source].successors
+            if target not in body
+        }
         merged.append(
             NaturalLoop(
                 header=header,
@@ -359,7 +366,7 @@ def analyze_advanced_loops(
 
     provisional = [
         region
-        for loop in _group_loops(analysis.loops)
+        for loop in _group_loops(analysis, analysis.loops)
         if (region := _classify_region(analysis, loop)) is not None
     ]
     regions = tuple(

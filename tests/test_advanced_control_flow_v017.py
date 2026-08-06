@@ -181,9 +181,7 @@ def test_unflattens_linear_machine_with_terminal_case_outside_loop() -> None:
 def test_rejects_machine_when_state_escapes_case_logic() -> None:
     proto, original = _cycle_machine()
     instructions = tuple(
-        _instruction("MOVE", 7, a=3, b=0)
-        if instruction.pc == 7
-        else instruction
+        _instruction("MOVE", 7, a=3, b=0) if instruction.pc == 7 else instruction
         for instruction in original
     )
     analysis = analyze_control_flow(instructions, 13)

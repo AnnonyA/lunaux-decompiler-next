@@ -230,7 +230,7 @@ def _selector_chain(
             register = selector.register
         elif selector.register != register:
             return None
-        if selector.match_target not in loop_body:
+        if selector.match_target not in analysis.block_by_start:
             return None
         if any(existing.state == selector.state for existing in selectors):
             return None
@@ -288,9 +288,6 @@ def _parse_case(
     block = analysis.block_by_start.get(selector.match_target)
     if block is None or block.start_pc == dispatcher_header or block.terminator is None:
         return None
-    if block.start_pc not in loop_body:
-        return None
-
     instructions = [
         instruction for instruction in block.instructions if instruction.name not in _IGNORED_OPS
     ]
@@ -329,7 +326,7 @@ def _parse_case(
         if _constant_assignment(proto, instruction, selector.register) is not None
     ]
     if target == dispatcher_header:
-        if len(state_assignments) != 1:
+        if block.start_pc not in loop_body or len(state_assignments) != 1:
             return None
         transition_instruction = state_assignments[0]
         transition = _constant_assignment(
@@ -404,12 +401,12 @@ def _ordered_cases(
 
 def _exclusive_state_register(
     analysis: ControlFlowAnalysis,
-    loop_body: frozenset[int],
+    owned_blocks: frozenset[int],
     register: int,
     selector_pcs: frozenset[int],
     transition_pcs: frozenset[int],
 ) -> bool:
-    for block_start in loop_body:
+    for block_start in owned_blocks:
         for instruction in analysis.block_by_start[block_start].instructions:
             access = analysis.register_accesses.get(instruction.pc)
             if access is None:
@@ -421,14 +418,22 @@ def _exclusive_state_register(
     return True
 
 
-def _group_loops(loops: Sequence[NaturalLoop]) -> tuple[NaturalLoop, ...]:
+def _group_loops(
+    analysis: ControlFlowAnalysis,
+    loops: Sequence[NaturalLoop],
+) -> tuple[NaturalLoop, ...]:
     by_header: dict[int, list[NaturalLoop]] = defaultdict(list)
     for loop in loops:
         by_header[loop.header].append(loop)
     result: list[NaturalLoop] = []
     for header, members in sorted(by_header.items()):
         body = frozenset(block for member in members for block in member.body)
-        exits = frozenset(edge for member in members for edge in member.exits)
+        exits = frozenset(
+            (source, target)
+            for source in body
+            for target in analysis.block_by_start[source].successors
+            if target not in body
+        )
         result.append(
             NaturalLoop(
                 header=header,
@@ -483,9 +488,10 @@ def _recover_region(
     transition_pcs = frozenset(
         case.transition_pc for case in ordered_cases if case.transition_pc is not None
     )
+    owned_blocks = loop.body | frozenset(case_blocks)
     if not _exclusive_state_register(
         analysis,
-        loop.body,
+        owned_blocks,
         state_register,
         selector_pcs,
         transition_pcs,
@@ -499,7 +505,7 @@ def _recover_region(
     if exit_pc is not None:
         machine_max_pc = max(
             instruction.pc
-            for block_start in loop.body
+            for block_start in owned_blocks
             for instruction in analysis.block_by_start[block_start].instructions
         )
         if exit_pc <= machine_max_pc:
@@ -550,7 +556,7 @@ def recover_state_machines(
 
     candidates = [
         region
-        for loop in _group_loops(analysis.loops)
+        for loop in _group_loops(analysis, analysis.loops)
         if (region := _recover_region(proto, analysis, loop)) is not None
     ]
     claimed: set[int] = set()

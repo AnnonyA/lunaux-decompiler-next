@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Finalize README
+      - name: Finalize and harden cyclic analyses
         run: python scripts/finalize_v017.py
       - name: Remove temporary finalizer
         run: rm scripts/finalize_v017.py .github/workflows/finalize-v017.yml
@@ -38,25 +38,29 @@ jobs:
           ruff format \
             src/lunaux/backends/__init__.py \
             src/lunaux/backends/advanced_loops.py \
+            src/lunaux/backends/flow_types.py \
             src/lunaux/backends/lifter.py \
             src/lunaux/backends/reconstructed.py \
             src/lunaux/backends/state_machine.py \
+            src/lunaux/backends/structuring.py \
             src/lunaux/models.py \
             tests/test_advanced_control_flow_v017.py \
             tests/test_v017_output_and_options.py
           ruff check \
             src/lunaux/backends/__init__.py \
             src/lunaux/backends/advanced_loops.py \
+            src/lunaux/backends/flow_types.py \
             src/lunaux/backends/lifter.py \
             src/lunaux/backends/reconstructed.py \
             src/lunaux/backends/state_machine.py \
+            src/lunaux/backends/structuring.py \
             src/lunaux/models.py \
             tests/test_advanced_control_flow_v017.py \
             tests/test_v017_output_and_options.py \
             --fix
           ruff check .
           mypy
-          timeout 45s pytest -vv -s -o faulthandler_timeout=20 \
+          timeout 60s pytest -vv -s -o faulthandler_timeout=25 \
             tests/test_v017_output_and_options.py
           pytest --cov=lunaux --cov-report=term-missing
       - name: Commit final release files

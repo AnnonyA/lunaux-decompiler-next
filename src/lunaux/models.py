@@ -19,6 +19,18 @@ class DecompileOptions(BaseModel):
     show_function_id: bool = Field(default=False, alias="ShowFunctionId")
     preserve_for_step: bool = Field(default=False, alias="PreserveForStep")
     use_if_expression: bool = Field(default=True, alias="UseIfExpression")
+    recover_phi_expressions: bool = Field(
+        default=True,
+        alias="RecoverPhiExpressions",
+    )
+    combine_boolean_conditions: bool = Field(
+        default=True,
+        alias="CombineBooleanConditions",
+    )
+    reconstruct_table_literals: bool = Field(
+        default=True,
+        alias="ReconstructTableLiterals",
+    )
     inline_single_use_temporaries: bool = Field(
         default=True,
         alias="InlineSingleUseTemporaries",
@@ -46,6 +58,9 @@ class DecompileOptions(BaseModel):
             "ShowFunctionId": self.show_function_id,
             "PreserveForStep": self.preserve_for_step,
             "UseIfExpression": self.use_if_expression,
+            "RecoverPhiExpressions": self.recover_phi_expressions,
+            "CombineBooleanConditions": self.combine_boolean_conditions,
+            "ReconstructTableLiterals": self.reconstruct_table_literals,
             "InlineSingleUseTemporaries": self.inline_single_use_temporaries,
             "SmartVariableNames": self.smart_variable_names,
             "InferTypes": self.infer_types,

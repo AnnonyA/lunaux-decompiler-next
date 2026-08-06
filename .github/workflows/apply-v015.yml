@@ -59,6 +59,14 @@ jobs:
               "analyze_control_flow(tuple(instructions), len(proto.code))",
           )
           path.write_text(text, encoding="utf-8")
+
+          tests = Path("tests/test_roblox_recovery_v014.py")
+          test_text = tests.read_text(encoding="utf-8")
+          test_text = test_text.replace(
+              'assert ":Connect(function(arg1)" in output',
+              'assert ":Connect(function(arg1: InputObject)" in output',
+          )
+          tests.write_text(test_text, encoding="utf-8")
           PY
           rm -rf scripts/.v015 scripts/apply_v015.py .github/workflows/apply-v015.yml
       - name: Install development dependencies

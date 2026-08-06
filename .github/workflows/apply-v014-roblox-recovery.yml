@@ -1,16 +1,16 @@
 name: Apply v0.14 Roblox recovery
 
 on:
-  push:
+  pull_request:
     branches:
-      - feature/roblox-events-callbacks-modules-v014
+      - main
 
 permissions:
   contents: write
 
 jobs:
   apply:
-    if: github.actor != 'github-actions[bot]'
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'feature/roblox-events-callbacks-modules-v014'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

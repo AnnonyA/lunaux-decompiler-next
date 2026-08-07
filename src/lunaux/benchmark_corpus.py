@@ -97,7 +97,9 @@ def generate_corpus(
 
     optimization_values = tuple(optimizations)
     debug_values = tuple(debug_levels)
-    if not optimization_values or any(value not in {0, 1, 2} for value in optimization_values):
+    if not optimization_values or any(
+        value not in {0, 1, 2} for value in optimization_values
+    ):
         raise ValueError("optimizations must contain only 0, 1, and 2")
     if not debug_values or any(value not in {0, 1, 2} for value in debug_values):
         raise ValueError("debug_levels must contain only 0, 1, and 2")
@@ -123,7 +125,13 @@ def generate_corpus(
             source_count += 1
             for optimization in optimization_values:
                 for debug in debug_values:
-                    relative_bytecode = Path("bytecode") / f"O{optimization}" / f"g{debug}" / template_name / f"seed-{seed:03d}.luac"
+                    relative_bytecode = (
+                        Path("bytecode")
+                        / f"O{optimization}"
+                        / f"g{debug}"
+                        / template_name
+                        / f"seed-{seed:03d}.luac"
+                    )
                     bytecode = root / relative_bytecode
                     bytecode.parent.mkdir(parents=True, exist_ok=True)
                     bytecode.write_bytes(

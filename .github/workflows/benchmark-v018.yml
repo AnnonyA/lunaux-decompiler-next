@@ -25,6 +25,8 @@ jobs:
   public-benchmark:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    env:
+      RUSTC_BOOTSTRAP: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,9 +36,9 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly-2026-07-14
+          toolchain: "1.87.0"
       - uses: actions/cache@v4
         with:
           path: |
@@ -44,7 +46,7 @@ jobs:
             ~/.cargo/git
             .benchmark-tools/source/luau/build-lunaux-benchmark
             .benchmark-tools/source/medal/target
-          key: v018-tools-${{ runner.os }}-${{ hashFiles('benchmarks/pins.json') }}
+          key: v018-tools-${{ runner.os }}-${{ hashFiles('benchmarks/pins.json', 'benchmarks/medal-Cargo.lock.gz.b64') }}
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[dev]"
       - name: Build pinned Luau, Medal, and Unluau

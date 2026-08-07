@@ -10,12 +10,19 @@ from lunaux.benchmark_quality_models import (
 )
 
 
-def _case_rank(item: QualityResult) -> tuple[int, int, int, int, float]:
+def _case_rank(item: QualityResult) -> tuple[int, int, int, int, int, float]:
+    execution = {
+        BenchmarkStatus.SUCCESS: 3,
+        BenchmarkStatus.EMPTY_OUTPUT: 2,
+        BenchmarkStatus.ERROR: 1,
+        BenchmarkStatus.TIMEOUT: 0,
+    }[item.execution_status]
     semantic = {
         CheckStatus.PASS: 2,
         CheckStatus.SKIP: 1,
     }.get(item.semantics.status, 0)
     return (
+        execution,
         semantic,
         int(item.recompilation.passed),
         int(item.syntax.passed),

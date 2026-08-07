@@ -54,21 +54,23 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
 
         if name in {"CALL", "CALLFB"} and instruction.c == 0:
             value = self.ssa.multi_value_at(pc)
-            consumer = self._consumer_for(value) if value is not None else None
-            if consumer is not None and consumer.kind in {"arguments", "return"}:
-                if name == "CALLFB":
-                    slot = "sealed" if instruction.aux == 0xFFFFFFFF else str(instruction.aux)
-                    self.out.line(f"-- call feedback slot: {slot}")
-                expression = self._call_expression(instruction)
-                self._multret_expressions()[value] = expression
-                return
+            if value is not None:
+                consumer = self._consumer_for(value)
+                if consumer is not None and consumer.kind in {"arguments", "return"}:
+                    if name == "CALLFB":
+                        slot = "sealed" if instruction.aux == 0xFFFFFFFF else str(instruction.aux)
+                        self.out.line(f"-- call feedback slot: {slot}")
+                    expression = self._call_expression(instruction)
+                    self._multret_expressions()[value] = expression
+                    return
 
         if name == "GETVARARGS" and instruction.b == 0:
             value = self.ssa.multi_value_at(pc)
-            consumer = self._consumer_for(value) if value is not None else None
-            if consumer is not None and consumer.kind in {"arguments", "return"}:
-                self._multret_expressions()[value] = source_expr("...")
-                return
+            if value is not None:
+                consumer = self._consumer_for(value)
+                if consumer is not None and consumer.kind in {"arguments", "return"}:
+                    self._multret_expressions()[value] = source_expr("...")
+                    return
 
         if name == "RETURN" and instruction.b == 0:
             use = self.ssa.multi_use_at(pc)

@@ -12,6 +12,7 @@ from lunaux.backends.ast import (
     source_expr,
 )
 from lunaux.backends.opcodes import DecodedInstruction
+from lunaux.backends.roblox_recovery import closure_proto_id
 from lunaux.backends.ssa import SSAMultiUse, SSAMultiValue, SSAValue
 from lunaux.backends.table_recovery import (
     PendingTableLiteral,
@@ -160,7 +161,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
     ) -> bool:
         if instruction.name not in {"NEWCLOSURE", "DUPCLOSURE"}:
             return False
-        child_id = legacy.closure_proto_id(self.proto, instruction)
+        child_id = closure_proto_id(self.proto, instruction)
         if child_id is None:
             return False
         value = self.ssa.value_defined_at(instruction.pc, instruction.a)

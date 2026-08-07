@@ -7,7 +7,7 @@ def _arithmetic(seed: int) -> str:
     return f"""local seed = {seed}
 local function calculate(value)
     local x = value * 3 + 7
-    local y = x // 2
+    local y = math.floor(x / 2)
     return (y % 19) + (x ^ 2 % 23)
 end
 print(calculate(seed))
@@ -18,7 +18,7 @@ def _conditional(seed: int) -> str:
     return f"""local seed = {seed}
 local function classify(value)
     if value % 5 == 0 then
-        return "five", value // 5
+        return "five", math.floor(value / 5)
     elseif value % 2 == 0 then
         return "even", value + 2
     else

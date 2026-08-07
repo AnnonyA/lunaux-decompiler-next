@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 import lunaux.benchmark_corpus as corpus
-from lunaux.benchmark_corpus import generate_corpus
+from lunaux.benchmark_corpus import CompilerProfile, generate_corpus
 from lunaux.benchmark_corpus_templates import TEMPLATES
 from lunaux.benchmark_engine import (
     BenchmarkCase,
@@ -51,19 +51,21 @@ def _quality_result(
     backend: str,
     *,
     readability: float,
+    execution: BenchmarkStatus = BenchmarkStatus.SUCCESS,
     semantic: CheckStatus = CheckStatus.PASS,
     fallback_count: int = 0,
 ) -> QualityResult:
     passed = QualityCheck(CheckStatus.PASS)
+    skipped = QualityCheck(CheckStatus.SKIP)
     return QualityResult(
         "case",
         backend,
         "pinned",
-        BenchmarkStatus.SUCCESS,
+        execution,
         1.0,
         1024,
-        passed,
-        passed,
+        passed if execution is BenchmarkStatus.SUCCESS else skipped,
+        passed if execution is BenchmarkStatus.SUCCESS else skipped,
         QualityCheck(semantic),
         ReadabilityMetrics(readability, fallback_count, 0.0, 1.0, 1.0),
     )
@@ -118,21 +120,27 @@ def test_default_corpus_matrix_contains_exactly_2304_bytecodes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_compile(
-        command_template: object,
+        profile: CompilerProfile,
         source: Path,
         optimization: int,
         debug: int,
         timeout_seconds: float,
     ) -> bytes:
-        del command_template, timeout_seconds
-        return b"BC" + bytes((optimization, debug)) + source.read_bytes()
+        del timeout_seconds
+        return bytes((profile.bytecode_version, optimization, debug)) + source.read_bytes()
 
     monkeypatch.setattr(corpus, "_compile", fake_compile)
-    build = generate_corpus(tmp_path, ("fake", "{source}"))
+    profiles = (
+        CompilerProfile("luau-v3", 3, ("fake", "{source}")),
+        CompilerProfile("luau-v6", 6, ("fake", "{source}")),
+        CompilerProfile("luau-v11", 11, ("fake", "{source}")),
+    )
+    build = generate_corpus(tmp_path, profiles)
 
     assert len(TEMPLATES) == 16
-    assert build.sources == 16 * 24
+    assert build.sources == 16 * 8
     assert build.bytecodes == 2304
+    assert build.compiler_profiles == ("luau-v3", "luau-v6", "luau-v11")
     payload = json.loads(build.manifest.read_text(encoding="utf-8"))
     assert len(payload["cases"]) == 2304
     assert {case["optimization"] for case in payload["cases"]} == {
@@ -141,6 +149,7 @@ def test_default_corpus_matrix_contains_exactly_2304_bytecodes(
         "O2",
     }
     tags = {tag for case in payload["cases"] for tag in case["tags"]}
+    assert {"bytecode-v3", "bytecode-v6", "bytecode-v11"}.issubset(tags)
     assert {"debug", "stripped-debug"}.issubset(tags)
     assert len(tuple((tmp_path / "bytecode").rglob("*.luac"))) == 2304
 
@@ -192,6 +201,44 @@ def test_generic_lunaux_header_is_not_counted_as_a_fallback() -> None:
         "return 1\n",
     )
     assert metrics.fallback_count == 0
+
+
+def test_successful_execution_beats_a_reference_error() -> None:
+    report = QualityReport(
+        "manifest.json",
+        (
+            _quality_result("lunaux", readability=20.0),
+            _quality_result(
+                "medal",
+                readability=100.0,
+                execution=BenchmarkStatus.ERROR,
+                semantic=CheckStatus.SKIP,
+            ),
+        ),
+        (
+            _summary(
+                "lunaux",
+                recompilation=1.0,
+                semantics=1.0,
+                readability=20.0,
+                stability=1.0,
+            ),
+            _summary(
+                "medal",
+                recompilation=0.0,
+                semantics=0.0,
+                readability=0.0,
+                stability=0.0,
+            ),
+        ),
+    )
+
+    gated = apply_release_gate(report, "lunaux", "medal")
+
+    assert gated.release_gate is not None
+    assert gated.release_gate.passed
+    assert gated.release_gate.case_wins == 1
+    assert gated.release_gate.case_losses == 0
 
 
 def test_release_gate_requires_no_regressions_and_more_case_wins() -> None:

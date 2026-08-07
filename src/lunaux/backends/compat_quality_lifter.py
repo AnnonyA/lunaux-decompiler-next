@@ -139,10 +139,13 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
 
         target = legacy._jump_target(instruction)
         # In the legacy v3-v6 FORN layout A/A+1/A+2 hold limit/step/index.
-        # FORNPREP initializes A+2 from the source start value and FORNLOOP
-        # subsequently updates that same register.  Treating A+3 as the loop
-        # variable (the modern layout) leaves the body reading the immutable
-        # start register and breaks every non-trivial numeric loop.
+        # Capture the pre-prep values before assigning the structural loop name:
+        # FORNPREP reuses A+2 for the induction variable, so renaming it first
+        # turns a valid `for index = 1, limit` into `for index = index, limit`.
+        start = self._ref(instruction.a + 2, instruction.pc)
+        limit = self._ref(instruction.a, instruction.pc)
+        step = self._ref(instruction.a + 1, instruction.pc)
+
         register = instruction.a + 2
         variable = "index"
         suffix = 2
@@ -161,9 +164,6 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
 
         self.register_names[register] = variable
         self.declared.add(variable)
-        start = self._ref(instruction.a + 2, instruction.pc)
-        limit = self._ref(instruction.a, instruction.pc)
-        step = self._ref(instruction.a + 1, instruction.pc)
         header = f"for {variable} = {start}, {limit}"
         if self.options.preserve_for_step or step not in ("1", "1.0"):
             header += f", {step}"

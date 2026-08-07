@@ -9,7 +9,10 @@
     "medal": {
       "repository": "https://github.com/shrimp-nz/medal.git",
       "commit": "92a4e03bef0d3c2bb0511bdba6c5f95b1df96003",
-      "rust_toolchain": "nightly-2026-07-14",
+      "rust_toolchain": "1.87.0",
+      "rustc_bootstrap": true,
+      "cargo_lock": "benchmarks/medal-Cargo.lock.gz.b64",
+      "cargo_lock_sha256": "4588b89b068c33e4ec07a26afa54634c1be336b46ff956bb2171b60db2fc2d00",
       "purpose": "primary 0.18 reference decompiler"
     },
     "unluau": {

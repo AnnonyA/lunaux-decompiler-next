@@ -10,6 +10,8 @@ LunaUX 0.18 replaces feature-count claims with a public, reproducible comparison
 - Medal is the primary 0.18 reference;
 - Unluau is the secondary public reference.
 
+Medal also requires unstable Rust features and did not publish a dependency lock at the pinned commit. The repository therefore records Rust 1.87.0, enables the feature gate with `RUSTC_BOOTSTRAP=1`, and stores the exact resolved `Cargo.lock` as `benchmarks/medal-Cargo.lock.gz.b64`. The installer verifies its decompressed SHA-256 before invoking Cargo with `--locked`. This preserves Medal's source commit and edition without applying source patches while eliminating registry drift.
+
 `python scripts/install_benchmark_tools.py --include-unluau` verifies each checkout before building it and writes generated `toolchain.json` and `backends.json` files. No backend is invoked through a shell.
 
 ## Public corpus

@@ -12,7 +12,7 @@ from lunaux.backends.bytecode import (
     is_supported_bytecode_version,
     parse_bytecode,
 )
-from lunaux.backends.lifter import decompile_module, disassemble_module
+from lunaux.backends.multret_lifter import decompile_module, disassemble_module
 from lunaux.backends.opcodes import disassemble_words, unpack_words
 
 _PRINTABLE: Final[re.Pattern[bytes]] = re.compile(rb"[\x20-\x7e]{4,}")

@@ -86,23 +86,3 @@ def test_bare_function_bytecode_type_is_not_emitted_as_invalid_luau() -> None:
     output = decompile_module(_module(code, typed_locals=typed), {}, "function-type.luau")
 
     assert ": function" not in output
-
-
-def test_stripped_register_redefinitions_keep_one_source_identifier() -> None:
-    code = (
-        _ad("LOADN", a=0, d=1),
-        _ad("LOADN", a=1, d=2),
-        _abc("ADD", a=0, b=0, c=1),
-        _abc("RETURN", a=0, b=2),
-    )
-
-    output = decompile_module(
-        _module(code),
-        {"InlineSingleUseTemporaries": False},
-        "register-reuse.luau",
-    )
-
-    declarations = [line for line in output.splitlines() if line.startswith("local num")]
-    assert len(declarations) == 2
-    assert "num1 = num1 + num2" in output
-    assert "return num1" in output

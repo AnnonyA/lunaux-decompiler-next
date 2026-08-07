@@ -36,7 +36,7 @@ jobs:
           dotnet-version: "8.0.x"
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2024-11-26
+          toolchain: nightly-2026-07-14
       - uses: actions/cache@v4
         with:
           path: |
@@ -78,5 +78,7 @@ jobs:
             benchmark-corpus-v018/manifest.json
             .benchmark-tools/toolchain.json
             .benchmark-tools/backends.json
+            .benchmark-tools/source/medal/Cargo.lock
           if-no-files-found: warn
+          include-hidden-files: true
           retention-days: 30

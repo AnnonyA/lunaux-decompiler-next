@@ -8,8 +8,8 @@ from lunaux.benchmark_quality_models import ReadabilityMetrics
 _FALLBACK_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
-        r"higher-fidelity reconstruction requires",
         r"failed to decompile",
+        r"could not parse .* bytecode",
         r"unsupported",
         r"unknown (?:luau )?opcode",
         r"stack top",
@@ -18,6 +18,7 @@ _FALLBACK_PATTERNS = tuple(
         r"\blabel[_ ]?\d+\b",
         r"--\s*(?:pc|opcode|jump)\b",
         r"compatibility representation",
+        r"raw instruction stream",
     )
 )
 _GENERATED_IDENTIFIER_RE = re.compile(

@@ -34,7 +34,9 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2024-11-26
       - uses: actions/cache@v4
         with:
           path: |

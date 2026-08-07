@@ -5,25 +5,26 @@ from typing import cast
 
 import lunaux.backends.lifter as legacy
 import lunaux.backends.quality_lifter as quality
+from lunaux.backends.ast import NameExpr, render_expression
 from lunaux.backends.bytecode import LuauBytecodeModule
 from lunaux.backends.opcodes import DecodedInstruction
+from lunaux.backends.ssa import SSAValue
 from lunaux.backends.table_recovery import PendingTableLiteral
 
 
 class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
-    """Conservative source emission for legacy Luau bytecode used by the 0.18 gate.
+    """Semantics-first source emission for legacy Luau bytecode used by the 0.18 gate.
 
-    The modern quality pass is tuned around newer bytecode and aggressively folds
-    temporaries. On v3-v6 that can lose the identity of entry parameters or
-    materialize an SSA temporary after its definition was intentionally suppressed.
-    This subclass keeps the modern path unchanged while preferring explicit,
-    semantics-first source for the legacy compatibility window.
+    Modern quality recovery deliberately performs aggressive SSA destruction and
+    source-level renaming. That is useful on current bytecode, but on v3-v6 the
+    allocator reuses physical registers much more aggressively and those cosmetic
+    rewrites can accidentally merge unrelated lifetimes. The compatibility path
+    therefore keeps physical-register identity stable and only applies structural
+    names when they are tied to a concrete SSA definition.
 
-    Legacy Luau SETLIST stores a one-based first array index in AUX. The shared
-    modern lifter historically interpreted AUX as a zero-based offset and added
-    one, shifting every fixed list by one element and making open table tails look
-    non-contiguous. Normalize only the legacy compatibility path before handing
-    the instruction to the shared table recovery machinery.
+    Legacy SETLIST stores a one-based first array index in AUX for fixed lists.
+    Open SETLIST tails already carry the correct first index and must not be shifted;
+    changing their AUX makes ``{...}`` look non-contiguous and silently drops values.
     """
 
     def _entry_parameter_names(self) -> dict[int, str]:
@@ -43,6 +44,16 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
         self._compat_entry_parameter_names = names
         return names
 
+    def _loop_carried_names(self) -> dict[SSAValue, str]:
+        if self.module.version <= 6:
+            return {}
+        return super()._loop_carried_names()
+
+    def _all_phi_names(self) -> dict[SSAValue, str]:
+        if self.module.version <= 6:
+            return {}
+        return super()._all_phi_names()
+
     def _name(self, register: int, pc: int) -> str:
         value = self.ssa.value_at_use(pc, register)
         if (
@@ -54,12 +65,46 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
             name = self._entry_parameter_names()[register]
             self.register_names[register] = name
             return name
+        if self.module.version <= 6:
+            existing = self.register_names.get(register)
+            if existing is not None and existing in self.declared:
+                return existing
         return super()._name(register, pc)
+
+    def _definition_name(self, register: int, pc: int) -> str:
+        name = super()._definition_name(register, pc)
+        if self.module.version > 6:
+            return name
+
+        safe = legacy._sanitize_identifier(name, f"value{register + 1}")
+        instruction = self.instruction_by_pc.get(pc)
+        value = self.ssa.value_defined_at(pc, register)
+        if (
+            value is not None
+            and instruction is not None
+            and instruction.name == "GETUPVAL"
+            and instruction.a == register
+        ):
+            binding = self.upvalue_bindings.get(instruction.b)
+            if binding is not None:
+                binding_name = render_expression(binding)
+                if safe == binding_name and legacy._IDENTIFIER.fullmatch(binding_name):
+                    base = f"{binding_name}Value"
+                    candidate = base
+                    suffix = 2
+                    while candidate in self.declared:
+                        candidate = f"{base}{suffix}"
+                        suffix += 1
+                    self._forced_value_names()[value] = candidate
+                    safe = candidate
+        self.register_names[register] = safe
+        return safe
 
     def _legacy_setlist(self, instruction: DecodedInstruction) -> DecodedInstruction:
         if (
             self.module.version <= 6
             and instruction.name == "SETLIST"
+            and instruction.c > 0
             and instruction.aux is not None
         ):
             return replace(instruction, aux=max(0, instruction.aux - 1))
@@ -85,8 +130,39 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
         access = self.analysis.register_accesses[instruction.pc]
         if pending.register in access.uses:
             return None
-        start_index = next_instruction.aux or 1
+        start_index = max(1, next_instruction.aux or 1)
         return pending if pending.can_add_open_tail(start_index) else None
+
+    def _handle_loop_prep(self, instruction: DecodedInstruction) -> bool:
+        if self.module.version > 6 or instruction.name != "FORNPREP":
+            return super()._handle_loop_prep(instruction)
+
+        target = legacy._jump_target(instruction)
+        register = instruction.a + 3
+        variable = "index"
+        suffix = 2
+        while variable in self.declared and self.register_names.get(register) != variable:
+            variable = f"index{suffix}"
+            suffix += 1
+
+        prep_value = self.ssa.value_defined_at(instruction.pc, register)
+        if prep_value is not None:
+            self._forced_value_names()[prep_value] = variable
+        loop_instruction = self.instruction_by_pc.get(target)
+        if loop_instruction is not None and loop_instruction.name == "FORNLOOP":
+            loop_value = self.ssa.value_defined_at(loop_instruction.pc, register)
+            if loop_value is not None:
+                self._forced_value_names()[loop_value] = variable
+
+        self.register_names[register] = variable
+        self.declared.add(variable)
+        start = self._ref(instruction.a + 2, instruction.pc)
+        limit = self._ref(instruction.a, instruction.pc)
+        step = self._ref(instruction.a + 1, instruction.pc)
+        header = f"for {variable} = {start}, {limit}"
+        if self.options.preserve_for_step or step not in ("1", "1.0"):
+            header += f", {step}"
+        return self._open_until(target, header + " do")
 
     def _lift_instruction(self, instruction: DecodedInstruction) -> None:
         super()._lift_instruction(self._legacy_setlist(instruction))

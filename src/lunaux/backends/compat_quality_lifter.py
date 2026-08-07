@@ -496,9 +496,11 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
         if self.module.version <= 6:
             self.options = replace(
                 self.options,
-                # SSA-value identity makes single-use inlining safe again on stripped
-                # v6 and recovers the readability lost by materialising every temp.
-                inline_single_use_temporaries=self._legacy_ssa_identity_enabled(),
+                # Preserve explicit statement materialization when semicolons are
+                # requested; the public benchmark uses the normal no-semicolon mode.
+                inline_single_use_temporaries=(
+                    self._legacy_ssa_identity_enabled() and not self.options.semicolons
+                ),
                 smart_variable_names=False,
                 infer_types=False,
                 flow_sensitive_types=False,

@@ -85,10 +85,7 @@ def _checkout(
     repository: str,
     commit: str,
     directory: Path,
-    clean: bool,
 ) -> None:
-    if clean:
-        shutil.rmtree(directory, ignore_errors=True)
     directory.parent.mkdir(parents=True, exist_ok=True)
     if not (directory / ".git").is_dir():
         if directory.exists():
@@ -152,10 +149,11 @@ def _install_medal_lock(source: Path) -> None:
 
 
 def _find_executable(root: Path, names: tuple[str, ...]) -> Path:
+    expected = {name.lower() for name in names}
     candidates = [
         path
         for path in root.rglob("*")
-        if path.is_file() and path.name.lower() in {name.lower() for name in names}
+        if path.is_file() and path.name.lower() in expected
     ]
     if not candidates:
         raise InstallError(
@@ -172,7 +170,12 @@ def _copy_executable(source: Path, destination: Path) -> Path:
     return destination
 
 
-def _build_luau(cmake: str, source: Path, bin_directory: Path) -> tuple[Path, Path]:
+def _build_luau(
+    cmake: str,
+    source: Path,
+    bin_directory: Path,
+    label: str,
+) -> tuple[Path, Path]:
     build = source / "build-lunaux-benchmark"
     _run(
         [
@@ -202,8 +205,11 @@ def _build_luau(cmake: str, source: Path, bin_directory: Path) -> tuple[Path, Pa
     luau = _find_executable(build, (f"luau{suffix}",))
     compiler = _find_executable(build, (f"luau-compile{suffix}",))
     return (
-        _copy_executable(luau, bin_directory / f"luau{suffix}"),
-        _copy_executable(compiler, bin_directory / f"luau-compile{suffix}"),
+        _copy_executable(luau, bin_directory / f"luau-{label}{suffix}"),
+        _copy_executable(
+            compiler,
+            bin_directory / f"luau-{label}-compile{suffix}",
+        ),
     )
 
 
@@ -252,8 +258,7 @@ def _build_unluau(bin_directory: Path) -> Path:
         "unluau.cli.dll",
     )
     source = _find_executable(ROOT / "tools" / "unluau", candidates)
-    destination = bin_directory / source.name
-    return _copy_executable(source, destination)
+    return _copy_executable(source, bin_directory / source.name)
 
 
 def _path_for_config(path: Path) -> str:
@@ -266,8 +271,9 @@ def _path_for_config(path: Path) -> str:
 def _write_configs(
     output: Path,
     *,
-    luau: Path,
-    compiler: Path,
+    current_luau: Path,
+    current_compiler: Path,
+    compilers: dict[str, Path],
     medal: Path,
     medal_commit: str,
     unluau: Path | None,
@@ -275,16 +281,26 @@ def _write_configs(
 ) -> None:
     toolchain = {
         "schema_version": 1,
-        "syntax_command": [_path_for_config(compiler), "--only-parse", "{source}"],
+        "syntax_command": [
+            _path_for_config(current_compiler),
+            "--only-parse",
+            "{source}",
+        ],
         "compile_command": [
-            _path_for_config(compiler),
+            _path_for_config(current_compiler),
             "--binary",
             "-O1",
             "-g0",
             "{source}",
         ],
-        "run_command": [_path_for_config(luau), "{source}"],
+        "run_command": [_path_for_config(current_luau), "{source}"],
         "timeout_seconds": 10.0,
+    }
+    compiler_config = {
+        "schema_version": 1,
+        "compilers": {
+            name: _path_for_config(path) for name, path in sorted(compilers.items())
+        },
     }
     backends: list[dict[str, object]] = [
         {
@@ -295,49 +311,37 @@ def _write_configs(
         }
     ]
     if unluau is not None and unluau_commit is not None:
-        if unluau.suffix.lower() == ".dll":
-            command = [
-                "dotnet",
-                _path_for_config(unluau),
-                "--output",
-                "{output}",
-                "--inline-tables",
-                "--smart-variable-names",
-                "{input}",
-            ]
-        else:
-            command = [
-                _path_for_config(unluau),
-                "--output",
-                "{output}",
-                "--inline-tables",
-                "--smart-variable-names",
-                "{input}",
-            ]
+        prefix = (
+            ["dotnet", _path_for_config(unluau)]
+            if unluau.suffix.lower() == ".dll"
+            else [_path_for_config(unluau)]
+        )
         backends.append(
             {
                 "name": "unluau",
                 "version": unluau_commit,
-                "command": command,
+                "command": [
+                    *prefix,
+                    "--output",
+                    "{output}",
+                    "--inline-tables",
+                    "--smart-variable-names",
+                    "{input}",
+                ],
                 "output": "file",
             }
         )
     output.mkdir(parents=True, exist_ok=True)
-    (output / "toolchain.json").write_text(
-        json.dumps(toolchain, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
-    (output / "backends.json").write_text(
-        json.dumps(
-            {"schema_version": 1, "backends": backends},
-            indent=2,
-            sort_keys=True,
+    for name, payload in (
+        ("toolchain.json", toolchain),
+        ("compilers.json", compiler_config),
+        ("backends.json", {"schema_version": 1, "backends": backends}),
+    ):
+        (output / name).write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
         )
-        + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
 
 
 def main() -> int:
@@ -360,26 +364,31 @@ def main() -> int:
         if args.clean:
             shutil.rmtree(args.output, ignore_errors=True)
 
-        luau_pin = pins["luau"]
+        luau_builds: dict[str, tuple[Path, Path]] = {}
+        for label, pin_name in (
+            ("v3", "luau_v3"),
+            ("v6", "luau_v6"),
+            ("v11", "luau_current"),
+        ):
+            pin = pins[pin_name]
+            source = source_root / pin_name
+            _checkout(
+                git,
+                repository=pin["repository"],
+                commit=pin["commit"],
+                directory=source,
+            )
+            luau_builds[label] = _build_luau(cmake, source, bin_directory, label)
+
         medal_pin = pins["medal"]
-        luau_source = source_root / "luau"
         medal_source = source_root / "medal"
-        _checkout(
-            git,
-            repository=luau_pin["repository"],
-            commit=luau_pin["commit"],
-            directory=luau_source,
-            clean=False,
-        )
         _checkout(
             git,
             repository=medal_pin["repository"],
             commit=medal_pin["commit"],
             directory=medal_source,
-            clean=False,
         )
         _install_medal_lock(medal_source)
-        luau, compiler = _build_luau(cmake, luau_source, bin_directory)
         medal = _build_medal(cargo, medal_source, bin_directory)
 
         unluau: Path | None = None
@@ -387,10 +396,17 @@ def main() -> int:
         if args.include_unluau:
             unluau = _build_unluau(bin_directory)
             unluau_commit = pins["unluau"]["commit"]
+
+        current_luau, current_compiler = luau_builds["v11"]
         _write_configs(
             args.output,
-            luau=luau,
-            compiler=compiler,
+            current_luau=current_luau,
+            current_compiler=current_compiler,
+            compilers={
+                "luau-v3": luau_builds["v3"][1],
+                "luau-v6": luau_builds["v6"][1],
+                "luau-v11": luau_builds["v11"][1],
+            },
             medal=medal,
             medal_commit=medal_pin["commit"],
             unluau=unluau,

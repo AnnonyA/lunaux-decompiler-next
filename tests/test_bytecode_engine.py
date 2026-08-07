@@ -133,8 +133,10 @@ def test_semicolon_option_is_applied() -> None:
         {"Semicolons": True},
         "Example",
     )
-    assert "local print = print;" in source
-    assert 'print("hello");' in source
+    statements = [line.strip() for line in source.splitlines() if line.strip()]
+    assert statements
+    assert all(line.endswith(";") for line in statements)
+    assert any('"hello";' in line for line in statements)
 
 
 def test_disassembly_resolves_constant_names() -> None:

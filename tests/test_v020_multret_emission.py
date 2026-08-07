@@ -4,6 +4,11 @@ from lunaux.backends.bytecode import LuauBytecodeModule, LuauProto
 from lunaux.backends.multret_lifter import decompile_module
 from lunaux.backends.opcodes import opcode_names
 
+_DETERMINISTIC_OPTIONS = {
+    "SmartVariableNames": False,
+    "InferTypes": False,
+}
+
 
 def _opcode(name: str) -> int:
     return opcode_names().index(name)
@@ -64,7 +69,11 @@ def test_open_call_is_emitted_as_final_multiple_return_expression() -> None:
         stack=3,
     )
 
-    output = decompile_module(module, {}, "multret-return.luau")
+    output = decompile_module(
+        module,
+        _DETERMINISTIC_OPTIONS,
+        "multret-return.luau",
+    )
 
     assert "return arg1, arg2, arg3()" in output
     assert "multiple returns" not in output
@@ -83,7 +92,11 @@ def test_open_varargs_become_final_arguments_and_call_result_is_returned() -> No
         is_vararg=True,
     )
 
-    output = decompile_module(module, {}, "multret-chain.luau")
+    output = decompile_module(
+        module,
+        _DETERMINISTIC_OPTIONS,
+        "multret-chain.luau",
+    )
 
     assert "return arg1(arg2, ...)" in output
     assert "all arguments through stack top" not in output
@@ -101,7 +114,11 @@ def test_unproven_open_tuple_keeps_conservative_fallback() -> None:
         stack=3,
     )
 
-    output = decompile_module(module, {}, "multret-fallback.luau")
+    output = decompile_module(
+        module,
+        _DETERMINISTIC_OPTIONS,
+        "multret-fallback.luau",
+    )
 
     assert "multiple returns" in output
     assert "stack top" in output

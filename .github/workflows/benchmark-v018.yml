@@ -1,0 +1,80 @@
+name: LunaUX 0.18 Public Benchmark
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/benchmark-v018.yml"
+      - "benchmarks/**"
+      - "docs/BENCHMARKING_V018.md"
+      - "scripts/benchmark_lunaux_backend.py"
+      - "scripts/generate_benchmark_corpus.py"
+      - "scripts/install_benchmark_tools.py"
+      - "scripts/run_release_benchmark.py"
+      - "src/lunaux/benchmark*.py"
+      - "tests/test_benchmark_release_v018.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-v018-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  public-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .benchmark-tools/source/luau/build-lunaux-benchmark
+            .benchmark-tools/source/medal/target
+          key: v018-tools-${{ runner.os }}-${{ hashFiles('benchmarks/pins.json') }}
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - name: Build pinned Luau, Medal, and Unluau
+        run: python scripts/install_benchmark_tools.py --include-unluau
+      - name: Generate all 2,304 bytecodes
+        run: >-
+          python scripts/generate_benchmark_corpus.py
+          --luau-compile .benchmark-tools/bin/luau-compile
+          --output benchmark-corpus-v018
+      - name: Run and enforce the Medal release gate
+        run: >-
+          python scripts/run_release_benchmark.py
+          benchmark-corpus-v018/manifest.json
+          --external-backends .benchmark-tools/backends.json
+          --toolchain .benchmark-tools/toolchain.json
+          --artifacts benchmark-results-v018/artifacts
+          --raw-report benchmark-results-v018/raw.json
+          --quality-report benchmark-results-v018/quality.json
+          --markdown-report benchmark-results-v018/README.md
+          --contender lunaux
+          --reference medal
+          --minimum-cases 2304
+          --require-gate
+      - name: Upload public benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lunaux-v018-public-benchmark
+          path: |
+            benchmark-results-v018
+            benchmark-corpus-v018/manifest.json
+            .benchmark-tools/toolchain.json
+            .benchmark-tools/backends.json
+          if-no-files-found: warn
+          retention-days: 30

@@ -5,7 +5,7 @@ from typing import cast
 
 import lunaux.backends.lifter as legacy
 import lunaux.backends.quality_lifter as quality
-from lunaux.backends.ast import NameExpr, render_expression
+from lunaux.backends.ast import render_expression
 from lunaux.backends.bytecode import LuauBytecodeModule
 from lunaux.backends.opcodes import DecodedInstruction
 from lunaux.backends.ssa import SSAValue
@@ -138,7 +138,12 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
             return super()._handle_loop_prep(instruction)
 
         target = legacy._jump_target(instruction)
-        register = instruction.a + 3
+        # In the legacy v3-v6 FORN layout A/A+1/A+2 hold limit/step/index.
+        # FORNPREP initializes A+2 from the source start value and FORNLOOP
+        # subsequently updates that same register.  Treating A+3 as the loop
+        # variable (the modern layout) leaves the body reading the immutable
+        # start register and breaks every non-trivial numeric loop.
+        register = instruction.a + 2
         variable = "index"
         suffix = 2
         while variable in self.declared and self.register_names.get(register) != variable:

@@ -47,4 +47,4 @@ def install_register_identity_stability() -> None:
 
     lifter_type._name = stable_name  # type: ignore[method-assign]
     lifter_type._definition_name = stable_definition_name  # type: ignore[method-assign]
-    lifter_type._lunaux_register_identity_stable = True
+    setattr(lifter_type, "_lunaux_register_identity_stable", True)

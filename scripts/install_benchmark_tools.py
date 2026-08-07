@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import gzip
+import hashlib
 import json
 import os
 import shutil
@@ -11,6 +14,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PINS = ROOT / "benchmarks" / "pins.json"
+MEDAL_LOCK_ARCHIVE = ROOT / "benchmarks" / "medal-Cargo.lock.gz.b64"
+MEDAL_LOCK_SHA256 = "4588b89b068c33e4ec07a26afa54634c1be336b46ff956bb2171b60db2fc2d00"
 
 
 class InstallError(RuntimeError):
@@ -129,6 +134,23 @@ def _checkout(
         )
 
 
+def _install_medal_lock(source: Path) -> None:
+    try:
+        encoded = MEDAL_LOCK_ARCHIVE.read_text(encoding="ascii")
+        compressed = base64.b64decode(encoded, validate=True)
+        content = gzip.decompress(compressed)
+    except (OSError, ValueError, gzip.BadGzipFile) as exc:
+        raise InstallError(f"could not restore Medal Cargo.lock: {exc}") from exc
+    digest = hashlib.sha256(content).hexdigest()
+    if digest != MEDAL_LOCK_SHA256:
+        raise InstallError(
+            "Medal Cargo.lock checksum mismatch: "
+            f"expected {MEDAL_LOCK_SHA256}, got {digest}"
+        )
+    (source / "Cargo.lock").write_bytes(content)
+    print(f"Medal Cargo.lock verified: {digest}")
+
+
 def _find_executable(root: Path, names: tuple[str, ...]) -> Path:
     candidates = [
         path
@@ -190,6 +212,7 @@ def _build_medal(cargo: str, source: Path, bin_directory: Path) -> Path:
         [
             cargo,
             "build",
+            "--locked",
             "--manifest-path",
             str(source / "Cargo.toml"),
             "--release",
@@ -355,6 +378,7 @@ def main() -> int:
             directory=medal_source,
             clean=False,
         )
+        _install_medal_lock(medal_source)
         luau, compiler = _build_luau(cmake, luau_source, bin_directory)
         medal = _build_medal(cargo, medal_source, bin_directory)
 

@@ -72,6 +72,8 @@ def apply_release_gate(
     report: QualityReport,
     contender: str,
     reference: str,
+    *,
+    require_reference_compatible: bool = False,
 ) -> QualityReport:
     summaries = {summary.backend: summary for summary in report.summaries}
     if contender not in summaries or reference not in summaries:
@@ -106,42 +108,7 @@ def apply_release_gate(
         if result.backend == reference
     }
 
-    # The aggregate corpus deliberately measures broader LunaUX version support, but
-    # it cannot by itself prove a same-bytecode win. Build a second mandatory set from
-    # the exact cases where the pinned reference actually produced an executable
-    # result. For the 0.18 Medal pin this is the compatible v6/g0 surface. Unsupported
-    # v3/v11 inputs may improve the aggregate capability score, never the head-to-head
-    # release decision.
-    compatible_case_ids = tuple(
-        sorted(
-            case_id
-            for case_id, result in right_results.items()
-            if result.execution_status is BenchmarkStatus.SUCCESS
-            and case_id in left_results
-        )
-    )
-    compatible_left = tuple(left_results[case_id] for case_id in compatible_case_ids)
-    compatible_right = tuple(right_results[case_id] for case_id in compatible_case_ids)
-
-    if not compatible_case_ids:
-        gate = ReleaseGate(
-            contender,
-            reference,
-            False,
-            (),
-            0,
-            0,
-            0,
-            "reference produced no executable same-bytecode cases; comparison is invalid",
-        )
-        return QualityReport(
-            report.generated_from,
-            report.results,
-            report.summaries,
-            gate,
-        )
-
-    values = (
+    values: tuple[tuple[str, float, float], ...] = (
         ("recompilation_rate", left.recompilation_rate, right.recompilation_rate),
         (
             "semantic_pass_rate",
@@ -150,27 +117,67 @@ def apply_release_gate(
         ),
         ("median_readability", left.median_readability, right.median_readability),
         ("stability_rate", left.stability_rate, right.stability_rate),
-        (
-            "compatible_recompilation_rate",
-            _recompilation_rate(compatible_left),
-            _recompilation_rate(compatible_right),
-        ),
-        (
-            "compatible_semantic_pass_rate",
-            _semantic_pass_rate(compatible_left),
-            _semantic_pass_rate(compatible_right),
-        ),
-        (
-            "compatible_median_readability",
-            _median_readability(compatible_left),
-            _median_readability(compatible_right),
-        ),
-        (
-            "compatible_stability_rate",
-            _stability_rate(compatible_left),
-            _stability_rate(compatible_right),
-        ),
     )
+    paired_case_ids = tuple(sorted(left_results.keys() & right_results.keys()))
+
+    if require_reference_compatible:
+        # The aggregate corpus deliberately measures broader LunaUX version support,
+        # but it cannot by itself prove a same-bytecode win. Build a second mandatory
+        # set from the exact cases where the pinned reference produced an executable
+        # result. Unsupported inputs may improve aggregate capability, never the
+        # head-to-head release decision.
+        compatible_case_ids = tuple(
+            sorted(
+                case_id
+                for case_id, result in right_results.items()
+                if result.execution_status is BenchmarkStatus.SUCCESS
+                and case_id in left_results
+            )
+        )
+        if not compatible_case_ids:
+            gate = ReleaseGate(
+                contender,
+                reference,
+                False,
+                (),
+                0,
+                0,
+                0,
+                "reference produced no executable same-bytecode cases; comparison is invalid",
+            )
+            return QualityReport(
+                report.generated_from,
+                report.results,
+                report.summaries,
+                gate,
+            )
+
+        compatible_left = tuple(left_results[case_id] for case_id in compatible_case_ids)
+        compatible_right = tuple(right_results[case_id] for case_id in compatible_case_ids)
+        values += (
+            (
+                "compatible_recompilation_rate",
+                _recompilation_rate(compatible_left),
+                _recompilation_rate(compatible_right),
+            ),
+            (
+                "compatible_semantic_pass_rate",
+                _semantic_pass_rate(compatible_left),
+                _semantic_pass_rate(compatible_right),
+            ),
+            (
+                "compatible_median_readability",
+                _median_readability(compatible_left),
+                _median_readability(compatible_right),
+            ),
+            (
+                "compatible_stability_rate",
+                _stability_rate(compatible_left),
+                _stability_rate(compatible_right),
+            ),
+        )
+        paired_case_ids = compatible_case_ids
+
     metrics = tuple(
         GateMetric(
             name,
@@ -183,7 +190,7 @@ def apply_release_gate(
     )
 
     wins = losses = ties = 0
-    for case_id in compatible_case_ids:
+    for case_id in paired_case_ids:
         left_rank = _case_rank(left_results[case_id])
         right_rank = _case_rank(right_results[case_id])
         if left_rank > right_rank:
@@ -202,21 +209,19 @@ def apply_release_gate(
     )
     passed = no_regression and strict_metric_win and wins > losses and zero_timeouts
     if passed:
+        scope = "same-bytecode " if require_reference_compatible else "aggregate "
         reason = (
-            "LunaUX is not worse on any required aggregate or same-bytecode metric "
-            f"and wins the compatible paired comparison ({len(compatible_case_ids)} cases)."
+            "LunaUX is not worse on any required metric and wins the "
+            f"{scope}paired comparison ({len(paired_case_ids)} cases)."
         )
     elif not no_regression:
         reason = (
-            "LunaUX regresses at least one required aggregate or same-bytecode "
-            "correctness/readability/stability metric."
+            "LunaUX regresses at least one required correctness/readability/stability metric."
         )
     elif not strict_metric_win:
         reason = "LunaUX does not strictly improve any required metric."
     elif wins <= losses:
-        reason = (
-            "LunaUX does not win more reference-compatible paired cases than it loses."
-        )
+        reason = "LunaUX does not win more paired cases than it loses."
     else:
         reason = "LunaUX recorded a timeout."
     gate = ReleaseGate(

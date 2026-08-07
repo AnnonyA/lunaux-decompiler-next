@@ -1,14 +1,28 @@
 {
   "schema_version": 1,
   "tools": {
-    "luau": {
+    "luau_v3": {
+      "repository": "https://github.com/luau-lang/luau.git",
+      "commit": "3ecd3a82abe6682988112cd6eb7326a67ebbc47f",
+      "bytecode_version": 3,
+      "purpose": "Unluau-compatible corpus compiler"
+    },
+    "luau_v6": {
+      "repository": "https://github.com/luau-lang/luau.git",
+      "commit": "a251bc68a2b70212e53941fd541d16ce523a1e01",
+      "bytecode_version": 6,
+      "purpose": "Medal-compatible corpus compiler"
+    },
+    "luau_current": {
       "repository": "https://github.com/luau-lang/luau.git",
       "commit": "8f33df910d790c1321a20028af8d8134fa3e0334",
-      "purpose": "compiler, parser, recompiler, and semantic runtime"
+      "bytecode_version": 11,
+      "purpose": "current compiler, parser, recompiler, and semantic runtime"
     },
     "medal": {
       "repository": "https://github.com/shrimp-nz/medal.git",
       "commit": "92a4e03bef0d3c2bb0511bdba6c5f95b1df96003",
+      "supported_bytecode_versions": [4, 5, 6],
       "rust_toolchain": "1.87.0",
       "rustc_bootstrap": true,
       "cargo_lock": "benchmarks/medal-Cargo.lock.gz.b64",

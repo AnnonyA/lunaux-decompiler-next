@@ -176,6 +176,38 @@ print(operations.apply({seed % 23}))
 """
 
 
+def _multiple_assignment(seed: int) -> str:
+    return f"""local first = {seed % 17}
+local second = {(seed * 3) % 19}
+local third = {(seed * 5) % 23}
+first, second, third = second + third, first - third, first + second
+print(first, second, third)
+"""
+
+
+def _nested_control(seed: int) -> str:
+    limit = seed % 8 + 5
+    return f"""local total = 0
+for outer = 1, {limit} do
+    local inner = 0
+    while inner < outer do
+        inner += 1
+        if (outer + inner) % 4 == 0 then
+            continue
+        end
+        total += outer * inner
+        if total > 180 then
+            break
+        end
+    end
+    if total > 180 then
+        break
+    end
+end
+print(total)
+"""
+
+
 TEMPLATES: tuple[tuple[str, Callable[[int], str]], ...] = (
     ("arithmetic", _arithmetic),
     ("conditional", _conditional),
@@ -191,4 +223,6 @@ TEMPLATES: tuple[tuple[str, Callable[[int], str]], ...] = (
     ("boolean", _boolean),
     ("method", _method),
     ("table-function", _table_function),
+    ("multiple-assignment", _multiple_assignment),
+    ("nested-control", _nested_control),
 )

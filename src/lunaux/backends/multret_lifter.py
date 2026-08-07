@@ -37,22 +37,25 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
         )
 
     def _name(self, register: int, pc: int) -> str:
-        # In stripped/optimized bytecode the same physical register frequently carries
-        # several SSA versions around a loop. Once we have emitted a declaration for
-        # that register, keep the source identifier stable unless real debug-scope
-        # metadata explicitly introduces a different binding.
-        if self.scope_tree.binding_for_register(register, pc) is None:
+        # Smart SSA names are useful only if a definition was actually emitted. Some
+        # optimized loop/phi versions are structural and intentionally skipped; using
+        # their recovered name would create an undeclared identifier. In that narrow
+        # case, retain the last declared source name for the physical register.
+        if (
+            self.scope_tree.binding_for_register(register, pc) is None
+            and self.options.smart_variable_names
+            and self.symbols is not None
+        ):
+            recovered = self.symbols.name_at_use(pc, register)
             existing = self.register_names.get(register)
-            if existing is not None:
+            if (
+                recovered is not None
+                and recovered not in self.declared
+                and existing is not None
+                and existing in self.declared
+            ):
                 return existing
         return super()._name(register, pc)
-
-    def _definition_name(self, register: int, pc: int) -> str:
-        if self.scope_tree.binding_for_register(register, pc) is None:
-            existing = self.register_names.get(register)
-            if existing is not None:
-                return existing
-        return super()._definition_name(register, pc)
 
     def _annotated_name(self, register: int, name: str, pc: int) -> str:
         annotated = super()._annotated_name(register, name, pc)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections import Counter
 from pathlib import Path
 
 from lunaux import __version__
@@ -47,38 +48,46 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _validate_release_corpus(cases: tuple[object, ...], minimum_cases: int) -> str | None:
+    if len(cases) < minimum_cases:
+        return (
+            f"release corpus has {len(cases)} cases; "
+            f"at least {minimum_cases} are required"
+        )
+    required_optimizations = {"O0", "O1", "O2"}
+    observed_optimizations = {getattr(case, "optimization") for case in cases}
+    if not required_optimizations.issubset(observed_optimizations):
+        return "release corpus must include O0, O1, and O2"
+    if not all(getattr(case, "source_path") is not None for case in cases):
+        return "every release case requires a semantic source oracle"
+
+    all_tags = [tag for case in cases for tag in getattr(case, "tags")]
+    observed_debug = {tag for tag in all_tags if tag in {"debug", "stripped-debug"}}
+    if observed_debug != {"debug", "stripped-debug"}:
+        return "release corpus requires debug and stripped-debug variants"
+    version_counts = Counter(
+        tag for tag in all_tags if tag in {"bytecode-v3", "bytecode-v6", "bytecode-v11"}
+    )
+    expected_per_version = minimum_cases // 3
+    expected = {
+        "bytecode-v3": expected_per_version,
+        "bytecode-v6": expected_per_version,
+        "bytecode-v11": expected_per_version,
+    }
+    if version_counts != expected:
+        return (
+            "release corpus requires balanced v3/v6/v11 coverage: "
+            f"expected {expected}, got {dict(version_counts)}"
+        )
+    return None
+
+
 def main() -> int:
     args = _parser().parse_args()
     cases = load_manifest(args.manifest)
-    if len(cases) < args.minimum_cases:
-        print(
-            f"ERROR: release corpus has {len(cases)} cases; "
-            f"at least {args.minimum_cases} are required",
-            file=sys.stderr,
-        )
-        return 2
-    required_optimizations = {"O0", "O1", "O2"}
-    observed_optimizations = {case.optimization for case in cases}
-    if not required_optimizations.issubset(observed_optimizations):
-        print(
-            "ERROR: release corpus must include O0, O1, and O2",
-            file=sys.stderr,
-        )
-        return 2
-    if not all(case.source_path is not None for case in cases):
-        print(
-            "ERROR: every release case requires a semantic source oracle",
-            file=sys.stderr,
-        )
-        return 2
-    observed_debug = {
-        tag for case in cases for tag in case.tags if tag in {"debug", "stripped-debug"}
-    }
-    if observed_debug != {"debug", "stripped-debug"}:
-        print(
-            "ERROR: release corpus requires debug and stripped-debug variants",
-            file=sys.stderr,
-        )
+    corpus_error = _validate_release_corpus(cases, args.minimum_cases)
+    if corpus_error is not None:
+        print(f"ERROR: {corpus_error}", file=sys.stderr)
         return 2
 
     lunaux = ExternalCommandBackend(
@@ -92,8 +101,15 @@ def main() -> int:
         ),
         output_mode="file",
     )
-    backends: list[BenchmarkBackend] = [lunaux]
-    backends.extend(load_external_backends(args.external_backends))
+    external = load_external_backends(args.external_backends)
+    external_names = {backend.name for backend in external}
+    if not {"medal", "unluau"}.issubset(external_names):
+        print(
+            "ERROR: release benchmark requires pinned Medal and Unluau backends",
+            file=sys.stderr,
+        )
+        return 2
+    backends: list[BenchmarkBackend] = [lunaux, *external]
 
     raw = run_benchmark(
         args.manifest,

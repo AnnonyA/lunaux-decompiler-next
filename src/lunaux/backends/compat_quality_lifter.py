@@ -5,7 +5,7 @@ from typing import cast
 
 import lunaux.backends.lifter as legacy
 import lunaux.backends.quality_lifter as quality
-from lunaux.backends.ssa import SSAValue
+from lunaux.backends.bytecode import LuauBytecodeModule
 
 
 class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
@@ -80,7 +80,7 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
 
 
 def decompile_module(
-    module: legacy.LuauBytecodeModule,
+    module: LuauBytecodeModule,
     options: dict[str, bool],
     filename: str | None,
 ) -> str:

@@ -9,6 +9,7 @@
     "medal": {
       "repository": "https://github.com/shrimp-nz/medal.git",
       "commit": "92a4e03bef0d3c2bb0511bdba6c5f95b1df96003",
+      "rust_toolchain": "nightly-2024-11-26",
       "purpose": "primary 0.18 reference decompiler"
     },
     "unluau": {

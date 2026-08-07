@@ -58,15 +58,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: benchmark-corpus-v018
-          key: >-
-            v018-corpus-${{ runner.os }}-${{
-              hashFiles(
-                'benchmarks/pins.json',
-                'src/lunaux/benchmark_corpus.py',
-                'src/lunaux/benchmark_corpus_templates.py',
-                'scripts/generate_benchmark_corpus.py'
-              )
-            }}
+          key: v018-corpus-${{ runner.os }}-${{ hashFiles('benchmarks/pins.json', 'src/lunaux/benchmark_corpus.py', 'src/lunaux/benchmark_corpus_templates.py', 'scripts/generate_benchmark_corpus.py') }}
       - name: Generate all 2,304 multi-version bytecodes
         if: steps.corpus-cache.outputs.cache-hit != 'true'
         run: >-

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import cast
 
 import lunaux.backends.lifter as legacy
 from lunaux.backends.ast import (
@@ -44,7 +45,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
 
         cached = getattr(self, "_v020_persistent_multret_plan", None)
         if cached is not None:
-            return cached
+            return cast(tuple[dict[int, SSAMultiValue], dict[int, SSAMultiUse]], cached)
 
         values: dict[int, SSAMultiValue] = {}
         uses: dict[int, SSAMultiUse] = {}
@@ -103,9 +104,9 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
                     ):
                         pending = None
 
-        cached = (values, uses)
-        self._v020_persistent_multret_plan = cached
-        return cached
+        cached_plan = (values, uses)
+        self._v020_persistent_multret_plan = cached_plan
+        return cached_plan
 
     def _persistent_multret_value(self, pc: int) -> SSAMultiValue | None:
         return self._persistent_multret_plan()[0].get(pc)
@@ -141,7 +142,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
 
         cached = getattr(self, "_v020_loop_carried_names", None)
         if cached is not None:
-            return cached
+            return cast(dict[SSAValue, str], cached)
 
         parent: dict[SSAValue, SSAValue] = {}
 
@@ -227,10 +228,6 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
                 self.register_names[register] = loop_name
                 return loop_name
 
-        # Smart SSA names are useful only if a definition was actually emitted. Some
-        # optimized loop/phi versions are structural and intentionally skipped; using
-        # their recovered name would create an undeclared identifier. In that narrow
-        # case, retain the last declared source name for the physical register.
         if (
             self.scope_tree.binding_for_register(register, pc) is None
             and self.options.smart_variable_names
@@ -284,8 +281,6 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
 
     def _annotated_name(self, register: int, name: str, pc: int) -> str:
         annotated = super()._annotated_name(register, name, pc)
-        # Bare `function` is a bytecode type tag, not valid Luau annotation syntax.
-        # Dropping only this lossy annotation is safer than emitting uncompilable code.
         if annotated in {f"{name}: function", f"{name}: function?"}:
             return name
         return annotated
@@ -333,7 +328,6 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
         access = self.analysis.register_accesses[instruction.pc]
         if pending.register in access.uses:
             return None
-        # Luau's SETLIST AUX already contains the first 1-based table index.
         start_index = next_instruction.aux or 0
         return pending if pending.can_add_open_tail(start_index) else None
 
@@ -355,17 +349,17 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
         if instruction.c > 0:
             count = instruction.c - 1
             entries: list[tuple[int, Expr, frozenset[SSAValue]]] = []
-            for index in range(count):
+            for entry_index in range(count):
                 captured = self._capture_register_expression(
                     pending,
-                    instruction.b + index,
+                    instruction.b + entry_index,
                     pc,
                     allow_nested=True,
                 )
                 if captured is None:
                     break
                 value, dependencies = captured
-                entries.append((start_index + index, value, dependencies))
+                entries.append((start_index + entry_index, value, dependencies))
             if len(entries) == count and pending.add_indices(tuple(entries)):
                 return True
         else:
@@ -493,8 +487,8 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
                 variable_count = max(1, (loop_instruction.aux or 1) & 0xFF)
                 close_pc = loop_pc + loop_instruction.size
             variables: list[str] = []
-            for index in range(variable_count):
-                register = instruction.a + 3 + index
+            for variable_index in range(variable_count):
+                register = instruction.a + 3 + variable_index
                 variable = (
                     self._definition_name(register, loop_pc)
                     if loop_instruction is not None and loop_instruction.name == "FORGLOOP"
@@ -509,10 +503,10 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
             self.declared.update(variables)
             iterator = self._ref(instruction.a, instruction.pc)
             state = self._ref(instruction.a + 1, instruction.pc)
-            index = self._ref(instruction.a + 2, instruction.pc)
+            control = self._ref(instruction.a + 2, instruction.pc)
             return self._open_until(
                 close_pc,
-                f"for {', '.join(variables)} in {iterator}, {state}, {index} do",
+                f"for {', '.join(variables)} in {iterator}, {state}, {control} do",
             )
         return False
 
@@ -559,9 +553,6 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
         super()._lift_instruction(instruction)
 
 
-# The legacy module resolves this class dynamically when it creates function lifters,
-# including nested callbacks and class methods. Installing the extension once keeps all
-# existing public entry points compatible without duplicating the large core emitter.
 legacy._FunctionLifter = _MultiRetFunctionLifter  # type: ignore[misc]
 
 decompile_module = legacy.decompile_module

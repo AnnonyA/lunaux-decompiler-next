@@ -16,6 +16,10 @@ from lunaux.benchmark_quality_models import (
 from lunaux.benchmark_quality_readability import readability_metrics
 from lunaux.benchmark_quality_toolchain import ExternalToolchain, semantic_check
 
+_STABLE_STATUSES = frozenset(
+    {CheckStatus.PASS, CheckStatus.FAIL, CheckStatus.SKIP}
+)
+
 
 def evaluate_quality(
     report: BenchmarkReport,
@@ -115,6 +119,15 @@ def _p95(values: Sequence[float]) -> float:
     return ordered[round((len(ordered) - 1) * 0.95)]
 
 
+def _is_stable(item: QualityResult) -> bool:
+    return (
+        item.execution_status is BenchmarkStatus.SUCCESS
+        and item.syntax.status in _STABLE_STATUSES
+        and item.recompilation.status in _STABLE_STATUSES
+        and item.semantics.status in _STABLE_STATUSES
+    )
+
+
 def summaries(results: Sequence[QualityResult]) -> tuple[QualitySummary, ...]:
     grouped: dict[tuple[str, str], list[QualityResult]] = {}
     for result in results:
@@ -131,28 +144,22 @@ def summaries(results: Sequence[QualityResult]) -> tuple[QualitySummary, ...]:
             if item.peak_memory_bytes is not None
         ]
         durations = [item.execution_ms for item in items]
-        stable_statuses = {CheckStatus.PASS, CheckStatus.FAIL, CheckStatus.SKIP}
         output.append(
             QualitySummary(
                 backend,
                 version,
                 len(items),
-                _rate(items, lambda item: item.execution_status is BenchmarkStatus.SUCCESS),
+                _rate(
+                    items,
+                    lambda item: item.execution_status is BenchmarkStatus.SUCCESS,
+                ),
                 _rate(items, lambda item: item.syntax.passed),
                 _rate(items, lambda item: item.recompilation.passed),
                 len(semantic),
                 _rate(semantic, lambda item: item.semantics.passed),
                 _rate(items, lambda item: item.readability.fallback_count == 0),
                 statistics.median(item.readability.score for item in items),
-                _rate(
-                    items,
-                    lambda item: (
-                        item.execution_status is BenchmarkStatus.SUCCESS
-                        and item.syntax.status in stable_statuses
-                        and item.recompilation.status in stable_statuses
-                        and item.semantics.status in stable_statuses
-                    ),
-                ),
+                _rate(items, _is_stable),
                 statistics.median(durations),
                 _p95(durations),
                 int(statistics.median(memories)) if memories else None,

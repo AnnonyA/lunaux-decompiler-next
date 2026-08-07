@@ -31,13 +31,196 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
             self._v020_multret_expressions = expressions
         return expressions
 
+    def _persistent_multret_plan(
+        self,
+    ) -> tuple[dict[int, SSAMultiValue], dict[int, SSAMultiUse]]:
+        """Track Luau's open stack top like Medal does, until consumed or replaced.
+
+        The core SSA pass intentionally used a very conservative lifetime and cleared an
+        open tuple after almost every instruction. Luau keeps the dynamic stack top alive
+        across ordinary instructions, and optimized code relies on that for chained calls
+        and open returns. Keep this compatibility plan block-local, matching Medal's
+        lifter, while retaining our richer SSA representation for everything else.
+        """
+
+        cached = getattr(self, "_v020_persistent_multret_plan", None)
+        if cached is not None:
+            return cached
+
+        values: dict[int, SSAMultiValue] = {}
+        uses: dict[int, SSAMultiUse] = {}
+        for block in self.analysis.blocks:
+            if block.start_pc not in self.analysis.reachable:
+                continue
+            pending: SSAMultiValue | None = None
+            for instruction in block.instructions:
+                consumed = False
+                consumer: tuple[str, int] | None = None
+                if instruction.name in {"CALL", "CALLFB"} and instruction.b == 0:
+                    consumer = ("arguments", instruction.a + 1)
+                elif instruction.name == "RETURN" and instruction.b == 0:
+                    consumer = ("return", instruction.a)
+                elif instruction.name == "SETLIST" and instruction.c == 0:
+                    consumer = ("setlist", instruction.b)
+
+                if consumer is not None and pending is not None:
+                    kind, base_register = consumer
+                    if pending.base_register >= base_register:
+                        uses[instruction.pc] = SSAMultiUse(
+                            consumer_pc=instruction.pc,
+                            base_register=base_register,
+                            kind=kind,  # type: ignore[arg-type]
+                            value=pending,
+                            prefix_registers=tuple(
+                                range(base_register, pending.base_register)
+                            ),
+                        )
+                        consumed = True
+
+                producer: SSAMultiValue | None = None
+                if instruction.name in {"CALL", "CALLFB"} and instruction.c == 0:
+                    producer = SSAMultiValue(
+                        origin_pc=instruction.pc,
+                        base_register=instruction.a,
+                        kind="call",
+                    )
+                elif instruction.name == "GETVARARGS" and instruction.b == 0:
+                    producer = SSAMultiValue(
+                        origin_pc=instruction.pc,
+                        base_register=instruction.a,
+                        kind="varargs",
+                    )
+
+                if producer is not None:
+                    values[instruction.pc] = producer
+                    pending = producer
+                elif consumed:
+                    pending = None
+
+        cached = (values, uses)
+        self._v020_persistent_multret_plan = cached
+        return cached
+
+    def _persistent_multret_value(self, pc: int) -> SSAMultiValue | None:
+        return self._persistent_multret_plan()[0].get(pc)
+
+    def _persistent_multret_use(self, pc: int) -> SSAMultiUse | None:
+        return self._persistent_multret_plan()[1].get(pc)
+
     def _consumer_for(self, value: SSAMultiValue) -> SSAMultiUse | None:
         return next(
-            (use for use in self.ssa.multi_values.uses if use.value == value),
+            (
+                use
+                for use in self._persistent_multret_plan()[1].values()
+                if use.value == value
+            ),
             None,
         )
 
+    def _forced_value_names(self) -> dict[SSAValue, str]:
+        names = getattr(self, "_v020_forced_value_names", None)
+        if names is None:
+            names = {}
+            self._v020_forced_value_names = names
+        return names
+
+    def _loop_carried_names(self) -> dict[SSAValue, str]:
+        """Coalesce loop-header phi webs back into mutable source variables.
+
+        SSA versions are useful for analysis but must not escape into source as a new
+        lexical local on every iteration. Medal performs an explicit SSA destruction
+        phase; this ports the essential part into LunaUX while preserving our existing
+        symbol/type recovery and structured loop analysis.
+        """
+
+        cached = getattr(self, "_v020_loop_carried_names", None)
+        if cached is not None:
+            return cached
+
+        parent: dict[SSAValue, SSAValue] = {}
+
+        def find(value: SSAValue) -> SSAValue:
+            parent.setdefault(value, value)
+            root = value
+            while parent[root] != root:
+                root = parent[root]
+            while parent[value] != value:
+                next_value = parent[value]
+                parent[value] = root
+                value = next_value
+            return root
+
+        def union(left: SSAValue, right: SSAValue) -> None:
+            left_root = find(left)
+            right_root = find(right)
+            if left_root != right_root:
+                parent[right_root] = left_root
+
+        for phi in self.ssa.phis:
+            find(phi.result)
+            for operand in phi.operands.values():
+                union(phi.result, operand)
+
+        components: dict[SSAValue, set[SSAValue]] = {}
+        for value in tuple(parent):
+            components.setdefault(find(value), set()).add(value)
+
+        anchors: dict[SSAValue, tuple[SSAValue, int]] = {}
+        for loop in self.analysis.loops:
+            for phi in self.ssa.phis:
+                if phi.block != loop.header:
+                    continue
+                outside = [
+                    value
+                    for predecessor, value in phi.operands.items()
+                    if predecessor not in loop.body
+                ]
+                inside = [
+                    value
+                    for predecessor, value in phi.operands.items()
+                    if predecessor in loop.body
+                ]
+                if not outside or not inside:
+                    continue
+                root = find(phi.result)
+                candidate = outside[0]
+                previous = anchors.get(root)
+                candidate_pc = candidate.origin_pc if candidate.origin_pc is not None else -1
+                previous_pc = (
+                    previous[0].origin_pc
+                    if previous is not None and previous[0].origin_pc is not None
+                    else -1
+                )
+                if previous is None or candidate_pc < previous_pc:
+                    anchors[root] = (candidate, phi.register)
+
+        result: dict[SSAValue, str] = {}
+        for root, (anchor, register) in anchors.items():
+            name: str | None = None
+            if self.symbols is not None:
+                symbol = self.symbols.symbol_for(anchor)
+                if symbol is not None:
+                    name = symbol.name
+            if name is None:
+                name = self.register_names.get(register, f"v{register}")
+            for value in components.get(root, {anchor}):
+                result[value] = name
+
+        self._v020_loop_carried_names = result
+        return result
+
     def _name(self, register: int, pc: int) -> str:
+        value = self.ssa.value_at_use(pc, register)
+        if value is not None:
+            forced = self._forced_value_names().get(value)
+            if forced is not None:
+                self.register_names[register] = forced
+                return forced
+            loop_name = self._loop_carried_names().get(value)
+            if loop_name is not None:
+                self.register_names[register] = loop_name
+                return loop_name
+
         # Smart SSA names are useful only if a definition was actually emitted. Some
         # optimized loop/phi versions are structural and intentionally skipped; using
         # their recovered name would create an undeclared identifier. In that narrow
@@ -57,6 +240,41 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
             ):
                 return existing
         return super()._name(register, pc)
+
+    def _definition_name(self, register: int, pc: int) -> str:
+        value = self.ssa.value_defined_at(pc, register)
+        if value is not None:
+            forced = self._forced_value_names().get(value)
+            if forced is not None:
+                self.register_names[register] = forced
+                return forced
+            loop_name = self._loop_carried_names().get(value)
+            if loop_name is not None:
+                self.register_names[register] = loop_name
+                return loop_name
+
+        name = super()._definition_name(register, pc)
+        instruction = self.instruction_by_pc.get(pc)
+        if (
+            value is not None
+            and instruction is not None
+            and instruction.name == "GETUPVAL"
+            and instruction.a == register
+        ):
+            binding = self.upvalue_bindings.get(instruction.b)
+            if isinstance(binding, NameExpr):
+                binding_name = render_expression(binding)
+                if name == binding_name:
+                    base = f"{binding_name}Value"
+                    safe = base
+                    suffix = 2
+                    while safe in self.declared:
+                        safe = f"{base}{suffix}"
+                        suffix += 1
+                    self._forced_value_names()[value] = safe
+                    self.register_names[register] = safe
+                    return safe
+        return name
 
     def _annotated_name(self, register: int, name: str, pc: int) -> str:
         annotated = super()._annotated_name(register, name, pc)
@@ -215,7 +433,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
         return True
 
     def _call_expression(self, instruction: DecodedInstruction) -> Expr:
-        use = self.ssa.multi_use_at(instruction.pc)
+        use = self._persistent_multret_use(instruction.pc)
         if use is None or use.kind != "arguments":
             return super()._call_expression(instruction)
 
@@ -240,6 +458,58 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
         )
         return CallExpr(function, (*fixed, tail))
 
+    def _handle_loop_prep(self, instruction: DecodedInstruction) -> bool:
+        if instruction.name == "FORNPREP":
+            target = legacy._jump_target(instruction)
+            variable_register = instruction.a + 3
+            variable = self._definition_name(variable_register, instruction.pc)
+            value = self.ssa.value_defined_at(instruction.pc, variable_register)
+            if value is not None:
+                self._forced_value_names()[value] = variable
+            self.register_names[variable_register] = variable
+            self.declared.add(variable)
+            start = self._ref(instruction.a + 2, instruction.pc)
+            limit = self._ref(instruction.a, instruction.pc)
+            step = self._ref(instruction.a + 1, instruction.pc)
+            header = f"for {variable} = {start}, {limit}"
+            if self.options.preserve_for_step or step not in ("1", "1.0"):
+                header += f", {step}"
+            header += " do"
+            return self._open_until(target, header)
+
+        generic_prep = {"FORGPREP", "FORGPREP_INEXT", "FORGPREP_NEXT"}
+        if instruction.name in generic_prep:
+            loop_pc = legacy._jump_target(instruction)
+            loop_instruction = self.instruction_by_pc.get(loop_pc)
+            variable_count = 2
+            close_pc = loop_pc + 1
+            if loop_instruction is not None and loop_instruction.name == "FORGLOOP":
+                variable_count = max(1, (loop_instruction.aux or 1) & 0xFF)
+                close_pc = loop_pc + loop_instruction.size
+            variables: list[str] = []
+            for index in range(variable_count):
+                register = instruction.a + 3 + index
+                variable = (
+                    self._definition_name(register, loop_pc)
+                    if loop_instruction is not None and loop_instruction.name == "FORGLOOP"
+                    else self._name(register, instruction.pc)
+                )
+                variables.append(variable)
+                self.register_names[register] = variable
+                if loop_instruction is not None and loop_instruction.name == "FORGLOOP":
+                    value = self.ssa.value_defined_at(loop_pc, register)
+                    if value is not None:
+                        self._forced_value_names()[value] = variable
+            self.declared.update(variables)
+            iterator = self._ref(instruction.a, instruction.pc)
+            state = self._ref(instruction.a + 1, instruction.pc)
+            index = self._ref(instruction.a + 2, instruction.pc)
+            return self._open_until(
+                close_pc,
+                f"for {', '.join(variables)} in {iterator}, {state}, {index} do",
+            )
+        return False
+
     def _lift_instruction(self, instruction: DecodedInstruction) -> None:
         name = instruction.name
         pc = instruction.pc
@@ -248,7 +518,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
             return
 
         if name in {"CALL", "CALLFB"} and instruction.c == 0:
-            value = self.ssa.multi_value_at(pc)
+            value = self._persistent_multret_value(pc)
             if value is not None:
                 consumer = self._consumer_for(value)
                 if consumer is not None and consumer.kind in {"arguments", "return"}:
@@ -260,7 +530,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
                     return
 
         if name == "GETVARARGS" and instruction.b == 0:
-            value = self.ssa.multi_value_at(pc)
+            value = self._persistent_multret_value(pc)
             if value is not None:
                 consumer = self._consumer_for(value)
                 if consumer is not None and consumer.kind in {"arguments", "return"}:
@@ -268,7 +538,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
                     return
 
         if name == "RETURN" and instruction.b == 0:
-            use = self.ssa.multi_use_at(pc)
+            use = self._persistent_multret_use(pc)
             tail = (
                 self._multret_expressions().pop(use.value, None)
                 if use is not None and use.kind == "return"

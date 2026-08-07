@@ -12,7 +12,7 @@ from lunaux.backends.bytecode import (
     is_supported_bytecode_version,
     parse_bytecode,
 )
-from lunaux.backends.compat_quality_safe import decompile_module, disassemble_module
+from lunaux.backends.compat_quality_dispatch import decompile_module, disassemble_module
 from lunaux.backends.multret_lifter import decompile_module as decompile_raw_module
 from lunaux.backends.opcodes import disassemble_words, unpack_words
 

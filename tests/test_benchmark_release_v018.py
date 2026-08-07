@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
+import pytest
+
+import lunaux.benchmark_corpus as corpus
 from lunaux.benchmark_corpus import generate_corpus
 from lunaux.benchmark_corpus_templates import TEMPLATES
 from lunaux.benchmark_engine import (
@@ -92,21 +94,26 @@ def test_public_benchmark_facade_uses_the_measured_engine() -> None:
     assert PublicBenchmarkStatus is BenchmarkStatus
 
 
-def test_default_corpus_matrix_contains_exactly_2304_bytecodes(tmp_path: Path) -> None:
-    fake_compiler = (
-        sys.executable,
-        "-c",
-        (
-            "from pathlib import Path; import sys; "
-            "source=Path(sys.argv[1]).read_bytes(); "
-            "sys.stdout.buffer.write(b'BC'+sys.argv[2].encode()+"
-            "sys.argv[3].encode()+source)"
-        ),
-        "{source}",
-        "{optimization}",
-        "{debug}",
-    )
-    build = generate_corpus(tmp_path, fake_compiler)
+def test_default_corpus_matrix_contains_exactly_2304_bytecodes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_compile(
+        command_template: object,
+        source: Path,
+        optimization: int,
+        debug: int,
+        timeout_seconds: float,
+    ) -> bytes:
+        del command_template, timeout_seconds
+        return (
+            b"BC"
+            + bytes((optimization, debug))
+            + source.read_bytes()
+        )
+
+    monkeypatch.setattr(corpus, "_compile", fake_compile)
+    build = generate_corpus(tmp_path, ("fake", "{source}"))
 
     assert len(TEMPLATES) == 16
     assert build.sources == 16 * 24
@@ -120,6 +127,7 @@ def test_default_corpus_matrix_contains_exactly_2304_bytecodes(tmp_path: Path) -
     }
     tags = {tag for case in payload["cases"] for tag in case["tags"]}
     assert {"debug", "stripped-debug"}.issubset(tags)
+    assert len(tuple((tmp_path / "bytecode").rglob("*.luac"))) == 2304
 
 
 def test_quality_evaluation_checks_syntax_recompile_semantics_and_readability(

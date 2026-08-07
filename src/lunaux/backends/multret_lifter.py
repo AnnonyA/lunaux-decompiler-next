@@ -3,9 +3,21 @@ from __future__ import annotations
 from dataclasses import replace
 
 import lunaux.backends.lifter as legacy
-from lunaux.backends.ast import CallExpr, Expr, MethodCallExpr, NameExpr, render_expression, source_expr
+from lunaux.backends.ast import (
+    CallExpr,
+    Expr,
+    MethodCallExpr,
+    NameExpr,
+    render_expression,
+    source_expr,
+)
 from lunaux.backends.opcodes import DecodedInstruction
-from lunaux.backends.ssa import SSAMultiUse, SSAMultiValue
+from lunaux.backends.ssa import SSAMultiUse, SSAMultiValue, SSAValue
+from lunaux.backends.table_recovery import (
+    PendingTableLiteral,
+    table_write_source_registers,
+    table_write_target_register,
+)
 
 
 class _MultiRetFunctionLifter(legacy._FunctionLifter):
@@ -78,7 +90,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
     def _open_table_parent_for_producer(
         self,
         instruction: DecodedInstruction,
-    ) -> legacy.PendingTableLiteral | None:
+    ) -> PendingTableLiteral | None:
         next_instruction = self.next_instruction_by_pc.get(instruction.pc)
         if (
             next_instruction is None
@@ -105,8 +117,8 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
         if pending is None:
             return False
         pc = instruction.pc
-        target = legacy.table_write_target_register(instruction)
-        source_registers = legacy.table_write_source_registers(instruction)
+        target = table_write_target_register(instruction)
+        source_registers = table_write_source_registers(instruction)
         if target is not None and target in source_registers:
             self._flush_pending_table(pending)
             return False
@@ -114,7 +126,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
         start_index = instruction.aux or 0
         if instruction.c > 0:
             count = instruction.c - 1
-            entries: list[tuple[int, Expr, frozenset[legacy.SSAValue]]] = []
+            entries: list[tuple[int, Expr, frozenset[SSAValue]]] = []
             for index in range(count):
                 captured = self._capture_register_expression(
                     pending,
@@ -148,6 +160,9 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
         child_id = legacy.closure_proto_id(self.proto, instruction)
         if child_id is None:
             return False
+        value = self.ssa.value_defined_at(instruction.pc, instruction.a)
+        if value is not None and value in self.callback_plan.proto_by_value:
+            return False
         child = self.module.protos[child_id]
         if child.num_upvalues <= 0:
             return False
@@ -168,9 +183,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
                     bindings[upvalue_index] = NameExpr(name)
             self.register_names[instruction.a] = name
             self.declared.add(name)
-            context = self.contextual_plan.for_value(
-                self.ssa.value_defined_at(instruction.pc, instruction.a)
-            )
+            context = self.contextual_plan.for_value(value)
             _MultiRetFunctionLifter(
                 self.module,
                 child,

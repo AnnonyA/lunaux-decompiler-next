@@ -14,7 +14,10 @@ from lunaux.backends.bytecode import (
 )
 from lunaux.backends.compat_quality_dispatch import decompile_module, disassemble_module
 from lunaux.backends.multret_lifter import decompile_module as decompile_raw_module
+from lunaux.backends.multret_open_args_fix import install_open_argument_fix
 from lunaux.backends.opcodes import disassemble_words, unpack_words
+
+install_open_argument_fix()
 
 _PRINTABLE: Final[re.Pattern[bytes]] = re.compile(rb"[\x20-\x7e]{4,}")
 _COMPATIBILITY_NOTICE: Final[str] = (

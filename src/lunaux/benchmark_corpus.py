@@ -8,6 +8,8 @@ from pathlib import Path
 
 from lunaux.benchmark_corpus_templates import TEMPLATES
 
+_PROFILE_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-")
+
 
 @dataclass(frozen=True, slots=True)
 class CompilerProfile:
@@ -16,8 +18,12 @@ class CompilerProfile:
     command: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not self.name or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in self.name):
-            raise ValueError("compiler profile names must use lowercase letters, digits, or hyphens")
+        if not self.name or any(
+            character not in _PROFILE_CHARACTERS for character in self.name
+        ):
+            raise ValueError(
+                "compiler profile names must use lowercase letters, digits, or hyphens"
+            )
         if self.bytecode_version <= 0:
             raise ValueError("bytecode_version must be greater than zero")
         if not self.command or not any("{source}" in part for part in self.command):

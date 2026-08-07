@@ -53,7 +53,22 @@ jobs:
       - run: pip install -e ".[dev]"
       - name: Build pinned Luau v3/v6/v11, Medal, and Unluau
         run: python scripts/install_benchmark_tools.py --include-unluau
+      - name: Restore deterministic 0.18 corpus
+        id: corpus-cache
+        uses: actions/cache@v4
+        with:
+          path: benchmark-corpus-v018
+          key: >-
+            v018-corpus-${{ runner.os }}-${{
+              hashFiles(
+                'benchmarks/pins.json',
+                'src/lunaux/benchmark_corpus.py',
+                'src/lunaux/benchmark_corpus_templates.py',
+                'scripts/generate_benchmark_corpus.py'
+              )
+            }}
       - name: Generate all 2,304 multi-version bytecodes
+        if: steps.corpus-cache.outputs.cache-hit != 'true'
         run: >-
           python scripts/generate_benchmark_corpus.py
           --luau-v3-compile .benchmark-tools/bin/luau-v3-compile

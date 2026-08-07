@@ -34,13 +34,12 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
     def _persistent_multret_plan(
         self,
     ) -> tuple[dict[int, SSAMultiValue], dict[int, SSAMultiUse]]:
-        """Track Luau's open stack top like Medal does, until consumed or replaced.
+        """Track Luau's open stack top until consumed, replaced, or clobbered.
 
-        The core SSA pass intentionally used a very conservative lifetime and cleared an
-        open tuple after almost every instruction. Luau keeps the dynamic stack top alive
-        across ordinary instructions, and optimized code relies on that for chained calls
-        and open returns. Keep this compatibility plan block-local, matching Medal's
-        lifter, while retaining our richer SSA representation for everything else.
+        Medal keeps the dynamic stack top alive across ordinary instructions. We retain
+        that useful behavior, but invalidate the tuple if an intervening instruction
+        overwrites any register in its open tail; this preserves LunaUX's conservative
+        guarantee for bytecode that does not prove the tuple remained intact.
         """
 
         cached = getattr(self, "_v020_persistent_multret_plan", None)
@@ -96,6 +95,13 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
                     pending = producer
                 elif consumed:
                     pending = None
+                elif pending is not None:
+                    access = self.analysis.register_accesses[instruction.pc]
+                    if any(
+                        register >= pending.base_register
+                        for register in access.definitions
+                    ):
+                        pending = None
 
         cached = (values, uses)
         self._v020_persistent_multret_plan = cached

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from lunaux.benchmark_engine import BenchmarkStatus
 from lunaux.benchmark_quality_models import (
     CheckStatus,
@@ -31,6 +33,21 @@ def _case_rank(item: QualityResult) -> tuple[int, int, int, int, int, float]:
     )
 
 
+def _semantic_pass_rate(items: Sequence[QualityResult]) -> float:
+    """Measure semantic correctness against the entire benchmark corpus.
+
+    The summary-level semantic equivalence rate is intentionally conditional on
+    semantics having been attempted. That is useful diagnostically, but it is not
+    suitable for a release gate: a backend that fails to execute most cases would
+    otherwise receive no penalty for the skipped semantic checks. Treating skips
+    as non-passes here keeps semantic correctness coverage-aware and consistent
+    with the paired ranking, which prioritizes actual execution.
+    """
+    if not items:
+        return 0.0
+    return sum(item.semantics.status is CheckStatus.PASS for item in items) / len(items)
+
+
 def apply_release_gate(
     report: QualityReport,
     contender: str,
@@ -58,12 +75,22 @@ def apply_release_gate(
 
     left = summaries[contender]
     right = summaries[reference]
+    left_results = {
+        result.case_id: result
+        for result in report.results
+        if result.backend == contender
+    }
+    right_results = {
+        result.case_id: result
+        for result in report.results
+        if result.backend == reference
+    }
     values = (
         ("recompilation_rate", left.recompilation_rate, right.recompilation_rate),
         (
-            "semantic_equivalence_rate",
-            left.semantic_equivalence_rate,
-            right.semantic_equivalence_rate,
+            "semantic_pass_rate",
+            _semantic_pass_rate(tuple(left_results.values())),
+            _semantic_pass_rate(tuple(right_results.values())),
         ),
         ("median_readability", left.median_readability, right.median_readability),
         ("stability_rate", left.stability_rate, right.stability_rate),
@@ -79,16 +106,6 @@ def apply_release_gate(
         for name, contender_value, reference_value in values
     )
 
-    left_results = {
-        result.case_id: result
-        for result in report.results
-        if result.backend == contender
-    }
-    right_results = {
-        result.case_id: result
-        for result in report.results
-        if result.backend == reference
-    }
     wins = losses = ties = 0
     for case_id in sorted(left_results.keys() & right_results.keys()):
         left_rank = _case_rank(left_results[case_id])

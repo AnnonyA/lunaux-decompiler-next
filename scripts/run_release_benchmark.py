@@ -134,7 +134,12 @@ def main() -> int:
         args.artifacts,
         load_toolchain(args.toolchain),
     )
-    quality = apply_release_gate(quality, args.contender, args.reference)
+    quality = apply_release_gate(
+        quality,
+        args.contender,
+        args.reference,
+        require_reference_compatible=True,
+    )
     quality.write_json(args.quality_report)
     quality.write_markdown(args.markdown_report)
 

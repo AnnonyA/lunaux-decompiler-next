@@ -1,75 +1,83 @@
 # LunaUX 0.18 differential benchmark
 
-Version 0.18 starts the measurable-quality phase of LunaUX. The benchmark runs the same bytecode corpus through LunaUX and any configured external decompiler, saves every emitted source file, and produces one machine-readable JSON report.
+LunaUX 0.18 replaces feature-count claims with a public, reproducible comparison. The same serialized Luau bytecode is sent to LunaUX, Medal, Unluau, and any additional command backend using one manifest and one scoring contract.
 
-## Goals
+## Pinned inputs
 
-The first 0.18 milestone measures four facts without subjective claims:
+`benchmarks/pins.json` fixes every tool to an exact Git commit:
 
-1. whether a backend returned non-empty output;
-2. whether it crashed, failed, or timed out;
-3. how long each case took;
-4. the exact SHA-256 of every emitted artifact.
+- Luau supplies the compiler, parser, recompiler, and semantic runtime;
+- Medal is the primary 0.18 reference;
+- Unluau is the secondary public reference.
 
-Syntax validation, recompilation, semantic comparison, and readability scoring will be added as separate validators. Keeping the raw execution layer small makes the baseline reproducible before those scores are introduced.
+`python scripts/install_benchmark_tools.py --include-unluau` verifies each checkout before building it and writes generated `toolchain.json` and `backends.json` files. No backend is invoked through a shell.
 
-## Corpus manifest
+## Public corpus
 
-```json
-{
-  "schema_version": 1,
-  "cases": [
-    {
-      "id": "closures-captures-o2",
-      "bytecode": "fixtures/closures-captures-o2.luac",
-      "source": "sources/closures-captures.luau",
-      "optimization": "O2",
-      "tags": ["closure", "capture", "optimized"]
-    }
-  ]
-}
-```
+`python scripts/generate_benchmark_corpus.py` creates source and bytecode deterministically. The release matrix contains:
 
-Paths are resolved relative to the manifest and may not escape its directory. Case IDs must be unique.
+- 16 semantic program families;
+- 24 deterministic seeds per family;
+- optimization levels O0, O1, and O2;
+- debug levels g0 and g2.
 
-## External backends
+That produces exactly **2,304 serialized bytecodes** from 384 source programs. Sources cover arithmetic, complex conditionals, while/repeat/numeric/generic loops, closures, recursion, multiple returns, varargs, tables, strings, methods, table-held functions, multiple assignments, and nested control flow.
 
-External tools are executed without a shell. Each command must contain `{input}`. File-producing tools must also contain `{output}`.
+Generated sources and bytecodes are CI artifacts rather than committed binaries. The manifest records every case, optimization level, debug variant, source oracle, and tag.
 
-```json
-{
-  "schema_version": 1,
-  "backends": [
-    {
-      "name": "medal",
-      "version": "pinned-commit",
-      "command": ["medal", "decompile", "{input}", "--output", "{output}"],
-      "output": "file"
-    }
-  ]
-}
-```
+## Metrics
 
-Pin every competitor to a commit or release. A moving `latest` target makes benchmark changes impossible to attribute.
+The benchmark records these values per backend and case:
 
-## Run
+1. execution result, crash, error, or timeout;
+2. elapsed time and peak process-tree RSS when the operating system exposes it;
+3. output length and SHA-256;
+4. Luau syntax validity;
+5. successful bytecode recompilation;
+6. deterministic stdout equivalence against the original source;
+7. explicit low-level fallback count;
+8. generated-identifier ratio, structural similarity, formatting score, and combined readability;
+9. aggregate stability, median time, p95 time, median memory, and maximum memory.
+
+LunaUX itself runs through a subprocess adapter, so its timeout and memory boundary is the same as the external competitors.
+
+## Release gate
+
+The 0.18 Medal gate passes only when all of the following are true:
+
+- LunaUX is not worse than Medal in recompilation rate;
+- LunaUX is not worse in semantic equivalence;
+- LunaUX is not worse in median readability;
+- LunaUX is not worse in stability;
+- LunaUX strictly improves at least one of those metrics;
+- LunaUX wins more paired cases than it loses;
+- LunaUX records no timeout.
+
+A case is ranked by semantic equivalence, recompilation, syntax, fallback count, and readability, in that order. Empty output, crashes, validator errors, and timeouts cannot be hidden by a good-looking artifact.
+
+## Reproduce locally
 
 ```bash
-python scripts/run_benchmarks.py benchmarks/manifest.json \
-  --external-backends benchmarks/backends.json \
-  --output benchmark-report.json \
-  --artifacts benchmark-artifacts \
-  --timeout 30
+python scripts/install_benchmark_tools.py --include-unluau
+python scripts/generate_benchmark_corpus.py \
+  --luau-compile .benchmark-tools/bin/luau-compile \
+  --output benchmark-corpus-v018
+python scripts/run_release_benchmark.py \
+  benchmark-corpus-v018/manifest.json \
+  --external-backends .benchmark-tools/backends.json \
+  --toolchain .benchmark-tools/toolchain.json \
+  --artifacts benchmark-results-v018/artifacts \
+  --raw-report benchmark-results-v018/raw.json \
+  --quality-report benchmark-results-v018/quality.json \
+  --markdown-report benchmark-results-v018/README.md \
+  --contender lunaux \
+  --reference medal \
+  --minimum-cases 2304 \
+  --require-gate
 ```
 
-The active LunaUX engine is selected through the normal environment configuration. External processes receive an independent timeout for every case.
+The command exits nonzero when the corpus is incomplete or the Medal gate fails. GitHub Actions runs the same sequence and uploads the raw artifacts, JSON report, Markdown scoreboard, generated manifest, and exact tool configurations even on failure.
 
-## 0.18 release gates
+## Scope and honesty
 
-The final 0.18 release should not claim to beat Medal until the repository includes:
-
-- a versioned public corpus with real compiler output at `-O0`, `-O1`, and `-O2`;
-- syntax and recompilation validators using a pinned Luau toolchain;
-- semantic fixtures with deterministic expected behavior;
-- a competitor matrix pinned to exact revisions;
-- a published report where LunaUX wins the agreed correctness score without regressing stability.
+Closed services without a stable, authorized, reproducible command or API are not assigned invented scores. They can be added when an adapter can run the same public corpus. A 0.18 victory means the pinned report passed; it does not imply that LunaUX will beat every future version of every decompiler.

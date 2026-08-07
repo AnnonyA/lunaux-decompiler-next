@@ -131,7 +131,12 @@ def test_unsupported_reference_cases_cannot_hide_same_bytecode_loss() -> None:
         ),
     )
 
-    gated = apply_release_gate(report, "lunaux", "medal")
+    gated = apply_release_gate(
+        report,
+        "lunaux",
+        "medal",
+        require_reference_compatible=True,
+    )
 
     assert gated.release_gate is not None
     assert not gated.release_gate.passed

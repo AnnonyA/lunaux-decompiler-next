@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "tools": {
+    "luau": {
+      "repository": "https://github.com/luau-lang/luau.git",
+      "commit": "8f33df910d790c1321a20028af8d8134fa3e0334",
+      "purpose": "compiler, parser, recompiler, and semantic runtime"
+    },
+    "medal": {
+      "repository": "https://github.com/shrimp-nz/medal.git",
+      "commit": "92a4e03bef0d3c2bb0511bdba6c5f95b1df96003",
+      "purpose": "primary 0.18 reference decompiler"
+    },
+    "unluau": {
+      "repository": "https://github.com/atrexus/unluau.git",
+      "commit": "f89e03a560f535eb19f11e89a6aadec636d2a8f5",
+      "purpose": "secondary public decompiler"
+    }
+  }
+}

@@ -6,6 +6,7 @@ from typing import cast
 
 import lunaux.backends.lifter as legacy
 from lunaux.backends.ast import Expr, LiteralExpr, UnaryExpr, render_expression
+from lunaux.backends.bytecode import LuauBytecodeModule
 from lunaux.backends.multret_lifter import _MultiRetFunctionLifter
 from lunaux.backends.opcodes import DecodedInstruction
 from lunaux.backends.ssa import SSAMultiUse, SSAMultiValue, SSAValue
@@ -38,7 +39,7 @@ _SIMPLE_ALIAS = re.compile(
     r"^(?P<indent>\s*)local\s+(?P<lhs>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
     r"(?P<rhs>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*$"
 )
-_TOP_LEVEL_RETURN = re.compile(r"^return(?:\s|$)")
+_TOP_LEVEL_RETURN = re.compile(r"^return\s*$")
 _FLOAT_INTEGER = re.compile(r"(?<![A-Za-z0-9_])(-?\d+)\.0(?![A-Za-z0-9_])")
 _NOT_COMPARISON = re.compile(
     r"not \((?P<left>[^()\n]+?)\s*(?P<op>==|~=|<=|>=|<|>)\s*(?P<right>[^()\n]+?)\)"
@@ -168,7 +169,7 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
                 None,
             )
             if existing is not None:
-                name = self._friendly_name(existing)
+                name: str | None = self._friendly_name(existing)
             else:
                 ordered = sorted(
                     values,
@@ -190,6 +191,7 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
                     name = self._friendly_name(
                         self.register_names.get(register, f"value{register + 1}")
                     )
+            assert name is not None
             base = name
             suffix = 2
             while name in used:
@@ -556,9 +558,6 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
         super()._lift_instruction(instruction)
 
 
-legacy._FunctionLifter = _QualityFunctionLifter  # type: ignore[misc]
-
-
 def _simplify_not_comparisons(text: str) -> str:
     def replace(match: re.Match[str]) -> str:
         return (
@@ -849,8 +848,17 @@ def _clean_output(output: str) -> str:
     return "\n".join(compact).rstrip() + "\n"
 
 
-def decompile_module(module, options: dict[str, bool], filename: str | None) -> str:
-    return _clean_output(legacy.decompile_module(module, options, filename))
+def decompile_module(
+    module: LuauBytecodeModule,
+    options: dict[str, bool],
+    filename: str | None,
+) -> str:
+    previous_lifter = legacy._FunctionLifter
+    legacy._FunctionLifter = _QualityFunctionLifter  # type: ignore[misc]
+    try:
+        return _clean_output(legacy.decompile_module(module, options, filename))
+    finally:
+        legacy._FunctionLifter = previous_lifter  # type: ignore[misc]
 
 
 disassemble_module = legacy.disassemble_module

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import lunaux.backends.lifter as legacy
+from lunaux.backends import lifter as legacy
 from lunaux.backends.analysis import BasicBlock
 from lunaux.backends.ast import (
     BinaryExpr,

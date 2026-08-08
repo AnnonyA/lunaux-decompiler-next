@@ -133,7 +133,7 @@ def test_decompiles_nested_dynamic_and_fixed_list_tables() -> None:
         _ad("LOADN", a=6, d=11),
         _abc("SETTABLEN", a=6, b=5, c=0),
         _abc("SETLIST", a=0, b=5, c=2),
-        0,
+        1,
         _abc("RETURN", a=0, b=2),
     )
 
@@ -181,7 +181,7 @@ def test_decompiles_open_call_and_vararg_setlist_tails() -> None:
         0,
         _abc("CALL", a=1, b=1, c=0),
         _abc("SETLIST", a=0, b=1, c=0),
-        0,
+        1,
         _abc("RETURN", a=0, b=2),
     )
     call_output = decompile_module(
@@ -199,7 +199,7 @@ def test_decompiles_open_call_and_vararg_setlist_tails() -> None:
         0,
         _abc("GETVARARGS", a=1, b=0),
         _abc("SETLIST", a=0, b=1, c=0),
-        0,
+        1,
         _abc("RETURN", a=0, b=2),
     )
     vararg_output = decompile_module(

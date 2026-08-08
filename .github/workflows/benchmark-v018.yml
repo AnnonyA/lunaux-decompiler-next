@@ -1,0 +1,99 @@
+name: LunaUX 0.18 Public Benchmark
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/benchmark-v018.yml"
+      - "benchmarks/**"
+      - "docs/BENCHMARKING_V018.md"
+      - "scripts/benchmark_lunaux_backend.py"
+      - "scripts/generate_benchmark_corpus.py"
+      - "scripts/install_benchmark_tools.py"
+      - "scripts/run_release_benchmark.py"
+      - "src/lunaux/backends/**"
+      - "src/lunaux/benchmark*.py"
+      - "tests/test_benchmark_release_v018.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-v018-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  public-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      RUSTC_BOOTSTRAP: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.87.0"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .benchmark-tools/source/luau_v3/build-lunaux-benchmark
+            .benchmark-tools/source/luau_v6/build-lunaux-benchmark
+            .benchmark-tools/source/luau_current/build-lunaux-benchmark
+            .benchmark-tools/source/medal/target
+          key: v018-tools-${{ runner.os }}-${{ hashFiles('benchmarks/pins.json', 'benchmarks/medal-Cargo.lock.gz.b64') }}
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - name: Build pinned Luau v3/v6/v11, Medal, and Unluau
+        run: python scripts/install_benchmark_tools.py --include-unluau
+      - name: Restore deterministic 0.18 corpus
+        id: corpus-cache
+        uses: actions/cache@v4
+        with:
+          path: benchmark-corpus-v018
+          key: v018-corpus-${{ runner.os }}-${{ hashFiles('benchmarks/pins.json', 'src/lunaux/benchmark_corpus.py', 'src/lunaux/benchmark_corpus_templates.py', 'scripts/generate_benchmark_corpus.py') }}
+      - name: Generate all 2,304 multi-version bytecodes
+        if: steps.corpus-cache.outputs.cache-hit != 'true'
+        run: >-
+          python scripts/generate_benchmark_corpus.py
+          --luau-v3-compile .benchmark-tools/bin/luau-v3-compile
+          --luau-v6-compile .benchmark-tools/bin/luau-v6-compile
+          --luau-v11-compile .benchmark-tools/bin/luau-v11-compile
+          --output benchmark-corpus-v018
+      - name: Run and enforce the Medal release gate
+        run: >-
+          python scripts/run_release_benchmark.py
+          benchmark-corpus-v018/manifest.json
+          --external-backends .benchmark-tools/backends.json
+          --toolchain .benchmark-tools/toolchain.json
+          --artifacts benchmark-results-v018/artifacts
+          --raw-report benchmark-results-v018/raw.json
+          --quality-report benchmark-results-v018/quality.json
+          --markdown-report benchmark-results-v018/README.md
+          --contender lunaux
+          --reference medal
+          --minimum-cases 2304
+          --require-gate
+      - name: Upload public benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lunaux-v018-public-benchmark
+          path: |
+            benchmark-results-v018
+            benchmark-corpus-v018/manifest.json
+            .benchmark-tools/toolchain.json
+            .benchmark-tools/compilers.json
+            .benchmark-tools/backends.json
+            .benchmark-tools/source/medal/Cargo.lock
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 30

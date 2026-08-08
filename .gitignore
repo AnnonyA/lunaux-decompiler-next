@@ -19,6 +19,11 @@ third_party/unluau/
 tools/unluau/*
 !tools/unluau/README.md
 benchmark-report.json
+benchmark-quality-report.json
+benchmark-quality-report.md
 benchmark-artifacts/
+benchmark-corpus-v018/
+benchmark-results-v018/
+.benchmark-tools/
 .DS_Store
 Thumbs.db

@@ -12,7 +12,7 @@ def _binding_started_by_definition(
     register: int,
     pc: int,
 ) -> Binding | None:
-    """Return debug binding that becomes live immediately after its defining opcode.
+    """Return a debug binding that becomes live immediately after its definition.
 
     Luau debug locals commonly start at the instruction *after* the value-producing
     opcode. Looking only at the definition PC therefore gives the temporary a generated
@@ -38,8 +38,30 @@ def _binding_started_by_definition(
     )
 
 
+def _debug_binding_name(
+    lifter: _SafeCompatibilityQualityFunctionLifter,
+    register: int,
+    pc: int,
+    *,
+    include_next_definition_boundary: bool,
+) -> str | None:
+    """Prefer serialized lexical identity over inferred/phi-friendly names.
+
+    Debug bindings are stronger evidence than symbol heuristics.  In particular the
+    quality layer can otherwise rename a real local such as ``seed`` to a friendly
+    inferred name at use sites even though its definition was emitted as ``seed``.
+    """
+
+    binding = lifter.scope_tree.binding_for_register(register, pc)
+    if binding is None and include_next_definition_boundary:
+        binding = _binding_started_by_definition(lifter, register, pc)
+    if binding is None:
+        return None
+    return legacy._sanitize_identifier(binding.name, f"v{register}")
+
+
 def install_full_corpus_semantics_fix() -> None:
-    """Install semantics fixes that are orthogonal to the proven v6/g0 Medal gate."""
+    """Install semantics fixes orthogonal to the proven v6/g0 Medal gate."""
 
     global _INSTALLED
     if _INSTALLED:
@@ -54,6 +76,16 @@ def install_full_corpus_semantics_fix() -> None:
         register: int,
         pc: int,
     ) -> str:
+        debug_name = _debug_binding_name(
+            self,
+            register,
+            pc,
+            include_next_definition_boundary=False,
+        )
+        if debug_name is not None:
+            self.register_names[register] = debug_name
+            return debug_name
+
         value = self.ssa.value_at_use(pc, register)
         if (
             register < self.proto.num_params
@@ -74,19 +106,24 @@ def install_full_corpus_semantics_fix() -> None:
         if value is not None and value in self._captured_reference_names():
             return original_definition_name(self, register, pc)
 
-        binding = self.scope_tree.binding_for_register(register, pc)
-        if binding is None:
-            binding = _binding_started_by_definition(self, register, pc)
-        if binding is not None:
-            name = legacy._sanitize_identifier(binding.name, f"v{register}")
+        debug_name = _debug_binding_name(
+            self,
+            register,
+            pc,
+            include_next_definition_boundary=True,
+        )
+        if debug_name is not None:
             if value is not None:
-                self._forced_value_names()[value] = name
-            self.register_names[register] = name
-            return name
+                self._forced_value_names()[value] = debug_name
+            self.register_names[register] = debug_name
+            return debug_name
         return original_definition_name(self, register, pc)
 
-    lifter_type._name = _name  # type: ignore[method-assign]
-    lifter_type._definition_name = _definition_name  # type: ignore[method-assign]
+    # The compatibility class is intentionally patched once because its decompile
+    # wrapper is already installed dynamically by the safe backend.  setattr avoids
+    # narrowing the receiver type in mypy's method-assignment check.
+    setattr(lifter_type, "_name", _name)  # noqa: B010
+    setattr(lifter_type, "_definition_name", _definition_name)  # noqa: B010
     _INSTALLED = True
 
 

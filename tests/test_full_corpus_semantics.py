@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from lunaux.backends.bytecode import LocalInfo, LuauBytecodeModule, LuauConstant, LuauProto
 from lunaux.backends.compat_quality_dispatch import decompile_module
-from lunaux.backends.full_corpus_semantics import install_full_corpus_semantics_fix
+from lunaux.backends.full_corpus_semantics import (
+    _safe_inline_simple_aliases,
+    install_full_corpus_semantics_fix,
+)
 
 
 def _abc(opcode: int, a: int, b: int, c: int) -> int:
@@ -54,3 +57,16 @@ def test_debug_local_name_starts_after_definition() -> None:
 
     assert "local seed = 5" in source
     assert "print(seed)" in source
+
+
+def test_field_alias_inlining_preserves_property_tokens() -> None:
+    lines = [
+        "local Stats = record.Stats",
+        "Stats.Score = Stats.Score + record[1]",
+        'print(Stats.Score, record.Stats.Score, "Stats")',
+    ]
+
+    assert _safe_inline_simple_aliases(lines) == [
+        "record.Stats.Score = record.Stats.Score + record[1]",
+        'print(record.Stats.Score, record.Stats.Score, "Stats")',
+    ]

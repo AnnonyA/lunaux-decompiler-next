@@ -108,7 +108,7 @@ def _debug_value_names(
         for value, names in candidates.items()
         if len(names) == 1
     }
-    lifter._full_corpus_debug_value_names = result
+    setattr(lifter, "_full_corpus_debug_value_names", result)  # noqa: B010
     return result
 
 

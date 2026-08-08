@@ -1,3 +1,4 @@
+# ruff: noqa: I001
 from __future__ import annotations
 
 from lunaux.backends import lifter as legacy
@@ -208,6 +209,11 @@ def install_open_argument_fix() -> None:
         self: _MultiRetFunctionLifter,
         instruction: DecodedInstruction,
     ) -> Expr:
+        # Keep the release fix as narrow as the evidence: stripped legacy bytecode.
+        # Debug-bearing bytecode and modern versions retain the proven parent path.
+        if self.module.version > 6 or self.proto.locals:
+            return original(self, instruction)
+
         use = self._persistent_multret_use(instruction.pc)
         if use is None or use.kind != "arguments":
             return original(self, instruction)

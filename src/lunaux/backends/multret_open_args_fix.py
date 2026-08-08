@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import lunaux.backends.lifter as legacy
+from lunaux.backends.analysis import BasicBlock
 from lunaux.backends.ast import (
+    BinaryExpr,
     CallExpr,
     Expr,
     LiteralExpr,
     MethodCallExpr,
+    UnaryExpr,
     source_expr,
 )
-import lunaux.backends.lifter as legacy
 from lunaux.backends.multret_lifter import _MultiRetFunctionLifter
 from lunaux.backends.opcodes import DecodedInstruction
 
@@ -38,39 +41,28 @@ def _scalar_definition_expr(
 def _block_for_pc(
     lifter: _MultiRetFunctionLifter,
     pc: int,
-):
-    return next(
-        (
-            block
-            for block in lifter.analysis.blocks
-            if any(instruction.pc == pc for instruction in block.instructions)
-        ),
-        None,
-    )
+) -> BasicBlock | None:
+    start = lifter.analysis.block_for_pc.get(pc)
+    return lifter.analysis.block_by_start.get(start) if start is not None else None
 
 
-def _open_argument_expr(
+def _physical_definition_expr(
     lifter: _MultiRetFunctionLifter,
     register: int,
-    pc: int,
-) -> Expr:
-    """Recover a fixed argument hidden or misidentified by CALL B=0 SSA uses.
+    before_pc: int,
+    consumer_block: BasicBlock,
+    seen: frozenset[tuple[int, int]] = frozenset(),
+) -> Expr | None:
+    """Resolve the latest dominating definition of a physical open-argument slot.
 
-    Luau models B=0 calls as consuming arguments through the dynamic stack top, so
-    ordinary SSA use analysis cannot reliably enumerate every fixed prefix register.
-    The MULTRET plan does know the prefix range. Optimized legacy bytecode can place a
-    FASTCALL boundary between a fixed scalar argument and the fallback CALL, splitting
-    them into different basic blocks. Resolve the nearest *dominating* physical
-    definition instead of requiring it to live in the consumer block. This preserves
-    `select("#", ...)` at O1/O2 without crossing an ambiguous branch definition.
+    CALL B=0 consumes registers through Luau's dynamic stack top. Those fixed prefix
+    slots can therefore be absent from ordinary SSA use edges, especially across the
+    FASTCALL fallback split used by optimized v6 bytecode. Follow only definitions
+    whose blocks dominate the consumer and reconstruct only side-effect-free values.
     """
 
-    consumer_block = _block_for_pc(lifter, pc)
-    if consumer_block is None:
-        return lifter._ref_expr(register, pc)
-
     for previous in reversed(lifter.instructions):
-        if previous.pc >= pc:
+        if previous.pc >= before_pc:
             continue
         if register not in lifter.analysis.register_accesses[previous.pc].definitions:
             continue
@@ -78,8 +70,15 @@ def _open_argument_expr(
         definition_block = _block_for_pc(lifter, previous.pc)
         if definition_block is None:
             continue
-        if not lifter.analysis.dominates(definition_block.start_pc, consumer_block.start_pc):
+        if not lifter.analysis.dominates(
+            definition_block.start_pc,
+            consumer_block.start_pc,
+        ):
             continue
+
+        marker = (previous.pc, register)
+        if marker in seen:
+            return None
 
         value = lifter.ssa.value_defined_at(previous.pc, register)
         if value is not None:
@@ -94,10 +93,107 @@ def _open_argument_expr(
         if scalar is not None:
             return scalar
 
-        # The nearest dominating physical definition is authoritative for this slot.
-        # If it is not safely reconstructible, preserve the ordinary SSA reference.
-        break
+        next_seen = seen | frozenset({marker})
+        if previous.name == "MOVE":
+            return _physical_definition_expr(
+                lifter,
+                previous.b,
+                previous.pc,
+                consumer_block,
+                next_seen,
+            )
 
+        if previous.name in legacy._BINARY_OPS:
+            left = _physical_definition_expr(
+                lifter,
+                previous.b,
+                previous.pc,
+                consumer_block,
+                next_seen,
+            )
+            right = _physical_definition_expr(
+                lifter,
+                previous.c,
+                previous.pc,
+                consumer_block,
+                next_seen,
+            )
+            if left is not None and right is not None:
+                return BinaryExpr(left, legacy._BINARY_OPS[previous.name], right)
+            return None
+
+        if previous.name in legacy._BINARY_CONST_OPS:
+            left = _physical_definition_expr(
+                lifter,
+                previous.b,
+                previous.pc,
+                consumer_block,
+                next_seen,
+            )
+            if left is None or not 0 <= previous.c < len(lifter.proto.constants):
+                return None
+            return BinaryExpr(
+                left,
+                legacy._BINARY_CONST_OPS[previous.name],
+                source_expr(legacy._constant_expr(lifter.proto, previous.c)),
+            )
+
+        if previous.name in {"SUBRK", "DIVRK"}:
+            if not 0 <= previous.b < len(lifter.proto.constants):
+                return None
+            right = _physical_definition_expr(
+                lifter,
+                previous.c,
+                previous.pc,
+                consumer_block,
+                next_seen,
+            )
+            if right is None:
+                return None
+            operator = "-" if previous.name == "SUBRK" else "/"
+            return BinaryExpr(
+                source_expr(legacy._constant_expr(lifter.proto, previous.b)),
+                operator,
+                right,
+            )
+
+        if previous.name in legacy._UNARY_OPS:
+            operand = _physical_definition_expr(
+                lifter,
+                previous.b,
+                previous.pc,
+                consumer_block,
+                next_seen,
+            )
+            if operand is not None:
+                return UnaryExpr(legacy._UNARY_OPS[previous.name].strip(), operand)
+            return None
+
+        # The nearest dominating definition overwrites the slot. Never walk past a
+        # side-effectful or otherwise unsupported write and accidentally resurrect an
+        # older value from the same physical register.
+        return None
+
+    return None
+
+
+def _open_argument_expr(
+    lifter: _MultiRetFunctionLifter,
+    register: int,
+    pc: int,
+) -> Expr:
+    """Recover one fixed argument consumed together with an open Luau tuple."""
+
+    consumer_block = _block_for_pc(lifter, pc)
+    if consumer_block is not None:
+        recovered = _physical_definition_expr(
+            lifter,
+            register,
+            pc,
+            consumer_block,
+        )
+        if recovered is not None:
+            return recovered
     return lifter._ref_expr(register, pc)
 
 

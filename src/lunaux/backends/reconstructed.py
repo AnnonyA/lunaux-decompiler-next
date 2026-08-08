@@ -18,10 +18,12 @@ from lunaux.backends.legacy_repeat_fix import install_legacy_repeat_fix
 from lunaux.backends.multret_lifter import decompile_module as decompile_raw_module
 from lunaux.backends.multret_open_args_fix import install_open_argument_fix
 from lunaux.backends.opcodes import disassemble_words, unpack_words
+from lunaux.backends.remaining_semantics import install_remaining_semantics_fix
 
 install_open_argument_fix()
 install_full_corpus_semantics_fix()
 install_legacy_repeat_fix()
+install_remaining_semantics_fix()
 
 _PRINTABLE: Final[re.Pattern[bytes]] = re.compile(rb"[\x20-\x7e]{4,}")
 _COMPATIBILITY_NOTICE: Final[str] = (

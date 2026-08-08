@@ -257,6 +257,57 @@ def _safe_inline_simple_aliases(lines: list[str]) -> list[str]:
     ]
 
 
+def _numeric_for_visible_register(
+    lifter: _SafeCompatibilityQualityFunctionLifter,
+    instruction: DecodedInstruction,
+    end_pc: int,
+) -> tuple[int, int]:
+    """Choose the numeric-for register that is actually visible to the loop body.
+
+    Luau reserves ``A+2`` for the internal index and ``A+3`` for the nominal source
+    variable.  The compiler can however read the immutable internal index directly and
+    immediately reuse ``A+3`` for an unrelated body local.  In that shape, blindly
+    forcing ``A+3`` to the loop-variable name aliases the unrelated local and leaves
+    body reads attached to the pre-loop initializer.
+
+    Prefer the nominal source register whenever its incoming value is read.  Otherwise,
+    if the internal index is read before any body definition while ``A+3`` is overwritten
+    first, the internal index is the source-visible value for this lowered loop.
+    """
+
+    internal = instruction.a + 2
+    nominal = instruction.a + 3
+    first_use: dict[int, int] = {}
+    first_definition: dict[int, int] = {}
+
+    for candidate in lifter.instructions:
+        if not (instruction.pc < candidate.pc < end_pc):
+            continue
+        if candidate.name == "FORNLOOP":
+            continue
+        access = lifter.analysis.register_accesses[candidate.pc]
+        for register in (internal, nominal):
+            if register in access.uses:
+                first_use.setdefault(register, candidate.pc)
+            if register in access.definitions:
+                first_definition.setdefault(register, candidate.pc)
+
+    def incoming_value_is_used(register: int) -> bool:
+        use_pc = first_use.get(register)
+        if use_pc is None:
+            return False
+        definition_pc = first_definition.get(register)
+        return definition_pc is None or use_pc <= definition_pc
+
+    nominal_live = incoming_value_is_used(nominal)
+    internal_live = incoming_value_is_used(internal)
+    if nominal_live:
+        return nominal, first_use[nominal]
+    if internal_live:
+        return internal, first_use[internal]
+    return nominal, instruction.pc
+
+
 def install_full_corpus_semantics_fix() -> None:
     """Install semantics fixes orthogonal to the proven v6/g0 Medal gate."""
 
@@ -269,6 +320,7 @@ def install_full_corpus_semantics_fix() -> None:
     original_definition_name = lifter_type._definition_name
     original_ref_expr = lifter_type._ref_expr
     original_open_structured_loop = lifter_type._open_structured_loop
+    original_handle_loop_prep = lifter_type._handle_loop_prep
     original_lift = lifter_type.lift
 
     def _name(
@@ -379,6 +431,33 @@ def install_full_corpus_semantics_fix() -> None:
         # conditional header is consumed by the structured loop syntax itself.
         return instruction.name in legacy._CONDITIONAL_OPS
 
+    def _handle_loop_prep(
+        self: _SafeCompatibilityQualityFunctionLifter,
+        instruction: DecodedInstruction,
+    ) -> bool:
+        if instruction.name != "FORNPREP":
+            return original_handle_loop_prep(self, instruction)
+
+        target = legacy._jump_target(instruction)
+        # Capture the initializer expressions before forcing the body-visible register;
+        # A+2 can itself be the optimized visible loop value, and forcing it first would
+        # turn a correct initializer into ``for index = index, ...`` accidentally.
+        start = self._ref(instruction.a + 2, instruction.pc)
+        limit = self._ref(instruction.a, instruction.pc)
+        step = self._ref(instruction.a + 1, instruction.pc)
+
+        register, use_pc = _numeric_for_visible_register(self, instruction, target)
+        proposed = self._friendly_name(self._name(register, use_pc))
+        variable = "index" if proposed.startswith("value") else proposed
+        self._force_register_name(register, instruction.pc, target, variable)
+        self.register_names[register] = variable
+        self.declared.add(variable)
+
+        header = f"for {variable} = {start}, {limit}"
+        if self.options.preserve_for_step or step not in ("1", "1.0"):
+            header += f", {step}"
+        return self._open_until(target, header + " do")
+
     def _lift(
         self: _SafeCompatibilityQualityFunctionLifter,
         *,
@@ -412,6 +491,7 @@ def install_full_corpus_semantics_fix() -> None:
     setattr(lifter_type, "_definition_name", _definition_name)  # noqa: B010
     setattr(lifter_type, "_ref_expr", _ref_expr)  # noqa: B010
     setattr(lifter_type, "_open_structured_loop", _open_structured_loop)  # noqa: B010
+    setattr(lifter_type, "_handle_loop_prep", _handle_loop_prep)  # noqa: B010
     setattr(lifter_type, "lift", _lift)  # noqa: B010
     setattr(quality, "_inline_simple_aliases", _safe_inline_simple_aliases)  # noqa: B010
     _INSTALLED = True

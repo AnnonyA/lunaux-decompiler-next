@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import lunaux.backends.lifter as legacy
-from lunaux.backends.ast import CallExpr, Expr, LiteralExpr, MethodCallExpr, source_expr
+from lunaux.backends.ast import (
+    CallExpr,
+    Expr,
+    LiteralExpr,
+    MethodCallExpr,
+    source_expr,
+)
 from lunaux.backends.multret_lifter import _MultiRetFunctionLifter
 from lunaux.backends.opcodes import DecodedInstruction
 
@@ -118,7 +124,7 @@ def install_open_argument_fix() -> None:
         )
         return CallExpr(function, (*fixed, tail))
 
-    setattr(_MultiRetFunctionLifter, "_call_expression", _call_expression)
+    setattr(_MultiRetFunctionLifter, "_call_expression", _call_expression)  # noqa: B010
     _INSTALLED = True
 
 

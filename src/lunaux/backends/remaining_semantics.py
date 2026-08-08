@@ -10,6 +10,21 @@ from lunaux.backends.compat_quality_safe import _SafeCompatibilityQualityFunctio
 from lunaux.backends.ssa import SSAValue
 
 _INSTALLED = False
+_ACCESS_OR_MOVE = frozenset({"MOVE", "GETTABLE", "GETTABLEKS", "GETUDATAKS", "GETTABLEN"})
+_ACCESS_RECONSTRUCTION_HAZARDS = frozenset(
+    {
+        "CALL",
+        "CALLFB",
+        "SETGLOBAL",
+        "SETUPVAL",
+        "SETTABLE",
+        "SETTABLEKS",
+        "SETUDATAKS",
+        "SETTABLEN",
+        "SETLIST",
+        "NEWCLASSMEMBER",
+    }
+)
 
 
 def _reserved_debug_names(
@@ -45,6 +60,40 @@ def _nonconflicting_generated_name(
     return replacement
 
 
+def _access_value_can_reconstruct(
+    lifter: _SafeCompatibilityQualityFunctionLifter,
+    value: SSAValue,
+    consumer_pc: int,
+) -> bool:
+    """Prove that a table-access SSA value can be re-evaluated at one later use.
+
+    A GETTABLE* result can be materialized under a temporary source name even though
+    the table path itself is still the more faithful expression. Re-evaluating an
+    access is only safe while the definition and consumer remain in one basic block and
+    no call or write that could replace/mutate the observed path occurs in between.
+    This keeps the recovery structural instead of globally inlining mutable table reads.
+    """
+
+    if value.kind != "instruction" or value.origin_pc is None:
+        return False
+    if value.origin_pc >= consumer_pc:
+        return False
+    definition = lifter.instruction_by_pc.get(value.origin_pc)
+    if definition is None or definition.name not in _ACCESS_OR_MOVE:
+        return False
+
+    origin_block = lifter.analysis.block_for_pc.get(value.origin_pc)
+    consumer_block = lifter.analysis.block_for_pc.get(consumer_pc)
+    if origin_block is None or origin_block != consumer_block:
+        return False
+
+    return not any(
+        value.origin_pc < instruction.pc < consumer_pc
+        and instruction.name in _ACCESS_RECONSTRUCTION_HAZARDS
+        for instruction in lifter.instructions
+    )
+
+
 def _operand_expression(
     lifter: _SafeCompatibilityQualityFunctionLifter,
     register: int,
@@ -59,8 +108,8 @@ def _operand_expression(
     fallback = original_ref_expr(lifter, register, pc)
     if (
         isinstance(fallback, NameExpr)
-        and fallback.name not in lifter.declared
         and value is not None
+        and _access_value_can_reconstruct(lifter, value, pc)
     ):
         reconstructed = _access_expression_for_value(
             lifter,
@@ -79,12 +128,13 @@ def _access_expression_for_value(
     original_ref_expr: Callable[[_SafeCompatibilityQualityFunctionLifter, int, int], Expr],
     seen: frozenset[SSAValue] = frozenset(),
 ) -> Expr | None:
-    """Recover table-access values whose temporary binding was elided during structuring.
+    """Recover table-access values from their side-effect-free SSA origins.
 
     Pending table-literal reconstruction can absorb the table that originally produced
     a GETTABLE* base while a later use still refers to that SSA value. Reconstruct the
-    access from its defining instruction instead of emitting an undeclared physical-
-    register name. Only side-effect-free MOVE/GETTABLE* chains are followed.
+    access from its defining instruction instead of trusting a physical-register name.
+    Only MOVE/GETTABLE* chains are followed; callers additionally prove that replaying
+    the access at the consumer crosses no mutating instruction.
     """
 
     if value in seen or value.kind != "instruction" or value.origin_pc is None:
@@ -187,10 +237,10 @@ def install_remaining_semantics_fix() -> None:
         pc: int,
     ) -> Expr:
         expression = original_ref_expr(self, register, pc)
-        if not isinstance(expression, NameExpr) or expression.name in self.declared:
+        if not isinstance(expression, NameExpr):
             return expression
         value = self.ssa.value_at_use(pc, register)
-        if value is None:
+        if value is None or not _access_value_can_reconstruct(self, value, pc):
             return expression
         reconstructed = _access_expression_for_value(
             self,

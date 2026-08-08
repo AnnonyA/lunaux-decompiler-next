@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import cast
-
 import lunaux.backends.lifter as legacy
 from lunaux.backends.ast import CallExpr, Expr, LiteralExpr, MethodCallExpr, source_expr
 from lunaux.backends.multret_lifter import _MultiRetFunctionLifter
@@ -40,9 +38,9 @@ def _open_argument_expr(
 
     Luau models B=0 calls as consuming arguments through the dynamic stack top, so
     ordinary SSA use analysis cannot reliably enumerate every fixed prefix register.
-    The MULTRET plan does know the prefix range.  Medal preserves those physical
+    The MULTRET plan does know the prefix range. Medal preserves those physical
     prefix slots while destroying SSA; do the same narrowly by resolving the latest
-    same-block definition before the consumer.  This is what keeps `select("#", ...)`
+    same-block definition before the consumer. This is what keeps `select("#", ...)`
     from becoming `select(value3, ...)` when the literal has no explicit SSA use edge.
     """
 
@@ -76,7 +74,7 @@ def _open_argument_expr(
         if scalar is not None:
             return scalar
 
-        # The latest physical definition is authoritative for this stack slot.  If it
+        # The latest physical definition is authoritative for this stack slot. If it
         # is not one of the safely reconstructible forms above, keep the ordinary SSA
         # reference rather than guessing across a side effect or control-flow edge.
         break
@@ -120,10 +118,7 @@ def install_open_argument_fix() -> None:
         )
         return CallExpr(function, (*fixed, tail))
 
-    _MultiRetFunctionLifter._call_expression = cast(
-        object,
-        _call_expression,
-    )  # type: ignore[method-assign]
+    setattr(_MultiRetFunctionLifter, "_call_expression", _call_expression)
     _INSTALLED = True
 
 

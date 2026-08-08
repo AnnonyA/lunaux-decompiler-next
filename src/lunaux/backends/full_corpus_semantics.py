@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from typing import cast
 
+import lunaux.backends.quality_lifter as quality
 from lunaux.backends import lifter as legacy
+from lunaux.backends.ast import Expr, NameExpr
 from lunaux.backends.compat_quality_safe import _SafeCompatibilityQualityFunctionLifter
+from lunaux.backends.opcodes import DecodedInstruction
 from lunaux.backends.scopes import Binding
 from lunaux.backends.ssa import SSAValue
 
@@ -62,18 +66,13 @@ def _debug_binding_name(
 def _debug_value_names(
     lifter: _SafeCompatibilityQualityFunctionLifter,
 ) -> dict[SSAValue, str]:
-    """Bind SSA values to debug-local identity using their actual in-scope uses.
+    """Bind SSA values and their phi components to unambiguous debug identities.
 
-    Debug ranges begin after initialization for many Luau constructs (tables,
-    closures, optimized calls, and parameters after PREPVARARGS).  Emission can also
-    be delayed past the defining opcode while a table literal is reconstructed.  A
-    PC-only lookup therefore names the definition and its later uses differently.
-
-    Instead, collect the lexical binding seen by every SSA use/definition.  If a value
-    is observed under one unambiguous debug name, that name belongs to the value even
-    when the source binding starts after its machine-level definition.  Conflicting
-    observations are deliberately left alone rather than coalescing unrelated register
-    lifetimes.
+    A source local can start after the instruction that initializes it, and boolean or
+    loop lowering can place that value behind one or more phi nodes.  Direct PC lookups
+    then name the definition and the later use differently.  Collect lexical evidence
+    from actual uses/definitions and propagate a name only when an entire phi component
+    contains one unambiguous debug identity.
     """
 
     cached = getattr(lifter, "_full_corpus_debug_value_names", None)
@@ -98,7 +97,7 @@ def _debug_value_names(
                     lifter,
                     value.register,
                     pc,
-                    include_next_definition_boundary=False,
+                    include_next_definition_boundary=True,
                 )
                 if name is not None:
                     candidates[value].add(name)
@@ -108,6 +107,46 @@ def _debug_value_names(
         for value, names in candidates.items()
         if len(names) == 1
     }
+
+    parent: dict[SSAValue, SSAValue] = {}
+
+    def find(value: SSAValue) -> SSAValue:
+        parent.setdefault(value, value)
+        root = value
+        while parent[root] != root:
+            root = parent[root]
+        while parent[value] != value:
+            next_value = parent[value]
+            parent[value] = root
+            value = next_value
+        return root
+
+    def union(left: SSAValue, right: SSAValue) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for phi in lifter.ssa.phis:
+        find(phi.result)
+        for operand in phi.operands.values():
+            union(phi.result, operand)
+
+    components: defaultdict[SSAValue, list[SSAValue]] = defaultdict(list)
+    for value in tuple(parent):
+        components[find(value)].append(value)
+    for members in components.values():
+        names = {
+            name
+            for member in members
+            for name in candidates.get(member, ())
+        }
+        if len(names) != 1:
+            continue
+        name = next(iter(names))
+        for member in members:
+            result[member] = name
+
     setattr(lifter, "_full_corpus_debug_value_names", result)  # noqa: B010
     return result
 
@@ -129,6 +168,95 @@ def _debug_parameter_names(
     return result
 
 
+def _replace_identifier_reference(line: str, name: str, replacement: str) -> str:
+    """Replace a variable reference without touching fields, strings, or comments."""
+
+    output: list[str] = []
+    index = 0
+    quote: str | None = None
+    escaped = False
+    while index < len(line):
+        char = line[index]
+        if quote is not None:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            output.append(char)
+            index += 1
+            continue
+        if char == "-" and index + 1 < len(line) and line[index + 1] == "-":
+            output.append(line[index:])
+            break
+        if line.startswith(name, index):
+            before = line[index - 1] if index else ""
+            after_index = index + len(name)
+            after = line[after_index] if after_index < len(line) else ""
+            before_identifier = bool(before and (before.isalnum() or before == "_"))
+            after_identifier = bool(after and (after.isalnum() or after == "_"))
+            if not before_identifier and not after_identifier and before not in {".", ":"}:
+                output.append(replacement)
+                index = after_index
+                continue
+        output.append(char)
+        index += 1
+    return "".join(output)
+
+
+def _safe_inline_simple_aliases(lines: list[str]) -> list[str]:
+    """Inline field aliases without rewriting property-name tokens.
+
+    The previous word-level substitution could turn ``record.Stats.Score`` into
+    ``record.Stats.Stats.Score`` when a local alias happened to be named ``Stats``.
+    That is a semantic change, not a readability issue.  Replace only lexical variable
+    references and leave ``.field``/``:method`` selectors and quoted strings intact.
+    """
+
+    result = list(lines)
+    aliases: list[tuple[int, str, str]] = []
+    for index, line in enumerate(result):
+        match = quality._SIMPLE_ALIAS.fullmatch(line)
+        if match is None:
+            continue
+        lhs = match.group("lhs")
+        rhs = match.group("rhs")
+        if "." not in rhs and lhs != rhs:
+            continue
+        assigned_later = any(
+            re.match(rf"^\s*{re.escape(lhs)}\s*=", candidate)
+            for candidate in result[index + 1 :]
+        )
+        if assigned_later:
+            continue
+        aliases.append((index, lhs, rhs))
+
+    removed: set[int] = set()
+    for index, lhs, rhs in aliases:
+        removed.add(index)
+        if lhs == rhs:
+            continue
+        for following in range(index + 1, len(result)):
+            if following in removed:
+                continue
+            result[following] = _replace_identifier_reference(
+                result[following],
+                lhs,
+                rhs,
+            )
+    return [
+        line
+        for index, line in enumerate(result)
+        if index not in removed
+    ]
+
+
 def install_full_corpus_semantics_fix() -> None:
     """Install semantics fixes orthogonal to the proven v6/g0 Medal gate."""
 
@@ -139,6 +267,8 @@ def install_full_corpus_semantics_fix() -> None:
     lifter_type = _SafeCompatibilityQualityFunctionLifter
     original_name = lifter_type._name
     original_definition_name = lifter_type._definition_name
+    original_ref_expr = lifter_type._ref_expr
+    original_open_structured_loop = lifter_type._open_structured_loop
     original_lift = lifter_type.lift
 
     def _name(
@@ -146,7 +276,15 @@ def install_full_corpus_semantics_fix() -> None:
         register: int,
         pc: int,
     ) -> str:
+        # Numeric/generic loop variables are explicit source bindings.  Their forced
+        # structural identity must outrank debug/phi heuristics, especially when the
+        # compiler reuses the loop-variable register as a temporary later in a body.
+        if self._structural_name(register, pc) is not None:
+            return original_name(self, register, pc)
+
         value = self.ssa.value_at_use(pc, register)
+        if value is not None and value in self._captured_reference_names():
+            return original_name(self, register, pc)
         if value is not None:
             debug_name = _debug_value_names(self).get(value)
             if debug_name is not None:
@@ -179,7 +317,13 @@ def install_full_corpus_semantics_fix() -> None:
         register: int,
         pc: int,
     ) -> str:
+        if self._structural_name(register, pc) is not None:
+            return original_definition_name(self, register, pc)
+
         value = self.ssa.value_defined_at(pc, register)
+        if value is not None and value in self._captured_reference_names():
+            return original_definition_name(self, register, pc)
+
         debug_value = value
         if debug_value is None:
             # Delayed synthetic emission (notably reconstructed table literals) uses
@@ -187,15 +331,15 @@ def install_full_corpus_semantics_fix() -> None:
             # the table value is a use, not a definition, so recover its SSA identity.
             debug_value = self.ssa.value_at_use(pc, register)
 
-        if debug_value is not None:
+        if (
+            debug_value is not None
+            and debug_value not in self._captured_reference_names()
+        ):
             debug_name = _debug_value_names(self).get(debug_value)
             if debug_name is not None:
                 self._forced_value_names()[debug_value] = debug_name
                 self.register_names[register] = debug_name
                 return debug_name
-
-        if value is not None and value in self._captured_reference_names():
-            return original_definition_name(self, register, pc)
 
         debug_name = _debug_binding_name(
             self,
@@ -209,6 +353,31 @@ def install_full_corpus_semantics_fix() -> None:
             self.register_names[register] = debug_name
             return debug_name
         return original_definition_name(self, register, pc)
+
+    def _ref_expr(
+        self: _SafeCompatibilityQualityFunctionLifter,
+        register: int,
+        pc: int,
+    ) -> Expr:
+        structural = self._structural_name(register, pc)
+        if structural is not None:
+            self.register_names[register] = structural
+            return NameExpr(structural)
+        return original_ref_expr(self, register, pc)
+
+    def _open_structured_loop(
+        self: _SafeCompatibilityQualityFunctionLifter,
+        instruction: DecodedInstruction,
+    ) -> bool:
+        opened = original_open_structured_loop(self, instruction)
+        if not opened:
+            return False
+        # Opening a repeat/infinite/advanced while region can happen at an ordinary
+        # value-producing first body instruction.  Returning True makes lift() skip
+        # that instruction entirely (for example LOADN 3 at the head of a repeat),
+        # leaving an undefined register in the reconstructed source.  Only a real
+        # conditional header is consumed by the structured loop syntax itself.
+        return instruction.name in legacy._CONDITIONAL_OPS
 
     def _lift(
         self: _SafeCompatibilityQualityFunctionLifter,
@@ -241,7 +410,10 @@ def install_full_corpus_semantics_fix() -> None:
     # narrowing the receiver type in mypy's method-assignment check.
     setattr(lifter_type, "_name", _name)  # noqa: B010
     setattr(lifter_type, "_definition_name", _definition_name)  # noqa: B010
+    setattr(lifter_type, "_ref_expr", _ref_expr)  # noqa: B010
+    setattr(lifter_type, "_open_structured_loop", _open_structured_loop)  # noqa: B010
     setattr(lifter_type, "lift", _lift)  # noqa: B010
+    setattr(quality, "_inline_simple_aliases", _safe_inline_simple_aliases)  # noqa: B010
     _INSTALLED = True
 
 

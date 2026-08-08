@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import cast
 
-from lunaux.backends.ast import CallExpr, Expr, MethodCallExpr
+import lunaux.backends.lifter as legacy
+from lunaux.backends.ast import CallExpr, Expr, LiteralExpr, MethodCallExpr, source_expr
 from lunaux.backends.multret_lifter import _MultiRetFunctionLifter
 from lunaux.backends.opcodes import DecodedInstruction
 
@@ -10,25 +11,40 @@ from lunaux.backends.opcodes import DecodedInstruction
 _INSTALLED = False
 
 
+def _scalar_definition_expr(
+    lifter: _MultiRetFunctionLifter,
+    instruction: DecodedInstruction,
+) -> Expr | None:
+    """Recover a side-effect-free scalar directly from its defining instruction."""
+
+    if instruction.name == "LOADNIL":
+        return LiteralExpr("nil")
+    if instruction.name == "LOADB":
+        return LiteralExpr("true" if instruction.b else "false")
+    if instruction.name == "LOADN":
+        return LiteralExpr(str(instruction.d))
+    if instruction.name == "LOADK":
+        return source_expr(legacy._constant_expr(lifter.proto, instruction.d))
+    if instruction.name == "LOADKX":
+        index = instruction.aux if instruction.aux is not None else 0
+        return source_expr(legacy._constant_expr(lifter.proto, index))
+    return None
+
+
 def _open_argument_expr(
     lifter: _MultiRetFunctionLifter,
     register: int,
     pc: int,
 ) -> Expr:
-    """Recover a fixed argument hidden from SSA by CALL B=0.
+    """Recover a fixed argument hidden or misidentified by CALL B=0 SSA uses.
 
     Luau models B=0 calls as consuming arguments through the dynamic stack top, so
-    the ordinary register-use analysis cannot enumerate fixed prefix registers.
-    The MULTRET plan *can* enumerate that prefix because it knows where the open
-    tuple begins. If SSA has no use edge for one of those registers, recover the
-    most recent same-block definition and reuse an already materialized/inlined
-    expression. This preserves evaluation order and avoids emitting an undefined
-    generated name such as ``select(value3, ...)`` when ``value3`` was the
-    optimized literal ``\"#\"``.
+    ordinary SSA use analysis cannot reliably enumerate every fixed prefix register.
+    The MULTRET plan does know the prefix range.  Medal preserves those physical
+    prefix slots while destroying SSA; do the same narrowly by resolving the latest
+    same-block definition before the consumer.  This is what keeps `select("#", ...)`
+    from becoming `select(value3, ...)` when the literal has no explicit SSA use edge.
     """
-
-    if lifter.ssa.value_at_use(pc, register) is not None:
-        return lifter._ref_expr(register, pc)
 
     block = next(
         (
@@ -46,6 +62,7 @@ def _open_argument_expr(
             continue
         if register not in lifter.analysis.register_accesses[previous.pc].definitions:
             continue
+
         value = lifter.ssa.value_defined_at(previous.pc, register)
         if value is not None:
             callback = lifter.callback_expressions.get(value)
@@ -54,6 +71,14 @@ def _open_argument_expr(
             inline = lifter.inline_expressions.get(value)
             if inline is not None:
                 return inline
+
+        scalar = _scalar_definition_expr(lifter, previous)
+        if scalar is not None:
+            return scalar
+
+        # The latest physical definition is authoritative for this stack slot.  If it
+        # is not one of the safely reconstructible forms above, keep the ordinary SSA
+        # reference rather than guessing across a side effect or control-flow edge.
         break
 
     return lifter._ref_expr(register, pc)

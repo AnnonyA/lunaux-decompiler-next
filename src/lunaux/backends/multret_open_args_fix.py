@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import lunaux.backends.lifter as legacy
 from lunaux.backends.ast import (
     CallExpr,
     Expr,
@@ -8,6 +7,7 @@ from lunaux.backends.ast import (
     MethodCallExpr,
     source_expr,
 )
+import lunaux.backends.lifter as legacy
 from lunaux.backends.multret_lifter import _MultiRetFunctionLifter
 from lunaux.backends.opcodes import DecodedInstruction
 
@@ -35,6 +35,20 @@ def _scalar_definition_expr(
     return None
 
 
+def _block_for_pc(
+    lifter: _MultiRetFunctionLifter,
+    pc: int,
+):
+    return next(
+        (
+            block
+            for block in lifter.analysis.blocks
+            if any(instruction.pc == pc for instruction in block.instructions)
+        ),
+        None,
+    )
+
+
 def _open_argument_expr(
     lifter: _MultiRetFunctionLifter,
     register: int,
@@ -44,27 +58,27 @@ def _open_argument_expr(
 
     Luau models B=0 calls as consuming arguments through the dynamic stack top, so
     ordinary SSA use analysis cannot reliably enumerate every fixed prefix register.
-    The MULTRET plan does know the prefix range. Medal preserves those physical
-    prefix slots while destroying SSA; do the same narrowly by resolving the latest
-    same-block definition before the consumer. This is what keeps `select("#", ...)`
-    from becoming `select(value3, ...)` when the literal has no explicit SSA use edge.
+    The MULTRET plan does know the prefix range. Optimized legacy bytecode can place a
+    FASTCALL boundary between a fixed scalar argument and the fallback CALL, splitting
+    them into different basic blocks. Resolve the nearest *dominating* physical
+    definition instead of requiring it to live in the consumer block. This preserves
+    `select("#", ...)` at O1/O2 without crossing an ambiguous branch definition.
     """
 
-    block = next(
-        (
-            candidate
-            for candidate in lifter.analysis.blocks
-            if any(instruction.pc == pc for instruction in candidate.instructions)
-        ),
-        None,
-    )
-    if block is None:
+    consumer_block = _block_for_pc(lifter, pc)
+    if consumer_block is None:
         return lifter._ref_expr(register, pc)
 
-    for previous in reversed(block.instructions):
+    for previous in reversed(lifter.instructions):
         if previous.pc >= pc:
             continue
         if register not in lifter.analysis.register_accesses[previous.pc].definitions:
+            continue
+
+        definition_block = _block_for_pc(lifter, previous.pc)
+        if definition_block is None:
+            continue
+        if not lifter.analysis.dominates(definition_block.start_pc, consumer_block.start_pc):
             continue
 
         value = lifter.ssa.value_defined_at(previous.pc, register)
@@ -80,9 +94,8 @@ def _open_argument_expr(
         if scalar is not None:
             return scalar
 
-        # The latest physical definition is authoritative for this stack slot. If it
-        # is not one of the safely reconstructible forms above, keep the ordinary SSA
-        # reference rather than guessing across a side effect or control-flow edge.
+        # The nearest dominating physical definition is authoritative for this slot.
+        # If it is not safely reconstructible, preserve the ordinary SSA reference.
         break
 
     return lifter._ref_expr(register, pc)

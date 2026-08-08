@@ -43,10 +43,11 @@ def test_reconstructs_elided_field_access_from_ssa_origin() -> None:
             return None
 
     class FakeLifter:
-        ssa = FakeSSA()
-        instruction_by_pc = {1: instruction}
-        inline_expressions: dict[SSAValue, NameExpr] = {}
-        declared = {"record"}
+        def __init__(self) -> None:
+            self.ssa = FakeSSA()
+            self.instruction_by_pc = {1: instruction}
+            self.inline_expressions: dict[SSAValue, NameExpr] = {}
+            self.declared = {"record"}
 
         def _table_key(self, _instruction: DecodedInstruction) -> str:
             return "Stats"

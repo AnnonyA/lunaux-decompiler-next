@@ -13,6 +13,7 @@ from lunaux.backends.bytecode import (
     parse_bytecode,
 )
 from lunaux.backends.compat_quality_dispatch import decompile_module, disassemble_module
+from lunaux.backends.final_semantics import install_final_semantics_fix
 from lunaux.backends.full_corpus_semantics import install_full_corpus_semantics_fix
 from lunaux.backends.legacy_repeat_fix import install_legacy_repeat_fix
 from lunaux.backends.multret_lifter import decompile_module as decompile_raw_module
@@ -24,6 +25,7 @@ install_open_argument_fix()
 install_full_corpus_semantics_fix()
 install_legacy_repeat_fix()
 install_remaining_semantics_fix()
+install_final_semantics_fix()
 
 _PRINTABLE: Final[re.Pattern[bytes]] = re.compile(rb"[\x20-\x7e]{4,}")
 _COMPATIBILITY_NOTICE: Final[str] = (

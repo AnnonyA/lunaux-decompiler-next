@@ -3,6 +3,9 @@ from __future__ import annotations
 import re
 
 import lunaux.backends.quality_lifter as quality
+from lunaux.backends.ast import Expr, NameExpr, ensure_expr
+from lunaux.backends.compat_quality_safe import _SafeCompatibilityQualityFunctionLifter
+from lunaux.backends.remaining_semantics import _stable_value_expression
 
 _INSTALLED = False
 _SCALAR_LITERAL = re.compile(
@@ -22,6 +25,46 @@ def _replace_identifier(expression: str, name: str, replacement: str) -> str:
     """Replace a standalone identifier in a generated pure expression."""
 
     return re.sub(rf"(?<![A-Za-z0-9_.:]){re.escape(name)}(?![A-Za-z0-9_])", replacement, expression)
+
+
+def _repair_move_source_expression(
+    lifter: _SafeCompatibilityQualityFunctionLifter,
+    register: int,
+    expression: Expr | str,
+    pc: int,
+) -> Expr:
+    """Recover a MOVE source from its exact SSA value before emitting the assignment.
+
+    A copied table-access value can lose its source identity when friendly/debug naming
+    gives the MOVE destination the same identifier that the source reference resolves to.
+    The normal emitter then produces a self alias such as ``local field = field``; alias
+    cleanup removes that declaration and later field uses become undefined.
+
+    Repair only MOVE assignments whose current RHS collapsed to a bare name. Resolve the
+    source SSA value at the MOVE itself, where using the original value is semantically
+    faithful, rather than replaying a historical GETTABLE* at a later consumer. The
+    stable resolver never consults mutable physical-register naming state and therefore
+    cannot reproduce the broad MOVE replay regressions that affected ordinary arithmetic
+    and multiple assignment values.
+    """
+
+    rendered = ensure_expr(expression)
+    instruction = lifter.instruction_by_pc.get(pc)
+    if (
+        instruction is None
+        or instruction.name != "MOVE"
+        or instruction.a != register
+        or not isinstance(rendered, NameExpr)
+    ):
+        return rendered
+
+    source = lifter.ssa.value_at_use(pc, instruction.b)
+    if source is None:
+        return rendered
+    stable = _stable_value_expression(lifter, source, pc, frozenset())
+    if stable is None or stable == rendered:
+        return rendered
+    return stable
 
 
 def _rewrite_extended_boolean_ladders(text: str) -> str:
@@ -163,11 +206,27 @@ def install_final_semantics_fix() -> None:
     if _INSTALLED:
         return
 
+    lifter_type = _SafeCompatibilityQualityFunctionLifter
+    original_assign = lifter_type._assign
     original_clean_output = quality._clean_output
+
+    def _assign(
+        self: _SafeCompatibilityQualityFunctionLifter,
+        register: int,
+        expression: Expr | str,
+        pc: int,
+    ) -> None:
+        original_assign(
+            self,
+            register,
+            _repair_move_source_expression(self, register, expression, pc),
+            pc,
+        )
 
     def _clean_output(text: str) -> str:
         return _rewrite_extended_boolean_ladders(original_clean_output(text))
 
+    setattr(lifter_type, "_assign", _assign)  # noqa: B010
     setattr(quality, "_clean_output", _clean_output)  # noqa: B010
     _INSTALLED = True
 

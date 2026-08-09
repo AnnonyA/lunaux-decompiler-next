@@ -475,6 +475,15 @@ def install_remaining_semantics_fix() -> None:
     ) -> str:
         value = self.ssa.value_at_use(pc, register)
         if value is not None:
+            # Once an exact SSA value has been emitted as a source local, every later
+            # reference to that value must use that exact lexical identifier. Debug or
+            # friendly-name evidence is descriptive only; allowing it to rename the
+            # already-materialized value splits one SSA lifetime into two Luau locals.
+            materialized = _materialized_value_names(self).get(value)
+            if materialized is not None:
+                self.register_names[register] = materialized
+                return materialized
+
             captured_names = self._captured_reference_names()
             if value not in captured_names:
                 forced = self._forced_value_names().get(value)
@@ -547,17 +556,22 @@ def install_remaining_semantics_fix() -> None:
         register: int,
         pc: int,
     ) -> Expr:
+        value = self.ssa.value_at_use(pc, register)
+        if value is not None:
+            # Resolve exact materialized SSA identity before any mutable register/debug
+            # naming path. This is the source-level equivalent of SSA destruction: the
+            # use must point at the local that was actually emitted for its definition.
+            materialized = _materialized_value_names(self).get(value)
+            if materialized is not None:
+                self.register_names[register] = materialized
+                return NameExpr(materialized)
+
         expression = original_ref_expr(self, register, pc)
         if not isinstance(expression, NameExpr):
             return expression
-        value = self.ssa.value_at_use(pc, register)
         if value is None:
             return expression
 
-        # An actual emitted local is already the semantics-preserving SSA destruction
-        # result. Never replace it by replaying its defining GETTABLE* expression.
-        if value in _materialized_value_names(self):
-            return expression
         if not _access_value_can_reconstruct(self, value, pc):
             return expression
         reconstructed = _access_expression_for_value(self, value)

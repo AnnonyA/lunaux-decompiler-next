@@ -120,6 +120,8 @@ def test_stable_value_expression_reconstructs_nested_table_access_chain() -> Non
     consumer = _instruction(3, "ADD")
 
     class FakeSSA:
+        phis = ()
+
         def value_at_use(self, pc: int, register: int) -> SSAValue | None:
             if (pc, register) == (1, 0):
                 return root

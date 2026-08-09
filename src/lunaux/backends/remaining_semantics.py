@@ -12,7 +12,6 @@ from lunaux.backends.ast import (
     LiteralExpr,
     NameExpr,
     ensure_expr,
-    render_expression,
 )
 from lunaux.backends.compat_quality_safe import _SafeCompatibilityQualityFunctionLifter
 from lunaux.backends.full_corpus_semantics import _debug_value_names

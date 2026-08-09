@@ -87,6 +87,85 @@ def test_reconstructs_elided_field_access_from_stable_ssa_base() -> None:
     assert render_expression(expression) == "record.Stats"
 
 
+def test_stable_value_expression_reconstructs_nested_table_access_chain() -> None:
+    root = SSAValue(register=0, version=1, origin_pc=0, kind="instruction")
+    stats = SSAValue(register=1, version=1, origin_pc=1, kind="instruction")
+    score = SSAValue(register=2, version=1, origin_pc=2, kind="instruction")
+
+    root_instruction = _instruction(0, "NEWTABLE")
+    stats_instruction = DecodedInstruction(
+        pc=1,
+        word=15,
+        opcode=15,
+        name="GETTABLEKS",
+        a=1,
+        b=0,
+        c=0,
+        d=0,
+        e=0,
+        aux=0,
+    )
+    score_instruction = DecodedInstruction(
+        pc=2,
+        word=15,
+        opcode=15,
+        name="GETTABLEKS",
+        a=2,
+        b=1,
+        c=0,
+        d=0,
+        e=0,
+        aux=1,
+    )
+    consumer = _instruction(3, "ADD")
+
+    class FakeSSA:
+        def value_at_use(self, pc: int, register: int) -> SSAValue | None:
+            if (pc, register) == (1, 0):
+                return root
+            if (pc, register) == (2, 1):
+                return stats
+            return None
+
+    class FakeLifter:
+        def __init__(self) -> None:
+            self.ssa = FakeSSA()
+            self.proto = SimpleNamespace(locals=(), num_params=0)
+            self.instruction_by_pc = {
+                0: root_instruction,
+                1: stats_instruction,
+                2: score_instruction,
+                3: consumer,
+            }
+            self.instructions = (
+                root_instruction,
+                stats_instruction,
+                score_instruction,
+                consumer,
+            )
+            self.analysis = SimpleNamespace(
+                block_for_pc={0: 0, 1: 0, 2: 0, 3: 0},
+            )
+            self.inline_expressions: dict[SSAValue, NameExpr] = {}
+            self.declared = {"data"}
+            self._remaining_materialized_value_names = {root: "data"}
+
+        def _forced_value_names(self) -> dict[SSAValue, str]:
+            return {}
+
+        def _table_key(self, instruction: DecodedInstruction) -> str:
+            return "Stats" if instruction.pc == 1 else "Score"
+
+    expression = _stable_value_expression(  # type: ignore[arg-type]
+        FakeLifter(),
+        score,
+        3,
+        frozenset(),
+    )
+    assert expression is not None
+    assert render_expression(expression) == "data.Stats.Score"
+
+
 def test_repairs_collapsed_gettable_definition_at_its_origin() -> None:
     base = SSAValue(register=0, version=1, origin_pc=0, kind="instruction")
     field = SSAValue(register=1, version=1, origin_pc=1, kind="instruction")

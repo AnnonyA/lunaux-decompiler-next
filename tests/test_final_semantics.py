@@ -16,10 +16,13 @@ def test_extended_boolean_ladder_inlines_scalar_temporary() -> None:
 end
 print(selected, left, right)
 """
+    expected = (
+        "local selected = (left and not (right)) or "
+        "(right and ((10) < value))\n"
+        "print(selected, left, right)\n"
+    )
 
-    assert _rewrite_extended_boolean_ladders(source) == """local selected = (left and not (right)) or (right and ((10) < value))
-print(selected, left, right)
-"""
+    assert _rewrite_extended_boolean_ladders(source) == expected
 
 
 def test_extended_boolean_ladder_rejects_effectful_temporary() -> None:

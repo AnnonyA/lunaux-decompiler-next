@@ -214,10 +214,13 @@ def _stable_value_expression(
         value,
         consumer_pc,
     ):
+        # _access_expression_for_value owns the cycle guard for this exact node.
+        # Passing next_seen here pre-marks value and makes every nested table access
+        # self-reject before its historical SSA operands can be reconstructed.
         return _access_expression_for_value(
             lifter,
             value,
-            next_seen,
+            seen,
         )
     return None
 

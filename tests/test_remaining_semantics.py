@@ -7,7 +7,10 @@ from lunaux.backends.opcodes import DecodedInstruction
 from lunaux.backends.remaining_semantics import (
     _access_expression_for_value,
     _access_value_can_reconstruct,
+    _fresh_lifetime_name,
     _nonconflicting_generated_name,
+    _repair_access_definition_expression,
+    _rewrite_short_circuit_boolean_ladders,
     _stable_value_expression,
 )
 from lunaux.backends.ssa import SSAValue
@@ -84,6 +87,51 @@ def test_reconstructs_elided_field_access_from_stable_ssa_base() -> None:
     assert render_expression(expression) == "record.Stats"
 
 
+def test_repairs_collapsed_gettable_definition_at_its_origin() -> None:
+    base = SSAValue(register=0, version=1, origin_pc=0, kind="instruction")
+    field = SSAValue(register=1, version=1, origin_pc=1, kind="instruction")
+    base_instruction = _instruction(0, "NEWTABLE")
+    field_instruction = DecodedInstruction(
+        pc=1,
+        word=15,
+        opcode=15,
+        name="GETTABLEKS",
+        a=1,
+        b=0,
+        c=0,
+        d=0,
+        e=0,
+        aux=0,
+    )
+
+    class FakeSSA:
+        def value_at_use(self, pc: int, register: int) -> SSAValue | None:
+            if pc == 1 and register == 0:
+                return base
+            return None
+
+    class FakeLifter:
+        def __init__(self) -> None:
+            self.ssa = FakeSSA()
+            self.instruction_by_pc = {
+                0: base_instruction,
+                1: field_instruction,
+            }
+            self.inline_expressions: dict[SSAValue, NameExpr] = {}
+            self.declared = {"record"}
+            self._remaining_materialized_value_names = {base: "record"}
+
+        def _table_key(self, _instruction: DecodedInstruction) -> str:
+            return "Stats"
+
+    expression = _repair_access_definition_expression(  # type: ignore[arg-type]
+        FakeLifter(),
+        field,
+        NameExpr("Stats"),
+    )
+    assert render_expression(expression) == "record.Stats"
+
+
 def test_materialized_access_alias_wins_over_replaying_its_origin() -> None:
     field = SSAValue(register=1, version=1, origin_pc=1, kind="instruction")
     lifter = SimpleNamespace(
@@ -139,3 +187,59 @@ def test_table_access_replay_rejects_intervening_mutation() -> None:
     )
 
     assert not _access_value_can_reconstruct(lifter, value, 3)  # type: ignore[arg-type]
+
+
+def test_boolean_ladder_rewrite_hoists_debug_local_and_restores_edges() -> None:
+    source = """local flag7
+if left then
+    local selected = not right
+    if not selected then
+    end
+    selected = right
+    if selected then
+        selected = 10 < value
+    end
+end
+print(selected, left, right)
+"""
+
+    assert _rewrite_short_circuit_boolean_ladders(source) == """local flag7
+local selected = (left and not (right)) or (right and (10 < value))
+print(selected, left, right)
+"""
+
+
+def test_boolean_ladder_rewrite_reuses_predeclared_result() -> None:
+    source = """local flag7
+if flag then
+    flag7 = not flag4
+    if not flag7 then
+    end
+    flag7 = flag4
+    if flag7 then
+        flag7 = 10 < value
+    end
+end
+"""
+
+    assert _rewrite_short_circuit_boolean_ladders(source) == """local flag7
+flag7 = (flag and not (flag4)) or (flag4 and (10 < value))
+"""
+
+
+def test_capture_lifetime_name_never_reuses_reference_identifier() -> None:
+    class FakeLifter:
+        def __init__(self) -> None:
+            self.declared = {"capturedValue", "value4"}
+            self.register_names = {3: "capturedValue"}
+            self._remaining_materialized_value_names: dict[SSAValue, str] = {}
+
+        def _forced_value_names(self) -> dict[SSAValue, str]:
+            return {}
+
+    name = _fresh_lifetime_name(  # type: ignore[arg-type]
+        FakeLifter(),
+        3,
+        frozenset({"capturedValue"}),
+    )
+    assert name == "value4_2"

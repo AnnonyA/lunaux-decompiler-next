@@ -1,0 +1,110 @@
++        _abc("RETURN", a=0, b=2),
++    )
++
++    output = decompile_module(_module(code), {}, "contiguous-setlist.luau")
++
++    assert "local value = {10, 20, 30, 40}" in output
++    assert "value[" not in output
++
++
++def test_real_toolchain_non_one_batch_shape_uses_semantic_start_index() -> None:
++    # Pinned v6/v11 compilers split large literals into 16-value batches with
++    # semantic AUX starts 1, 17, 33, ... .  Build the first two decoded batches
++    # directly so this decoder test remains independent of an external executable.
++    words = [_abc("NEWTABLE", a=0), 0]
++    for start_index in (1, 17):
++        words.extend(
++            _ad("LOADN", a=register, d=start_index + register - 1)
++            for register in range(1, 17)
++        )
++        words.extend((_abc("SETLIST", a=0, b=1, c=17), start_index))
++    words.append(_abc("RETURN", a=0, b=2))
++
++    output = decompile_module(_module(tuple(words)), {}, "non-one-setlist.luau")
++
++    expected = ", ".join(str(value) for value in range(1, 33))
++    assert f"local value = {{{expected}}}" in output
++    assert "value[17]" not in output
++
++
++def test_noncontiguous_setlist_batch_uses_conservative_fallback() -> None:
++    code = (
++        _abc("NEWTABLE", a=0),
++        0,
++        _ad("LOADN", a=1, d=10),
++        _ad("LOADN", a=2, d=20),
++        _abc("SETLIST", a=0, b=1, c=3),
++        1,
++        _ad("LOADN", a=1, d=40),
++        _ad("LOADN", a=2, d=50),
++        _abc("SETLIST", a=0, b=1, c=3),
++        4,
++        _abc("RETURN", a=0, b=2),
++    )
++
++    output = decompile_module(_module(code), {}, "noncontiguous-setlist.luau")
++
++    assert "local value = {10, 20}" in output
++    assert "value[4] = 40" in output
++    assert "value[5] = 50" in output
++    assert "value[3]" not in output
++
++
++def test_call_escape_flushes_table_and_preserves_legacy_fallback_indices() -> None:
++    constants = (LuauConstant("string", "observe", 3),)
++    code = (
++        _abc("NEWTABLE", a=0),
++        0,
++        _abc("GETGLOBAL", a=3),
++        0,
++        _abc("MOVE", a=4, b=0),
++        _abc("CALL", a=3, b=2, c=1),
++        _ad("LOADN", a=1, d=10),
++        _ad("LOADN", a=2, d=20),
++        _abc("SETLIST", a=0, b=1, c=3),
++        1,
++        _abc("RETURN", a=0, b=2),
++    )
++
++    output = decompile_module(_module(code, constants), {}, "escaped-setlist.luau")
++
++    assert "local value = {}" in output
++    assert "value[1] = 10" in output
++    assert "value[2] = 20" in output
++    assert "value[0]" not in output
++
++
++def test_reused_physical_register_does_not_merge_distinct_ssa_tables() -> None:
++    code = (
++        _abc("NEWTABLE", a=0),
++        0,
++        _ad("LOADN", a=1, d=10),
++        _abc("SETLIST", a=0, b=1, c=2),
++        1,
++        _abc("NEWTABLE", a=0),
++        0,
++        _ad("LOADN", a=1, d=20),
++        _abc("SETLIST", a=0, b=1, c=2),
++        1,
++        _abc("RETURN", a=0, b=2),
++    )
++
++    output = decompile_module(_module(code), {}, "register-reuse-setlist.luau")
++
++    assert "local value = {10}" in output
++    assert "value = {20}" in output
++    assert "{10, 20}" not in output
++
++
++def test_setlist_output_is_deterministic() -> None:
++    payload = base64.b64decode(_REAL_LEGACY_TABLES[6])
++    outputs = {
++        ReconstructedBackend().decompile(payload, {}, "deterministic-setlist.luac")
++        for _ in range(5)
++    }
++
++    assert len(outputs) == 1
+diff --git a/README.md b/README.md
+index 4a1dbc4..72676e2 100644
+--- a/README.md
++++ b/README.md

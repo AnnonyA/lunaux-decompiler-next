@@ -37,6 +37,9 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
     def _legacy_ssa_identity_enabled(self) -> bool:
         return self.module.version <= 6 and not self.proto.locals
 
+    def _ssa_expression_folding_enabled(self) -> bool:
+        return False
+
     def _entry_parameter_names(self) -> dict[int, str]:
         cached = getattr(self, "_compat_entry_parameter_names", None)
         if cached is not None:
@@ -158,9 +161,7 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
 
     def _legacy_instruction_stem(self, value: SSAValue) -> str:
         instruction = (
-            self.instruction_by_pc.get(value.origin_pc)
-            if value.origin_pc is not None
-            else None
+            self.instruction_by_pc.get(value.origin_pc) if value.origin_pc is not None else None
         )
         if instruction is None:
             return "value"
@@ -239,9 +240,7 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
                     if preferred == upvalue_name:
                         preferred = f"{preferred}Value"
             owner = self._legacy_name_owners().get(preferred)
-            if owner in {None, key} and (
-                preferred not in self.declared or owner == key
-            ):
+            if owner in {None, key} and (preferred not in self.declared or owner == key):
                 names[key] = preferred
                 self._legacy_name_owners()[preferred] = key
                 return preferred
@@ -287,14 +286,8 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
                 for phi in self.ssa.phis:
                     if phi.block != loop.header:
                         continue
-                    outside = any(
-                        predecessor not in loop.body
-                        for predecessor in phi.operands
-                    )
-                    inside = any(
-                        predecessor in loop.body
-                        for predecessor in phi.operands
-                    )
+                    outside = any(predecessor not in loop.body for predecessor in phi.operands)
+                    inside = any(predecessor in loop.body for predecessor in phi.operands)
                     if outside and inside:
                         loop_roots.add(roots.get(phi.result, phi.result))
             return {
@@ -492,7 +485,9 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
                 # Preserve explicit statement materialization when semicolons are
                 # requested; the public benchmark uses the normal no-semicolon mode.
                 inline_single_use_temporaries=(
-                    self._legacy_ssa_identity_enabled() and not self.options.semicolons
+                    (self._legacy_ssa_identity_enabled() or self._ssa_expression_folding_enabled())
+                    and self.options.inline_single_use_temporaries
+                    and not self.options.semicolons
                 ),
                 smart_variable_names=False,
                 infer_types=False,

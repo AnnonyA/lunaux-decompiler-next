@@ -73,9 +73,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
                             base_register=base_register,
                             kind=kind,  # type: ignore[arg-type]
                             value=pending,
-                            prefix_registers=tuple(
-                                range(base_register, pending.base_register)
-                            ),
+                            prefix_registers=tuple(range(base_register, pending.base_register)),
                         )
                         consumed = True
 
@@ -100,10 +98,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
                     pending = None
                 elif pending is not None:
                     access = self.analysis.register_accesses[instruction.pc]
-                    if any(
-                        register >= pending.base_register
-                        for register in access.definitions
-                    ):
+                    if any(register >= pending.base_register for register in access.definitions):
                         pending = None
 
         cached_plan = (values, uses)
@@ -118,11 +113,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
 
     def _consumer_for(self, value: SSAMultiValue) -> SSAMultiUse | None:
         return next(
-            (
-                use
-                for use in self._persistent_multret_plan()[1].values()
-                if use.value == value
-            ),
+            (use for use in self._persistent_multret_plan()[1].values() if use.value == value),
             None,
         )
 
@@ -185,9 +176,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
                     if predecessor not in loop.body
                 ]
                 inside = [
-                    value
-                    for predecessor, value in phi.operands.items()
-                    if predecessor in loop.body
+                    value for predecessor, value in phi.operands.items() if predecessor in loop.body
                 ]
                 if not outside or not inside:
                     continue
@@ -400,9 +389,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
         cursor = self.instruction_index_by_pc[instruction.pc] + 1
         captures = self.instructions[cursor : cursor + child.num_upvalues]
         self_recursive = any(
-            capture.name == "CAPTURE"
-            and capture.a in {0, 1}
-            and capture.b == instruction.a
+            capture.name == "CAPTURE" and capture.a in {0, 1} and capture.b == instruction.a
             for capture in captures
         )
         if self_recursive:
@@ -450,20 +437,22 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
             return super()._call_expression(instruction)
 
         self._multret_expressions().pop(use.value, None)
+        frame = self.call_frames.at(instruction.pc)
         if instruction.a in self.pending_namecalls:
             base, method = self.pending_namecalls.pop(instruction.a)
-            fixed = tuple(
-                self._ref_expr(register, instruction.pc)
-                for register in use.prefix_registers
-                if register >= instruction.a + 2
+            registers = (
+                frame.argument_registers
+                if frame is not None
+                else tuple(
+                    register for register in use.prefix_registers if register >= instruction.a + 2
+                )
             )
+            fixed = tuple(self._ref_expr(register, instruction.pc) for register in registers)
             return MethodCallExpr(base, method, (*fixed, tail))
 
         function = self._ref_expr(instruction.a, instruction.pc)
-        fixed = tuple(
-            self._ref_expr(register, instruction.pc)
-            for register in use.prefix_registers
-        )
+        registers = frame.argument_registers if frame is not None else use.prefix_registers
+        fixed = tuple(self._ref_expr(register, instruction.pc) for register in registers)
         return CallExpr(function, (*fixed, tail))
 
     def _handle_loop_prep(self, instruction: DecodedInstruction) -> bool:

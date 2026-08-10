@@ -227,6 +227,17 @@ class Assignment(Statement):
 
 
 @dataclass(frozen=True, slots=True)
+class CompoundAssignment(Statement):
+    target: Expr
+    operator: str
+    value: Expr
+
+    def __post_init__(self) -> None:
+        if self.operator not in {"+", "-", "*", "/", "//", "%", "^", ".."}:
+            raise ValueError(f"unsupported Luau compound operator: {self.operator}")
+
+
+@dataclass(frozen=True, slots=True)
 class ReturnStatement(Statement):
     values: tuple[Expr, ...] = ()
 
@@ -408,6 +419,32 @@ def render_expression(expression: Expr) -> str:
     raise TypeError(f"unsupported expression node: {type(expression).__name__}")
 
 
+def render_statement(statement: Statement) -> str:
+    if isinstance(statement, ExpressionStatement):
+        return render_expression(statement.expression)
+    if isinstance(statement, Assignment):
+        targets = ", ".join(render_expression(item) for item in statement.targets)
+        values = ", ".join(render_expression(item) for item in statement.values)
+        prefix = "local " if statement.local else ""
+        return f"{prefix}{targets} = {values}"
+    if isinstance(statement, CompoundAssignment):
+        return (
+            f"{render_expression(statement.target)} "
+            f"{statement.operator}= {render_expression(statement.value)}"
+        )
+    if isinstance(statement, ReturnStatement):
+        if not statement.values:
+            return "return"
+        return "return " + ", ".join(render_expression(item) for item in statement.values)
+    if isinstance(statement, BreakStatement):
+        return "break"
+    if isinstance(statement, ContinueStatement):
+        return "continue"
+    if isinstance(statement, RawStatement):
+        return statement.text
+    raise TypeError(f"statement requires block-aware rendering: {type(statement).__name__}")
+
+
 class LuauPrinter:
     def __init__(self, *, semicolons: bool = False, indent: str = "    ") -> None:
         self.semicolons = semicolons
@@ -428,10 +465,10 @@ class LuauPrinter:
             self._line(render_expression(statement.expression), statement=True)
             return
         if isinstance(statement, Assignment):
-            targets = ", ".join(render_expression(item) for item in statement.targets)
-            values = ", ".join(render_expression(item) for item in statement.values)
-            prefix = "local " if statement.local else ""
-            self._line(f"{prefix}{targets} = {values}", statement=True)
+            self._line(render_statement(statement), statement=True)
+            return
+        if isinstance(statement, CompoundAssignment):
+            self._line(render_statement(statement), statement=True)
             return
         if isinstance(statement, ReturnStatement):
             if statement.values:

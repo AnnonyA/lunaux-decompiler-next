@@ -102,11 +102,7 @@ def _debug_value_names(
                 if name is not None:
                     candidates[value].add(name)
 
-    result = {
-        value: next(iter(names))
-        for value, names in candidates.items()
-        if len(names) == 1
-    }
+    result = {value: next(iter(names)) for value, names in candidates.items() if len(names) == 1}
 
     parent: dict[SSAValue, SSAValue] = {}
 
@@ -136,11 +132,7 @@ def _debug_value_names(
     for value in tuple(parent):
         components[find(value)].append(value)
     for members in components.values():
-        names = {
-            name
-            for member in members
-            for name in candidates.get(member, ())
-        }
+        names = {name for member in members for name in candidates.get(member, ())}
         if len(names) != 1:
             continue
         name = next(iter(names))
@@ -221,6 +213,19 @@ def _safe_inline_simple_aliases(lines: list[str]) -> list[str]:
 
     result = list(lines)
     aliases: list[tuple[int, str, str]] = []
+
+    def scope_end(index: int, indent: str) -> int:
+        if not indent:
+            return len(result)
+        for following in range(index + 1, len(result)):
+            candidate = result[following]
+            if not candidate.strip():
+                continue
+            candidate_indent = candidate[: len(candidate) - len(candidate.lstrip())]
+            if len(candidate_indent) < len(indent):
+                return following
+        return len(result)
+
     for index, line in enumerate(result):
         match = quality._SIMPLE_ALIAS.fullmatch(line)
         if match is None:
@@ -229,9 +234,10 @@ def _safe_inline_simple_aliases(lines: list[str]) -> list[str]:
         rhs = match.group("rhs")
         if "." not in rhs and lhs != rhs:
             continue
+        end = scope_end(index, match.group("indent"))
         assigned_later = any(
             re.match(rf"^\s*{re.escape(lhs)}\s*=", candidate)
-            for candidate in result[index + 1 :]
+            for candidate in result[index + 1 : end]
         )
         if assigned_later:
             continue
@@ -248,7 +254,9 @@ def _safe_inline_simple_aliases(lines: list[str]) -> list[str]:
             rhs = current.group("rhs")
         if lhs == rhs:
             continue
-        for following in range(index + 1, len(result)):
+        indent_match = quality._SIMPLE_ALIAS.fullmatch(result[index])
+        indent = indent_match.group("indent") if indent_match is not None else ""
+        for following in range(index + 1, scope_end(index, indent)):
             if following in removed:
                 continue
             result[following] = _replace_identifier_reference(
@@ -256,11 +264,7 @@ def _safe_inline_simple_aliases(lines: list[str]) -> list[str]:
                 lhs,
                 rhs,
             )
-    return [
-        line
-        for index, line in enumerate(result)
-        if index not in removed
-    ]
+    return [line for index, line in enumerate(result) if index not in removed]
 
 
 def _numeric_for_visible_register(
@@ -360,11 +364,7 @@ def install_full_corpus_semantics_fix() -> None:
             self.register_names[register] = debug_name
             return debug_name
 
-        if (
-            register < self.proto.num_params
-            and value is not None
-            and value.kind == "entry"
-        ):
+        if register < self.proto.num_params and value is not None and value.kind == "entry":
             existing = self.register_names.get(register)
             if existing is not None:
                 return existing
@@ -389,10 +389,7 @@ def install_full_corpus_semantics_fix() -> None:
             # the table value is a use, not a definition, so recover its SSA identity.
             debug_value = self.ssa.value_at_use(pc, register)
 
-        if (
-            debug_value is not None
-            and debug_value not in self._captured_reference_names()
-        ):
+        if debug_value is not None and debug_value not in self._captured_reference_names():
             debug_name = _debug_value_names(self).get(debug_value)
             if debug_name is not None:
                 self._forced_value_names()[debug_value] = debug_name

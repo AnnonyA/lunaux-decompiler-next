@@ -10,9 +10,7 @@ _ATOMIC_RHS = re.compile(
     r"^(?:nil|true|false|-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|"
     r"[A-Za-z_][A-Za-z0-9_]*)$"
 )
-_ASSIGNMENT = re.compile(
-    r"^(?P<lhs>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<rhs>.+?)\s*$"
-)
+_ASSIGNMENT = re.compile(r"^(?:local\s+)?(?P<lhs>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<rhs>.+?)\s*$")
 
 
 def _identifier_occurs(text: str, name: str) -> bool:
@@ -22,9 +20,7 @@ def _identifier_occurs(text: str, name: str) -> bool:
 def _replace_identifier(text: str, name: str, replacement: str) -> str:
     """Replace a plain identifier in a condition while preserving field selectors."""
 
-    pattern = re.compile(
-        rf"(?<![A-Za-z0-9_.:]){re.escape(name)}(?![A-Za-z0-9_])"
-    )
+    pattern = re.compile(rf"(?<![A-Za-z0-9_.:]){re.escape(name)}(?![A-Za-z0-9_])")
     return pattern.sub(replacement, text)
 
 
@@ -53,9 +49,7 @@ def _rewrite_terminal_repeat_guard_temporaries(lines: list[str]) -> list[str]:
             index += 1
             continue
 
-        outer_indent = result[index][
-            : len(result[index]) - len(result[index].lstrip())
-        ]
+        outer_indent = result[index][: len(result[index]) - len(result[index].lstrip())]
         inner_indent = outer_indent + "    "
         candidate = outer_end - 1
         while candidate > index and not result[candidate].strip():
@@ -87,9 +81,7 @@ def _rewrite_terminal_repeat_guard_temporaries(lines: list[str]) -> list[str]:
         body = result[while_start + 1 : candidate]
         substitutions: dict[str, str] = {}
         substitution_used: set[str] = set()
-        exit_conditions = [
-            quality._simplify_not_comparisons(f"not ({header.group('cond')})")
-        ]
+        exit_conditions = [quality._simplify_not_comparisons(f"not ({header.group('cond')})")]
         guard_count = 0
         cursor = 0
         valid = True
@@ -136,11 +128,7 @@ def _rewrite_terminal_repeat_guard_temporaries(lines: list[str]) -> list[str]:
             guard_count += 1
             cursor += 3
 
-        if (
-            not valid
-            or guard_count == 0
-            or set(substitutions) != substitution_used
-        ):
+        if not valid or guard_count == 0 or set(substitutions) != substitution_used:
             index = outer_end + 1
             continue
 

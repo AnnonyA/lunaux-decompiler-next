@@ -40,6 +40,11 @@ class _SafeCompatibilityQualityFunctionLifter(_CompatibilityQualityFunctionLifte
     def _legacy_ssa_identity_enabled(self) -> bool:
         return False
 
+    def _ssa_expression_folding_enabled(self) -> bool:
+        # Stage 3 folds exact SSA values. It does not coalesce physical-register
+        # lifetimes, so the legacy compatibility safety boundary remains intact.
+        return True
+
     def _legacy_stripped(self) -> bool:
         return self.module.version <= 6 and not self.proto.locals
 
@@ -47,11 +52,7 @@ class _SafeCompatibilityQualityFunctionLifter(_CompatibilityQualityFunctionLifte
         cached = getattr(self, "_safe_phi_operand_values", None)
         if cached is not None:
             return cast(frozenset[SSAValue], cached)
-        values = frozenset(
-            operand
-            for phi in self.ssa.phis
-            for operand in phi.operands.values()
-        )
+        values = frozenset(operand for phi in self.ssa.phis for operand in phi.operands.values())
         self._safe_phi_operand_values = values
         return values
 

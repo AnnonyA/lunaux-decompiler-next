@@ -5,7 +5,13 @@ import re
 import lunaux.backends.quality_lifter as quality
 from lunaux.backends.ast import Expr, NameExpr, ensure_expr
 from lunaux.backends.compat_quality_safe import _SafeCompatibilityQualityFunctionLifter
-from lunaux.backends.remaining_semantics import _stable_value_expression
+from lunaux.backends.remaining_semantics import (
+    _ACCESS_OPS,
+    _access_expression_for_value,
+    _access_value_can_reconstruct,
+    _stable_value_expression,
+)
+from lunaux.backends.ssa import SSAValue
 
 _INSTALLED = False
 _SCALAR_LITERAL = re.compile(
@@ -25,6 +31,49 @@ def _replace_identifier(expression: str, name: str, replacement: str) -> str:
     """Replace a standalone identifier in a generated pure expression."""
 
     return re.sub(rf"(?<![A-Za-z0-9_.:]){re.escape(name)}(?![A-Za-z0-9_])", replacement, expression)
+
+
+def _access_provenance_expression(
+    lifter: _SafeCompatibilityQualityFunctionLifter,
+    value: SSAValue,
+    consumer_pc: int,
+    seen: frozenset[SSAValue] = frozenset(),
+) -> Expr | None:
+    """Recover the exact table-access provenance behind a MOVE chain.
+
+    Materialized names normally outrank replay because they are the lexical identity that
+    was actually emitted. A MOVE can however be assigned that *same* name, producing a
+    self alias such as ``local Stats = Stats``. In that one shape the lexical name hides
+    the value's real provenance rather than preserving it.
+
+    Follow only exact SSA MOVE edges until an actual GETTABLE* producer is reached, then
+    reconstruct that access only when the existing same-block/no-hazard proof says replay
+    at the MOVE is safe. This preserves the safety boundary that removed the broad MOVE
+    replay regressions while still recovering the table path that the self alias erased.
+    """
+
+    if value in seen or value.kind != "instruction" or value.origin_pc is None:
+        return None
+    instruction = lifter.instruction_by_pc.get(value.origin_pc)
+    if instruction is None:
+        return None
+
+    if instruction.name == "MOVE":
+        source = lifter.ssa.value_at_use(instruction.pc, instruction.b)
+        if source is None:
+            return None
+        return _access_provenance_expression(
+            lifter,
+            source,
+            consumer_pc,
+            seen | frozenset({value}),
+        )
+
+    if instruction.name not in _ACCESS_OPS:
+        return None
+    if not _access_value_can_reconstruct(lifter, value, consumer_pc):
+        return None
+    return _access_expression_for_value(lifter, value, seen)
 
 
 def _repair_move_source_expression(
@@ -62,9 +111,17 @@ def _repair_move_source_expression(
     if source is None:
         return rendered
     stable = _stable_value_expression(lifter, source, pc, frozenset())
-    if stable is None or stable == rendered:
-        return rendered
-    return stable
+    if stable is not None and stable != rendered:
+        return stable
+
+    # A materialized source can legitimately resolve to the same identifier as the MOVE
+    # destination. If that source is really a GETTABLE* (possibly behind more MOVEs), the
+    # resulting self alias will be deleted by cleanup and leave later uses undefined.
+    # Bypass the materialized name only for this exact proven access provenance.
+    provenance = _access_provenance_expression(lifter, source, pc)
+    if provenance is not None and provenance != rendered:
+        return provenance
+    return rendered
 
 
 def _rewrite_extended_boolean_ladders(text: str) -> str:

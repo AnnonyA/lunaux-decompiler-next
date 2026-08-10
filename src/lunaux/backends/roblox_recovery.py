@@ -5,12 +5,15 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from lunaux.backends.bytecode import LuauBytecodeModule, LuauProto
 from lunaux.backends.opcodes import DecodedInstruction, decode_words
 from lunaux.backends.roblox_api import callback_parameter_types
 from lunaux.backends.ssa import SSAInstruction, SSAProgram, SSAValue, build_ssa
+
+if TYPE_CHECKING:
+    from lunaux.backends.module_analysis import ModuleAnalysis
 
 _EVENT_METHODS: Final[frozenset[str]] = frozenset({"Connect", "ConnectParallel", "Once", "Wait"})
 _METHOD_CALLBACK_ARGUMENTS: Final[dict[str, tuple[int, ...]]] = {
@@ -435,14 +438,22 @@ def collect_inline_only_proto_ids(
     module: LuauBytecodeModule,
     *,
     enabled: bool,
+    module_analysis: ModuleAnalysis | None = None,
 ) -> frozenset[int]:
     if not enabled:
         return frozenset()
+    if module_analysis is not None:
+        module_analysis.require_module(module)
     references: Counter[int] = Counter()
     inline_references: Counter[int] = Counter()
     for proto in module.protos:
-        instructions = tuple(decode_words(proto.code))
-        program = build_ssa(instructions, len(proto.code))
+        if module_analysis is None:
+            instructions = tuple(decode_words(proto.code))
+            program = build_ssa(instructions, len(proto.code))
+        else:
+            analyzed = module_analysis.for_proto(proto)
+            instructions = analyzed.instructions
+            program = analyzed.ssa
         plan = plan_inline_callbacks(
             module,
             proto,

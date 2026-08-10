@@ -47,6 +47,11 @@ from lunaux.backends.contextual_functions import (
     plan_contextual_functions,
 )
 from lunaux.backends.inlining import plan_expression_inlining
+from lunaux.backends.module_analysis import (
+    ModuleAnalysis,
+    SymbolAnalysisConfig,
+    build_module_analysis,
+)
 from lunaux.backends.opcodes import (
     DecodedInstruction,
     builtin_name,
@@ -464,6 +469,7 @@ class _FunctionLifter:
         parameter_name_overrides: dict[int, str] | None = None,
         parameter_type_overrides: dict[int, str] | None = None,
         return_type_override: str | None = None,
+        module_analysis: ModuleAnalysis | None = None,
     ) -> None:
         self.module = module
         self.proto = proto
@@ -475,19 +481,28 @@ class _FunctionLifter:
         self.parameter_name_overrides = parameter_name_overrides or {}
         self.parameter_type_overrides = parameter_type_overrides or {}
         self.return_type_override = return_type_override
-        self.scope_tree = build_scope_tree(proto)
+        self.module_analysis = module_analysis
+        if module_analysis is None:
+            self.scope_tree = build_scope_tree(proto)
+            self.instructions = list(decode_words(proto.code))
+            self.analysis = analyze_control_flow(self.instructions, len(proto.code))
+            self.ssa = build_ssa(
+                self.instructions,
+                len(proto.code),
+                analysis=self.analysis,
+            )
+        else:
+            module_analysis.require_module(module)
+            analyzed = module_analysis.for_proto(proto)
+            self.scope_tree = analyzed.scope_tree
+            self.instructions = list(analyzed.instructions)
+            self.analysis = analyzed.control_flow
+            self.ssa = analyzed.ssa
         self.register_names: dict[int, str] = {}
         self.declared: set[str] = set()
         self.pending_namecalls: dict[int, tuple[Expr, str]] = {}
         self.block_closures: dict[int, list[str]] = defaultdict(list)
         self.else_transitions: dict[int, int] = {}
-        self.instructions = list(decode_words(proto.code))
-        self.analysis = analyze_control_flow(self.instructions, len(proto.code))
-        self.ssa = build_ssa(
-            self.instructions,
-            len(proto.code),
-            analysis=self.analysis,
-        )
         self.callback_plan = plan_inline_callbacks(
             module,
             proto,
@@ -516,7 +531,18 @@ class _FunctionLifter:
             tuple[Expr, frozenset[SSAValue], int],
         ] = {}
         self.symbols: SymbolRecovery | None = None
-        if options.smart_variable_names or options.infer_types or options.show_recovered_symbols:
+        symbol_config = SymbolAnalysisConfig(
+            enabled=(
+                options.smart_variable_names
+                or options.infer_types
+                or options.show_recovered_symbols
+            ),
+            flow_sensitive_types=options.flow_sensitive_types,
+            roblox_api_types=options.roblox_api_types,
+        )
+        if module_analysis is not None:
+            self.symbols = module_analysis.symbols_for(proto, symbol_config)
+        elif symbol_config.enabled:
             self.symbols = build_symbol_recovery(
                 module,
                 proto,
@@ -532,6 +558,7 @@ class _FunctionLifter:
                 self.instructions,
                 self.ssa,
                 recover_metatable_classes=options.recover_metatable_classes,
+                module_analysis=module_analysis,
             )
             if options.recover_classes
             else ClassRecoveryPlan.empty()
@@ -544,6 +571,7 @@ class _FunctionLifter:
             self.class_plan,
             callback_plan=self.callback_plan,
             enabled=options.contextual_functions,
+            module_analysis=module_analysis,
         )
         self.inline_plan = plan_expression_inlining(self.ssa, proto)
         self.inline_expressions: dict[SSAValue, Expr] = {}
@@ -1470,6 +1498,7 @@ class _FunctionLifter:
             parameter_name_overrides=parameter_name_overrides,
             parameter_type_overrides=parameter_type_overrides,
             return_type_override=context.return_type if context is not None else None,
+            module_analysis=self.module_analysis,
         ).lift(as_function=True, anonymous_function=True)
         return (
             RawExpr(callback_out.render().strip(), Precedence.ATOM),
@@ -1845,6 +1874,7 @@ class _FunctionLifter:
                 parameter_name_overrides=dict(method.parameter_names),
                 parameter_type_overrides=dict(method.parameter_types),
                 return_type_override=method.return_type,
+                module_analysis=self.module_analysis,
             ).lift(
                 as_function=True,
                 function_name_override=method_name,
@@ -2234,6 +2264,7 @@ def decompile_module(
     filename: str | None,
 ) -> str:
     resolved = _Options.from_backend(options)
+    module_analysis = build_module_analysis(module)
     out = _Emitter(resolved.semicolons)
     label = filename or "<bytecode>"
     out.line(f"-- LunaUX Next reconstructed output for {label}")
@@ -2256,11 +2287,13 @@ def decompile_module(
     inline_only_proto_ids = collect_inline_only_proto_ids(
         module,
         enabled=resolved.inline_roblox_callbacks,
+        module_analysis=module_analysis,
     )
     class_method_proto_ids = (
         collect_class_method_proto_ids(
             module,
             recover_metatable_classes=resolved.recover_metatable_classes,
+            module_analysis=module_analysis,
         )
         if resolved.recover_classes
         else frozenset()
@@ -2269,14 +2302,14 @@ def decompile_module(
         module,
         recover_metatable_classes=resolved.recover_metatable_classes,
         enabled=resolved.contextual_functions,
+        module_analysis=module_analysis,
     )
-    main_instructions = tuple(decode_words(module.main_proto.code))
-    main_ssa = build_ssa(main_instructions, len(module.main_proto.code))
+    main_analysis = module_analysis.for_proto(module.main_proto)
     roblox_report = analyze_roblox_recovery(
         module,
         module.main_proto,
-        main_instructions,
-        main_ssa,
+        main_analysis.instructions,
+        main_analysis.ssa,
     )
     if resolved.recover_roblox_events and roblox_report.events:
         out.line("-- Roblox events: " + ", ".join(item.display for item in roblox_report.events))
@@ -2316,6 +2349,7 @@ def decompile_module(
                 dict(context.parameter_types) if context is not None else None
             ),
             return_type_override=context.return_type if context is not None else None,
+            module_analysis=module_analysis,
         ).lift(
             as_function=True,
             function_name_override=(
@@ -2334,6 +2368,7 @@ def decompile_module(
         resolved,
         out,
         inline_only_proto_ids=inline_only_proto_ids,
+        module_analysis=module_analysis,
     ).lift(as_function=False)
     return out.render()
 

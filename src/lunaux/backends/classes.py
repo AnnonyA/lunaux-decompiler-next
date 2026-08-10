@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from lunaux.backends.bytecode import (
     ClassShapeConstant,
@@ -13,6 +13,9 @@ from lunaux.backends.bytecode import (
 )
 from lunaux.backends.opcodes import DecodedInstruction, decode_words
 from lunaux.backends.ssa import SSAProgram, SSAValue, build_ssa
+
+if TYPE_CHECKING:
+    from lunaux.backends.module_analysis import ModuleAnalysis
 
 ClassMethodKind = Literal[
     "constructor",
@@ -247,10 +250,14 @@ def _table_write(
     return None, None, None
 
 
-def _first_parameter_is_receiver(proto: LuauProto) -> bool:
+def _first_parameter_is_receiver(
+    proto: LuauProto,
+    instructions: Sequence[DecodedInstruction] | None = None,
+) -> bool:
     if proto.num_params == 0:
         return False
-    for instruction in decode_words(proto.code):
+    resolved_instructions = instructions if instructions is not None else decode_words(proto.code)
+    for instruction in resolved_instructions:
         if instruction.name in {"GETTABLE", "GETTABLEKS", "GETUDATAKS", "GETTABLEN"}:
             if instruction.b == 0:
                 return True
@@ -262,12 +269,16 @@ def _first_parameter_is_receiver(proto: LuauProto) -> bool:
     return False
 
 
-def _method_kind(name: str, child: LuauProto) -> ClassMethodKind:
+def _method_kind(
+    name: str,
+    child: LuauProto,
+    instructions: Sequence[DecodedInstruction] | None = None,
+) -> ClassMethodKind:
     if name in {"new", "create"}:
         return "constructor"
     if name.startswith("__"):
         return "metamethod"
-    if _first_parameter_is_receiver(child):
+    if _first_parameter_is_receiver(child, instructions):
         return "instance_method"
     return "static_method"
 
@@ -324,9 +335,13 @@ def _method_context(
     )
 
 
-def _properties_from_method(proto: LuauProto) -> frozenset[str]:
+def _properties_from_method(
+    proto: LuauProto,
+    instructions: Sequence[DecodedInstruction] | None = None,
+) -> frozenset[str]:
     properties: set[str] = set()
-    for instruction in decode_words(proto.code):
+    resolved_instructions = instructions if instructions is not None else decode_words(proto.code)
+    for instruction in resolved_instructions:
         if instruction.name in {"GETTABLEKS", "SETTABLEKS"} and instruction.b == 0:
             key = _constant_string(proto, instruction.aux if instruction.aux is not None else -1)
             if key and not key.startswith("__"):
@@ -440,6 +455,7 @@ def _recover_bytecode_classes(
     program: SSAProgram,
     instruction_by_pc: Mapping[int, DecodedInstruction],
     instruction_index: Mapping[int, int],
+    module_analysis: ModuleAnalysis | None,
 ) -> tuple[dict[int, RecoveredClass], set[int], set[int]]:
     class_values: dict[SSAValue, ClassValueDetails] = {}
     for instruction in instructions:
@@ -482,7 +498,12 @@ def _recover_bytecode_classes(
         return_type: str | None = None
         if child_id is not None:
             child = module.protos[child_id]
-            kind = _method_kind(key, child)
+            child_instructions = (
+                module_analysis.for_proto(child).instructions
+                if module_analysis is not None
+                else None
+            )
+            kind = _method_kind(key, child, child_instructions)
             class_name = class_values[class_value][1]
             parameter_names, parameter_types, return_type = _method_context(
                 class_name,
@@ -555,6 +576,7 @@ def _recover_metatable_classes(
     program: SSAProgram,
     instruction_by_pc: Mapping[int, DecodedInstruction],
     instruction_index: Mapping[int, int],
+    module_analysis: ModuleAnalysis | None,
 ) -> tuple[dict[int, RecoveredClass], set[int], set[int]]:
     candidates: list[_MetatableCandidate] = []
     for instruction in instructions:
@@ -619,7 +641,12 @@ def _recover_metatable_classes(
             if child_id is None:
                 continue
             child = module.protos[child_id]
-            kind = _method_kind(key, child)
+            child_instructions = (
+                module_analysis.for_proto(child).instructions
+                if module_analysis is not None
+                else None
+            )
+            kind = _method_kind(key, child, child_instructions)
             parameter_names, parameter_types, return_type = _method_context(
                 candidate.name,
                 key,
@@ -638,7 +665,7 @@ def _recover_metatable_classes(
                     return_type=return_type,
                 )
             )
-            properties.update(_properties_from_method(child))
+            properties.update(_properties_from_method(child, child_instructions))
             local_skipped.add(instruction.pc)
             local_method_ids.add(child_id)
             if (
@@ -696,6 +723,7 @@ def recover_classes(
     program: SSAProgram,
     *,
     recover_metatable_classes: bool = True,
+    module_analysis: ModuleAnalysis | None = None,
 ) -> ClassRecoveryPlan:
     if not instructions:
         return ClassRecoveryPlan.empty()
@@ -708,6 +736,7 @@ def recover_classes(
         program,
         instruction_by_pc,
         instruction_index,
+        module_analysis,
     )
     if recover_metatable_classes:
         metatable_declarations, metatable_skipped, metatable_method_ids = (
@@ -718,6 +747,7 @@ def recover_classes(
                 program,
                 instruction_by_pc,
                 instruction_index,
+                module_analysis,
             )
         )
         for pc, declaration in metatable_declarations.items():
@@ -735,17 +765,26 @@ def collect_class_method_proto_ids(
     module: LuauBytecodeModule,
     *,
     recover_metatable_classes: bool = True,
+    module_analysis: ModuleAnalysis | None = None,
 ) -> frozenset[int]:
+    if module_analysis is not None:
+        module_analysis.require_module(module)
     result: set[int] = set()
     for proto in module.protos:
-        instructions = tuple(decode_words(proto.code))
-        program = build_ssa(instructions, len(proto.code))
+        if module_analysis is None:
+            instructions = tuple(decode_words(proto.code))
+            program = build_ssa(instructions, len(proto.code))
+        else:
+            analyzed = module_analysis.for_proto(proto)
+            instructions = analyzed.instructions
+            program = analyzed.ssa
         plan = recover_classes(
             module,
             proto,
             instructions,
             program,
             recover_metatable_classes=recover_metatable_classes,
+            module_analysis=module_analysis,
         )
         result.update(plan.method_proto_ids)
     return frozenset(result)

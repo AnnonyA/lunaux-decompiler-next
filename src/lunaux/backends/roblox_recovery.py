@@ -8,7 +8,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Literal
 
 from lunaux.backends.bytecode import LuauBytecodeModule, LuauProto
-from lunaux.backends.opcodes import DecodedInstruction, decode_words
+from lunaux.backends.opcodes import DecodedInstruction, decode_words, setlist_semantics
 from lunaux.backends.roblox_api import callback_parameter_types
 from lunaux.backends.ssa import SSAInstruction, SSAProgram, SSAValue, build_ssa
 
@@ -306,8 +306,12 @@ def _table_or_return_sink(
         "SETTABLEN",
     }:
         return register == instruction.a
-    if instruction.name == "SETLIST" and instruction.c > 1:
-        return register in range(instruction.b, instruction.b + instruction.c - 1)
+    semantics = setlist_semantics(instruction)
+    if semantics is not None and semantics.is_fixed:
+        return register in range(
+            semantics.first_value_register,
+            semantics.first_value_register + semantics.source_register_count,
+        )
     if instruction.name == "RETURN":
         if instruction.b == 0:
             return False

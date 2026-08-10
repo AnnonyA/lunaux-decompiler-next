@@ -12,7 +12,7 @@ from lunaux.backends.ast import (
     render_expression,
     source_expr,
 )
-from lunaux.backends.opcodes import DecodedInstruction
+from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
 from lunaux.backends.roblox_recovery import closure_proto_id
 from lunaux.backends.ssa import SSAMultiUse, SSAMultiValue, SSAValue
 from lunaux.backends.table_recovery import (
@@ -60,8 +60,10 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
                     consumer = ("arguments", instruction.a + 1)
                 elif instruction.name == "RETURN" and instruction.b == 0:
                     consumer = ("return", instruction.a)
-                elif instruction.name == "SETLIST" and instruction.c == 0:
-                    consumer = ("setlist", instruction.b)
+                else:
+                    semantics = setlist_semantics(instruction)
+                    if semantics is not None and semantics.is_open:
+                        consumer = ("setlist", semantics.first_value_register)
 
                 if consumer is not None and pending is not None:
                     kind, base_register = consumer
@@ -328,7 +330,10 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
         access = self.analysis.register_accesses[instruction.pc]
         if pending.register in access.uses:
             return None
-        start_index = next_instruction.aux or 0
+        semantics = setlist_semantics(next_instruction)
+        if semantics is None:
+            return None
+        start_index = semantics.semantic_first_array_index
         return pending if pending.can_add_open_tail(start_index) else None
 
     def _record_table_write(self, instruction: DecodedInstruction) -> bool:
@@ -345,9 +350,12 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
             self._flush_pending_table(pending)
             return False
 
-        start_index = instruction.aux or 0
-        if instruction.c > 0:
-            count = instruction.c - 1
+        semantics = setlist_semantics(instruction)
+        if semantics is None:
+            return False
+        start_index = semantics.semantic_first_array_index
+        if semantics.is_fixed:
+            count = semantics.fixed_value_count or 0
             entries: list[tuple[int, Expr, frozenset[SSAValue]]] = []
             for entry_index in range(count):
                 captured = self._capture_register_expression(
@@ -360,7 +368,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
                     break
                 value, dependencies = captured
                 entries.append((start_index + entry_index, value, dependencies))
-            if len(entries) == count and pending.add_indices(tuple(entries)):
+            if len(entries) == count and pending.add_setlist_entries(tuple(entries)):
                 return True
         else:
             open_captured = self.pending_open_table_values.pop(instruction.b, None)

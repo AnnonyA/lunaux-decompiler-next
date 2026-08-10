@@ -15,6 +15,7 @@ from lunaux.backends.analysis import analyze_control_flow
 from lunaux.backends.ast import (
     BinaryExpr,
     CallExpr,
+    CompoundAssignment,
     Expr,
     FieldExpr,
     IfExpr,
@@ -28,6 +29,7 @@ from lunaux.backends.ast import (
     UnaryExpr,
     ensure_expr,
     render_expression,
+    render_statement,
     source_expr,
 )
 from lunaux.backends.bytecode import (
@@ -58,6 +60,11 @@ from lunaux.backends.opcodes import (
     decode_words,
     get_jump_target,
     setlist_semantics,
+)
+from lunaux.backends.read_modify_write import (
+    ReadModifyWrite,
+    StorageKind,
+    plan_read_modify_write,
 )
 from lunaux.backends.roblox_recovery import (
     analyze_roblox_recovery,
@@ -575,7 +582,10 @@ class _FunctionLifter:
             module_analysis=module_analysis,
         )
         self.inline_plan = plan_expression_inlining(self.ssa, proto)
+        self.call_frames = self.inline_plan.call_frames
+        self.rmw_plan = plan_read_modify_write(self.ssa, proto, self.scope_tree)
         self.inline_expressions: dict[SSAValue, Expr] = {}
+        self.pending_rmw_rhs: dict[int, Expr] = {}
         self.instruction_by_pc = {instruction.pc: instruction for instruction in self.instructions}
         self.instruction_index_by_pc = {
             instruction.pc: index for index, instruction in enumerate(self.instructions)
@@ -922,6 +932,11 @@ class _FunctionLifter:
     def _assign(self, register: int, expression: Expr | str, pc: int) -> None:
         resolved_expression = ensure_expr(expression)
         value = self.ssa.value_defined_at(pc, register)
+        if self.options.inline_single_use_temporaries and self.rmw_plan.should_capture(value):
+            assert value is not None
+            self.inline_expressions[value] = resolved_expression
+            self.register_names.setdefault(register, f"v{register}")
+            return
         if value is not None and value in self.captured_phi_values:
             self.inline_expressions[value] = resolved_expression
             return
@@ -1516,21 +1531,83 @@ class _FunctionLifter:
         )
 
     def _call_expression(self, instruction: DecodedInstruction) -> Expr:
+        frame = self.call_frames.at(instruction.pc)
         if instruction.a in self.pending_namecalls:
             base, method = self.pending_namecalls.pop(instruction.a)
-            start = instruction.a + 2
-            count = max(0, instruction.b - 2) if instruction.b else 0
-            args = tuple(self._ref_expr(start + index, instruction.pc) for index in range(count))
+            argument_registers = tuple(
+                range(
+                    instruction.a + 2,
+                    instruction.a + 2 + (max(0, instruction.b - 2) if instruction.b else 0),
+                )
+            )
+            args = tuple(
+                self._ref_expr(register, instruction.pc) for register in argument_registers
+            )
             return MethodCallExpr(base, method, args)
         function = self._ref_expr(instruction.a, instruction.pc)
         if instruction.b == 0:
             text = f"{render_expression(function)}(... --[[ all arguments through stack top ]])"
             return RawExpr(text, Precedence.POSTFIX)
-        args = tuple(
-            self._ref_expr(instruction.a + index, instruction.pc)
-            for index in range(1, instruction.b)
+        argument_registers = (
+            frame.argument_registers
+            if frame is not None
+            else tuple(range(instruction.a + 1, instruction.a + instruction.b))
         )
+        args = tuple(self._ref_expr(register, instruction.pc) for register in argument_registers)
         return CallExpr(function, args)
+
+    def _rmw_rhs_expression(
+        self,
+        instruction: DecodedInstruction,
+        candidate: ReadModifyWrite,
+    ) -> Expr:
+        if candidate.rhs_register is not None:
+            return self._ref_expr(candidate.rhs_register, instruction.pc)
+        assert candidate.rhs_constant_index is not None
+        return source_expr(_constant_expr(self.proto, candidate.rhs_constant_index))
+
+    def _rmw_target_expression(
+        self,
+        instruction: DecodedInstruction,
+        candidate: ReadModifyWrite,
+    ) -> Expr:
+        location = candidate.location
+        if location.kind == StorageKind.LOCAL:
+            return NameExpr(self._definition_name(instruction.a, instruction.pc))
+        if location.kind == StorageKind.GLOBAL:
+            return RawExpr(self._global_key(instruction), Precedence.POSTFIX)
+        if location.kind == StorageKind.UPVALUE:
+            binding = self.upvalue_bindings.get(instruction.b)
+            if binding is not None:
+                return binding
+            upvalue = (
+                self.proto.upvalue_names[instruction.b]
+                if instruction.b < len(self.proto.upvalue_names)
+                else None
+            )
+            return NameExpr(_sanitize_identifier(upvalue, f"upvalue_{instruction.b}"))
+        base = self._ref_expr(instruction.b, instruction.pc)
+        if location.kind == StorageKind.FIELD:
+            return FieldExpr(base, self._table_key(instruction))
+        if instruction.name == "SETTABLEN":
+            return IndexExpr(base, LiteralExpr(str(instruction.c + 1)))
+        return IndexExpr(base, self._ref_expr(instruction.c, instruction.pc))
+
+    def _emit_rmw(
+        self,
+        instruction: DecodedInstruction,
+        candidate: ReadModifyWrite,
+        rhs: Expr,
+    ) -> None:
+        target = self._rmw_target_expression(instruction, candidate)
+        self.out.line(
+            render_statement(CompoundAssignment(target, candidate.operator, rhs)),
+            statement=True,
+        )
+        if candidate.location.kind == StorageKind.LOCAL:
+            name = render_expression(target)
+            self.register_names[instruction.a] = name
+            self.declared.add(name)
 
     def _conditional_expr(self, instruction: DecodedInstruction) -> Expr | None:
         name = instruction.name
@@ -1913,6 +1990,21 @@ class _FunctionLifter:
             and self._record_table_write(instruction)
         ):
             return
+        rmw = self.rmw_plan.at_operation(pc)
+        if rmw is not None:
+            rhs = self._rmw_rhs_expression(instruction, rmw)
+            if rmw.write_pc == pc:
+                self._emit_rmw(instruction, rmw, rhs)
+            else:
+                self.pending_rmw_rhs[rmw.write_pc] = rhs
+            return
+        rmw = self.rmw_plan.at_write(pc)
+        if rmw is not None:
+            pending_rhs = self.pending_rmw_rhs.get(pc)
+            if pending_rhs is not None:
+                self.pending_rmw_rhs.pop(pc)
+                self._emit_rmw(instruction, rmw, pending_rhs)
+                return
         if name in {"NOP", "BREAK", "COVERAGE", "NATIVECALL", "PREPVARARGS"}:
             return
         if name == "LOADNIL":
@@ -2455,9 +2547,7 @@ def _describe_operand(
         if semantics is not None:
             descriptions.append(f"start={semantics.semantic_first_array_index}")
             descriptions.append(
-                "count=top"
-                if semantics.is_open
-                else f"count={semantics.fixed_value_count}"
+                "count=top" if semantics.is_open else f"count={semantics.fixed_value_count}"
             )
     elif name == "CALLFB":
         slot = "sealed" if instruction.aux == 0xFFFFFFFF else instruction.aux

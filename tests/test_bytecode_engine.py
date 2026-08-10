@@ -122,7 +122,7 @@ def test_parser_reads_strings_constants_and_main_proto() -> None:
 def test_python_engine_reconstructs_common_call() -> None:
     module = parse_bytecode(_sample_container())
     source = decompile_module(module, {}, "Example")
-    assert "local print = print" in source
+    assert "local print = print" not in source
     assert 'local v1 = "hello"' not in source
     assert 'print("hello")' in source
 
@@ -170,9 +170,7 @@ def test_v13_double_vector_constant_is_parsed() -> None:
     constant = module.main_proto.constants[0]
     assert constant.kind == "vectord"
     assert constant.value == (1.0, 2.0, 3.0, 4.0)
-    assert "vector.create(1.0, 2.0, 3.0, 4.0)" in decompile_module(
-        module, {}, "v13"
-    )
+    assert "vector.create(1.0, 2.0, 3.0, 4.0)" in decompile_module(module, {}, "v13")
 
 
 def test_structured_type_info_recovers_typed_local() -> None:
@@ -181,9 +179,7 @@ def test_structured_type_info_recovers_typed_local() -> None:
     type_info += b"\x03\x00" + _varuint(0) + _varuint(2)
     code = (_ad(4, 0, 5), _abc(22, 0, 2, 0))
     constants = _varuint(0)
-    module = parse_bytecode(
-        _modern_container(13, code, constants, type_info=type_info)
-    )
+    module = parse_bytecode(_modern_container(13, code, constants, type_info=type_info))
     typed = module.main_proto.typed_locals
     assert len(typed) == 1
     assert typed[0].register == 0
@@ -202,9 +198,7 @@ def test_wip_class_bytecode_and_newclass_are_supported() -> None:
     constants += b"\x03" + _varuint(1)
     constants += b"\x03" + _varuint(2)
     constants += b"\x0a" + _varuint(0) + _varuint(0) + _varuint(1) + _varuint(1)
-    module = parse_bytecode(
-        _modern_container(100, code, bytes(constants), strings=strings)
-    )
+    module = parse_bytecode(_modern_container(100, code, bytes(constants), strings=strings))
     text = disassemble_module(module, "class")
     assert "NEWCLASS" in text
     assert "class-shape(MyClass" in text

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from lunaux.backends.bytecode import LuauProto
-from lunaux.backends.opcodes import DecodedInstruction
+from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
 from lunaux.backends.ssa import SSAProgram, SSAValue
 
 _INLINEABLE_DEFINITIONS = frozenset(
@@ -267,9 +267,16 @@ def _register_operands(instruction: DecodedInstruction) -> list[int]:
             return [instruction.a]
         return list(range(instruction.a, instruction.a + max(0, instruction.b - 1)))
     if name == "SETLIST":
-        values = [instruction.a]
-        count = instruction.c - 1 if instruction.c > 0 else 1
-        values.extend(range(instruction.b, instruction.b + count))
+        semantics = setlist_semantics(instruction)
+        if semantics is None:
+            return []
+        values = [semantics.table_register]
+        values.extend(
+            range(
+                semantics.first_value_register,
+                semantics.first_value_register + semantics.source_register_count,
+            )
+        )
         return values
     if name == "FORNPREP":
         return list(range(instruction.a, instruction.a + 3))

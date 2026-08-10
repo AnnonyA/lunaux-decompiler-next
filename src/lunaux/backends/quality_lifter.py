@@ -8,7 +8,7 @@ import lunaux.backends.lifter as legacy
 from lunaux.backends.ast import Expr, LiteralExpr, UnaryExpr, render_expression
 from lunaux.backends.bytecode import LuauBytecodeModule
 from lunaux.backends.multret_lifter import _MultiRetFunctionLifter
-from lunaux.backends.opcodes import DecodedInstruction
+from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
 from lunaux.backends.ssa import SSAMultiUse, SSAMultiValue, SSAValue
 
 _GENERATED_NAME = re.compile(
@@ -309,8 +309,10 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
                 consumer = ("arguments", instruction.a + 1)
             elif instruction.name == "RETURN" and instruction.b == 0:
                 consumer = ("return", instruction.a)
-            elif instruction.name == "SETLIST" and instruction.c == 0:
-                consumer = ("setlist", instruction.b)
+            else:
+                semantics = setlist_semantics(instruction)
+                if semantics is not None and semantics.is_open:
+                    consumer = ("setlist", semantics.first_value_register)
 
             consumed = False
             if consumer is not None and pending is not None:

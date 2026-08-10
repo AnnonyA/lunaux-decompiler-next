@@ -9,7 +9,7 @@ import lunaux.backends.lifter as legacy
 import lunaux.backends.quality_lifter as quality
 from lunaux.backends.ast import Expr, render_expression
 from lunaux.backends.bytecode import LuauBytecodeModule
-from lunaux.backends.opcodes import DecodedInstruction
+from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
 from lunaux.backends.ssa import SSAValue
 from lunaux.backends.table_recovery import PendingTableLiteral
 
@@ -404,16 +404,6 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
         self.declared.add(name)
         self.register_names[value.register] = name
 
-    def _legacy_setlist(self, instruction: DecodedInstruction) -> DecodedInstruction:
-        if (
-            self.module.version <= 6
-            and instruction.name == "SETLIST"
-            and instruction.c > 0
-            and instruction.aux is not None
-        ):
-            return replace(instruction, aux=max(0, instruction.aux - 1))
-        return instruction
-
     def _open_table_parent_for_producer(
         self,
         instruction: DecodedInstruction,
@@ -434,7 +424,10 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
         access = self.analysis.register_accesses[instruction.pc]
         if pending.register in access.uses:
             return None
-        start_index = max(1, next_instruction.aux or 1)
+        semantics = setlist_semantics(next_instruction)
+        if semantics is None:
+            return None
+        start_index = semantics.semantic_first_array_index
         return pending if pending.can_add_open_tail(start_index) else None
 
     def _handle_loop_prep(self, instruction: DecodedInstruction) -> bool:
@@ -482,7 +475,7 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
         return self._open_until(target, header + " do")
 
     def _lift_instruction(self, instruction: DecodedInstruction) -> None:
-        super()._lift_instruction(self._legacy_setlist(instruction))
+        super()._lift_instruction(instruction)
 
     def lift(
         self,

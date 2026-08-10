@@ -5,7 +5,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from lunaux.backends.opcodes import DecodedInstruction, get_jump_target, is_fallthrough
+from lunaux.backends.opcodes import (
+    DecodedInstruction,
+    get_jump_target,
+    is_fallthrough,
+    setlist_semantics,
+)
 
 _TERMINATOR_NAMES = frozenset({"RETURN", "JUMP", "JUMPBACK", "JUMPX"})
 
@@ -505,8 +510,12 @@ def register_access(instruction: DecodedInstruction) -> RegisterAccess:
         result_count = instruction.b - 1 if instruction.b > 0 else 1
         definitions = _range(instruction.a, result_count)
     elif name == "SETLIST":
-        value_count = instruction.c - 1 if instruction.c > 0 else 1
-        uses = frozenset({instruction.a}) | _range(instruction.b, value_count)
+        semantics = setlist_semantics(instruction)
+        if semantics is not None:
+            uses = frozenset({semantics.table_register}) | _range(
+                semantics.first_value_register,
+                semantics.source_register_count,
+            )
     elif name == "FORNPREP":
         uses = _range(instruction.a, 3)
         definitions = frozenset({instruction.a + 3})

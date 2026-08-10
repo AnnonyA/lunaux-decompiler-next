@@ -6,7 +6,7 @@ from typing import Final
 
 from lunaux.backends.analysis import register_access
 from lunaux.backends.ast import Expr, LiteralExpr, TableExpr, TableField, render_expression
-from lunaux.backends.opcodes import DecodedInstruction
+from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
 from lunaux.backends.ssa import SSAValue
 
 _TABLE_WRITE_OPS: Final[frozenset[str]] = frozenset(
@@ -205,6 +205,32 @@ class PendingTableLiteral:
                 return False
         return True
 
+    def can_add_setlist_range(self, start_index: int, count: int) -> bool:
+        """Require SETLIST batches to extend the constructor's numeric prefix."""
+
+        if self.open_tail is not None or start_index <= 0 or count < 0:
+            return False
+        numeric_indices = {
+            entry.array_index for entry in self.entries if entry.array_index is not None
+        }
+        return numeric_indices == set(range(1, start_index))
+
+    def add_setlist_entries(
+        self,
+        entries: tuple[tuple[int, Expr, frozenset[SSAValue]], ...],
+    ) -> bool:
+        if not entries:
+            return True
+        start_index = entries[0][0]
+        if not self.can_add_setlist_range(start_index, len(entries)):
+            return False
+        if any(
+            index != start_index + offset
+            for offset, (index, _value, _deps) in enumerate(entries)
+        ):
+            return False
+        return self.add_indices(entries)
+
     def can_add_open_tail(self, start_index: int) -> bool:
         if self.open_tail is not None or start_index <= 0:
             return False
@@ -257,7 +283,8 @@ def table_write_target_register(instruction: DecodedInstruction) -> int | None:
     if instruction.name in {"SETTABLE", "SETTABLEKS", "SETUDATAKS", "SETTABLEN"}:
         return instruction.b
     if instruction.name == "SETLIST":
-        return instruction.a
+        semantics = setlist_semantics(instruction)
+        return semantics.table_register if semantics is not None else None
     return None
 
 
@@ -267,8 +294,15 @@ def table_write_source_registers(instruction: DecodedInstruction) -> frozenset[i
     if instruction.name in {"SETTABLEKS", "SETUDATAKS", "SETTABLEN"}:
         return frozenset({instruction.a})
     if instruction.name == "SETLIST":
-        count = instruction.c - 1 if instruction.c > 0 else 1
-        return frozenset(range(instruction.b, instruction.b + count))
+        semantics = setlist_semantics(instruction)
+        if semantics is None:
+            return frozenset()
+        return frozenset(
+            range(
+                semantics.first_value_register,
+                semantics.first_value_register + semantics.source_register_count,
+            )
+        )
     return frozenset()
 
 

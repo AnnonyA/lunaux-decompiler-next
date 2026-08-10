@@ -11,7 +11,7 @@ from lunaux.backends.analysis import (
     analyze_control_flow,
     reverse_postorder,
 )
-from lunaux.backends.opcodes import DecodedInstruction
+from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
 
 SSAValueKind = Literal["entry", "instruction", "phi"]
 SSAMultiValueKind = Literal["call", "varargs"]
@@ -178,8 +178,9 @@ def _multi_value_consumer(
         return "arguments", instruction.a + 1
     if instruction.name == "RETURN" and instruction.b == 0:
         return "return", instruction.a
-    if instruction.name == "SETLIST" and instruction.c == 0:
-        return "setlist", instruction.b
+    semantics = setlist_semantics(instruction)
+    if semantics is not None and semantics.is_open:
+        return "setlist", semantics.first_value_register
     return None
 
 

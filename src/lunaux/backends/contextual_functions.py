@@ -3,13 +3,16 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from lunaux.backends.bytecode import LuauBytecodeModule, LuauProto
 from lunaux.backends.classes import ClassRecoveryPlan, RecoveredClassMethod
 from lunaux.backends.opcodes import DecodedInstruction, decode_words
 from lunaux.backends.roblox_recovery import InlineCallbackPlan, plan_inline_callbacks
 from lunaux.backends.ssa import SSAProgram, SSAValue, build_ssa
+
+if TYPE_CHECKING:
+    from lunaux.backends.module_analysis import ModuleAnalysis
 
 FunctionKind = Literal[
     "constructor",
@@ -210,10 +213,14 @@ def _local_name(proto: LuauProto, register: int, pc: int) -> str | None:
     return max(candidates, key=lambda item: item.start_pc).name
 
 
-def _first_parameter_is_receiver(proto: LuauProto) -> bool:
+def _first_parameter_is_receiver(
+    proto: LuauProto,
+    instructions: Sequence[DecodedInstruction] | None = None,
+) -> bool:
     if proto.num_params == 0:
         return False
-    for instruction in decode_words(proto.code):
+    resolved_instructions = instructions if instructions is not None else decode_words(proto.code)
+    for instruction in resolved_instructions:
         if instruction.name in {"GETTABLE", "GETTABLEKS", "GETUDATAKS", "GETTABLEN"}:
             if instruction.b == 0:
                 return True
@@ -309,6 +316,7 @@ def plan_contextual_functions(
     *,
     callback_plan: InlineCallbackPlan | None = None,
     enabled: bool = True,
+    module_analysis: ModuleAnalysis | None = None,
 ) -> FunctionContextPlan:
     if not enabled:
         return FunctionContextPlan.empty()
@@ -353,8 +361,15 @@ def plan_contextual_functions(
                 continue
             owner_name = _local_name(proto, instruction.b, instruction.pc)
             child = module.protos[child_id]
+            child_instructions = (
+                module_analysis.for_proto(child).instructions
+                if module_analysis is not None
+                else None
+            )
             kind: FunctionKind = (
-                "instance_method" if _first_parameter_is_receiver(child) else "field"
+                "instance_method"
+                if _first_parameter_is_receiver(child, child_instructions)
+                else "field"
             )
             if key in {"new", "create"}:
                 kind = "constructor"
@@ -460,21 +475,30 @@ def collect_module_function_contexts(
     *,
     recover_metatable_classes: bool = True,
     enabled: bool = True,
+    module_analysis: ModuleAnalysis | None = None,
 ) -> Mapping[int, FunctionContext]:
     if not enabled:
         return MappingProxyType(dict[int, FunctionContext]())
+    if module_analysis is not None:
+        module_analysis.require_module(module)
     from lunaux.backends.classes import recover_classes
 
     contexts: dict[int, FunctionContext] = {}
     for proto in module.protos:
-        instructions = tuple(decode_words(proto.code))
-        program = build_ssa(instructions, len(proto.code))
+        if module_analysis is None:
+            instructions = tuple(decode_words(proto.code))
+            program = build_ssa(instructions, len(proto.code))
+        else:
+            analyzed = module_analysis.for_proto(proto)
+            instructions = analyzed.instructions
+            program = analyzed.ssa
         class_plan = recover_classes(
             module,
             proto,
             instructions,
             program,
             recover_metatable_classes=recover_metatable_classes,
+            module_analysis=module_analysis,
         )
         plan = plan_contextual_functions(
             module,
@@ -483,6 +507,7 @@ def collect_module_function_contexts(
             program,
             class_plan,
             enabled=True,
+            module_analysis=module_analysis,
         )
         for proto_id, context in plan.by_proto.items():
             current = contexts.get(proto_id)

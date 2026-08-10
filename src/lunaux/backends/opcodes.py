@@ -478,6 +478,59 @@ class DecodedInstruction:
         return f"{self.pc:04d}  0x{self.word:08x}  {self.name:<18}{suffix}"
 
 
+@dataclass(frozen=True, slots=True)
+class SetListSemantics:
+    """Decoded SETLIST operands with semantic and legacy index domains separated."""
+
+    table_register: int
+    first_value_register: int
+    semantic_first_array_index: int
+    fixed_value_count: int | None
+    legacy_emission_offset: int
+
+    @property
+    def is_fixed(self) -> bool:
+        return self.fixed_value_count is not None
+
+    @property
+    def is_open(self) -> bool:
+        return self.fixed_value_count is None
+
+    @property
+    def source_register_count(self) -> int:
+        # An open SETLIST consumes one SSA multi-value rooted at the B register.
+        return self.fixed_value_count if self.fixed_value_count is not None else 1
+
+    def semantic_indices(self) -> range:
+        count = self.fixed_value_count or 0
+        return range(
+            self.semantic_first_array_index,
+            self.semantic_first_array_index + count,
+        )
+
+
+def setlist_semantics(instruction: DecodedInstruction) -> SetListSemantics | None:
+    """Return the format semantics of SETLIST without rewriting its raw AUX.
+
+    Luau serializes AUX as the one-based first array index.  The historical
+    statement fallback instead indexed values from a zero-based offset.  Both
+    values are exposed so structural recovery can never consume the fallback
+    domain by accident.
+    """
+
+    if instruction.name != "SETLIST":
+        return None
+    semantic_first_array_index = instruction.aux or 0
+    fixed_value_count = instruction.c - 1 if instruction.c > 0 else None
+    return SetListSemantics(
+        table_register=instruction.a,
+        first_value_register=instruction.b,
+        semantic_first_array_index=semantic_first_array_index,
+        fixed_value_count=fixed_value_count,
+        legacy_emission_offset=max(0, semantic_first_array_index - 1),
+    )
+
+
 def _sign(value: int, bits: int) -> int:
     sign = 1 << (bits - 1)
     return (value ^ sign) - sign

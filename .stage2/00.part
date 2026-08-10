@@ -1,0 +1,110 @@
+diff --git a/src/lunaux/backends/analysis.py b/src/lunaux/backends/analysis.py
+index 7a767f8..4701f0e 100644
+--- a/src/lunaux/backends/analysis.py
++++ b/src/lunaux/backends/analysis.py
+@@ -5,7 +5,12 @@ from collections.abc import Mapping
+ from dataclasses import dataclass
+ from types import MappingProxyType
+ 
+-from lunaux.backends.opcodes import DecodedInstruction, get_jump_target, is_fallthrough
++from lunaux.backends.opcodes import (
++    DecodedInstruction,
++    get_jump_target,
++    is_fallthrough,
++    setlist_semantics,
++)
+ 
+ _TERMINATOR_NAMES = frozenset({"RETURN", "JUMP", "JUMPBACK", "JUMPX"})
+ 
+@@ -505,8 +510,12 @@ def register_access(instruction: DecodedInstruction) -> RegisterAccess:
+         result_count = instruction.b - 1 if instruction.b > 0 else 1
+         definitions = _range(instruction.a, result_count)
+     elif name == "SETLIST":
+-        value_count = instruction.c - 1 if instruction.c > 0 else 1
+-        uses = frozenset({instruction.a}) | _range(instruction.b, value_count)
++        semantics = setlist_semantics(instruction)
++        if semantics is not None:
++            uses = frozenset({semantics.table_register}) | _range(
++                semantics.first_value_register,
++                semantics.source_register_count,
++            )
+     elif name == "FORNPREP":
+         uses = _range(instruction.a, 3)
+         definitions = frozenset({instruction.a + 3})
+diff --git a/src/lunaux/backends/compat_quality_lifter.py b/src/lunaux/backends/compat_quality_lifter.py
+index 4770958..c26de5d 100644
+--- a/src/lunaux/backends/compat_quality_lifter.py
++++ b/src/lunaux/backends/compat_quality_lifter.py
+@@ -9,7 +9,7 @@ import lunaux.backends.lifter as legacy
+ import lunaux.backends.quality_lifter as quality
+ from lunaux.backends.ast import Expr, render_expression
+ from lunaux.backends.bytecode import LuauBytecodeModule
+-from lunaux.backends.opcodes import DecodedInstruction
++from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
+ from lunaux.backends.ssa import SSAValue
+ from lunaux.backends.table_recovery import PendingTableLiteral
+ 
+@@ -404,16 +404,6 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
+         self.declared.add(name)
+         self.register_names[value.register] = name
+ 
+-    def _legacy_setlist(self, instruction: DecodedInstruction) -> DecodedInstruction:
+-        if (
+-            self.module.version <= 6
+-            and instruction.name == "SETLIST"
+-            and instruction.c > 0
+-            and instruction.aux is not None
+-        ):
+-            return replace(instruction, aux=max(0, instruction.aux - 1))
+-        return instruction
+-
+     def _open_table_parent_for_producer(
+         self,
+         instruction: DecodedInstruction,
+@@ -434,7 +424,10 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
+         access = self.analysis.register_accesses[instruction.pc]
+         if pending.register in access.uses:
+             return None
+-        start_index = max(1, next_instruction.aux or 1)
++        semantics = setlist_semantics(next_instruction)
++        if semantics is None:
++            return None
++        start_index = semantics.semantic_first_array_index
+         return pending if pending.can_add_open_tail(start_index) else None
+ 
+     def _handle_loop_prep(self, instruction: DecodedInstruction) -> bool:
+@@ -482,7 +475,7 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
+         return self._open_until(target, header + " do")
+ 
+     def _lift_instruction(self, instruction: DecodedInstruction) -> None:
+-        super()._lift_instruction(self._legacy_setlist(instruction))
++        super()._lift_instruction(instruction)
+ 
+     def lift(
+         self,
+diff --git a/src/lunaux/backends/inlining.py b/src/lunaux/backends/inlining.py
+index 5e78fa0..59e98de 100644
+--- a/src/lunaux/backends/inlining.py
++++ b/src/lunaux/backends/inlining.py
+@@ -7,7 +7,7 @@ from dataclasses import dataclass
+ from types import MappingProxyType
+ 
+ from lunaux.backends.bytecode import LuauProto
+-from lunaux.backends.opcodes import DecodedInstruction
++from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
+ from lunaux.backends.ssa import SSAProgram, SSAValue
+ 
+ _INLINEABLE_DEFINITIONS = frozenset(
+@@ -267,9 +267,16 @@ def _register_operands(instruction: DecodedInstruction) -> list[int]:
+             return [instruction.a]
+         return list(range(instruction.a, instruction.a + max(0, instruction.b - 1)))
+     if name == "SETLIST":
+-        values = [instruction.a]
+-        count = instruction.c - 1 if instruction.c > 0 else 1
+-        values.extend(range(instruction.b, instruction.b + count))
++        semantics = setlist_semantics(instruction)
++        if semantics is None:
++            return []
++        values = [semantics.table_register]
++        values.extend(
++            range(

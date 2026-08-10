@@ -240,6 +240,12 @@ def _safe_inline_simple_aliases(lines: list[str]) -> list[str]:
     removed: set[int] = set()
     for index, lhs, rhs in aliases:
         removed.add(index)
+        # Earlier aliases may already have rewritten this declaration.  Use its
+        # current RHS so a chain such as ``leaf = branch.leaf`` expands through
+        # ``branch = root.branch`` instead of reintroducing the removed ``branch``.
+        current = quality._SIMPLE_ALIAS.fullmatch(result[index])
+        if current is not None:
+            rhs = current.group("rhs")
         if lhs == rhs:
             continue
         for following in range(index + 1, len(result)):

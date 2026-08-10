@@ -1,0 +1,110 @@
++        count = self.fixed_value_count or 0
++        return range(
++            self.semantic_first_array_index,
++            self.semantic_first_array_index + count,
++        )
++
++
++def setlist_semantics(instruction: DecodedInstruction) -> SetListSemantics | None:
++    """Return the format semantics of SETLIST without rewriting its raw AUX.
++
++    Luau serializes AUX as the one-based first array index.  The historical
++    statement fallback instead indexed values from a zero-based offset.  Both
++    values are exposed so structural recovery can never consume the fallback
++    domain by accident.
++    """
++
++    if instruction.name != "SETLIST":
++        return None
++    semantic_first_array_index = instruction.aux or 0
++    fixed_value_count = instruction.c - 1 if instruction.c > 0 else None
++    return SetListSemantics(
++        table_register=instruction.a,
++        first_value_register=instruction.b,
++        semantic_first_array_index=semantic_first_array_index,
++        fixed_value_count=fixed_value_count,
++        legacy_emission_offset=max(0, semantic_first_array_index - 1),
++    )
++
++
+ def _sign(value: int, bits: int) -> int:
+     sign = 1 << (bits - 1)
+     return (value ^ sign) - sign
+diff --git a/src/lunaux/backends/quality_lifter.py b/src/lunaux/backends/quality_lifter.py
+index 552b731..99db2a3 100644
+--- a/src/lunaux/backends/quality_lifter.py
++++ b/src/lunaux/backends/quality_lifter.py
+@@ -8,7 +8,7 @@ import lunaux.backends.lifter as legacy
+ from lunaux.backends.ast import Expr, LiteralExpr, UnaryExpr, render_expression
+ from lunaux.backends.bytecode import LuauBytecodeModule
+ from lunaux.backends.multret_lifter import _MultiRetFunctionLifter
+-from lunaux.backends.opcodes import DecodedInstruction
++from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
+ from lunaux.backends.ssa import SSAMultiUse, SSAMultiValue, SSAValue
+ 
+ _GENERATED_NAME = re.compile(
+@@ -309,8 +309,10 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
+                 consumer = ("arguments", instruction.a + 1)
+             elif instruction.name == "RETURN" and instruction.b == 0:
+                 consumer = ("return", instruction.a)
+-            elif instruction.name == "SETLIST" and instruction.c == 0:
+-                consumer = ("setlist", instruction.b)
++            else:
++                semantics = setlist_semantics(instruction)
++                if semantics is not None and semantics.is_open:
++                    consumer = ("setlist", semantics.first_value_register)
+ 
+             consumed = False
+             if consumer is not None and pending is not None:
+diff --git a/src/lunaux/backends/roblox_recovery.py b/src/lunaux/backends/roblox_recovery.py
+index ca18d25..3345178 100644
+--- a/src/lunaux/backends/roblox_recovery.py
++++ b/src/lunaux/backends/roblox_recovery.py
+@@ -8,7 +8,7 @@ from types import MappingProxyType
+ from typing import TYPE_CHECKING, Final, Literal
+ 
+ from lunaux.backends.bytecode import LuauBytecodeModule, LuauProto
+-from lunaux.backends.opcodes import DecodedInstruction, decode_words
++from lunaux.backends.opcodes import DecodedInstruction, decode_words, setlist_semantics
+ from lunaux.backends.roblox_api import callback_parameter_types
+ from lunaux.backends.ssa import SSAInstruction, SSAProgram, SSAValue, build_ssa
+ 
+@@ -306,8 +306,12 @@ def _table_or_return_sink(
+         "SETTABLEN",
+     }:
+         return register == instruction.a
+-    if instruction.name == "SETLIST" and instruction.c > 1:
+-        return register in range(instruction.b, instruction.b + instruction.c - 1)
++    semantics = setlist_semantics(instruction)
++    if semantics is not None and semantics.is_fixed:
++        return register in range(
++            semantics.first_value_register,
++            semantics.first_value_register + semantics.source_register_count,
++        )
+     if instruction.name == "RETURN":
+         if instruction.b == 0:
+             return False
+diff --git a/src/lunaux/backends/ssa.py b/src/lunaux/backends/ssa.py
+index 6845c6e..521a697 100644
+--- a/src/lunaux/backends/ssa.py
++++ b/src/lunaux/backends/ssa.py
+@@ -11,7 +11,7 @@ from lunaux.backends.analysis import (
+     analyze_control_flow,
+     reverse_postorder,
+ )
+-from lunaux.backends.opcodes import DecodedInstruction
++from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
+ 
+ SSAValueKind = Literal["entry", "instruction", "phi"]
+ SSAMultiValueKind = Literal["call", "varargs"]
+@@ -178,8 +178,9 @@ def _multi_value_consumer(
+         return "arguments", instruction.a + 1
+     if instruction.name == "RETURN" and instruction.b == 0:
+         return "return", instruction.a
+-    if instruction.name == "SETLIST" and instruction.c == 0:
+-        return "setlist", instruction.b
++    semantics = setlist_semantics(instruction)
++    if semantics is not None and semantics.is_open:
++        return "setlist", semantics.first_value_register
+     return None
+ 

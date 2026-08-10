@@ -92,6 +92,18 @@ def test_field_alias_inlining_preserves_property_tokens() -> None:
     ]
 
 
+def test_chained_field_aliases_inline_transitively() -> None:
+    lines = [
+        "local branch = root.branch",
+        "local leaf = branch.leaf",
+        "branch.leaf = leaf + root[1]",
+    ]
+
+    assert _safe_inline_simple_aliases(lines) == [
+        "root.branch.leaf = root.branch.leaf + root[1]",
+    ]
+
+
 def test_numeric_for_uses_internal_index_when_nominal_register_is_reused() -> None:
     prep = _instruction(3, "FORNPREP", a=0)
     body_reuse = _instruction(4, "LOADN", a=3)

@@ -1,0 +1,347 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 4f30d1f9dac38bab961e5ce6580f7be61f358aa6..dd1640123b54711d711c846b5b0f59cc96690d4f 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,63 @@
+ 
+ All notable changes are documented here.
+ 
++## [0.20.0.dev0-stage7] - 2026-08-11
++
++### Added
++
++- Added shared `CallResultShape` semantics for fixed-zero, fixed-one, fixed-many and open CALL results, including exact FASTCALL result-phi handling.
++- Added transactional `TableBuildPlan` ownership for call-valued and nested table construction with explicit escape, dependency, ordering and MULTRET rejection reasons.
++- Added a real serialized Luau v9 source-fidelity regression fixture with byte-level SHA verification and structural output assertions.
++- Added stable dot-field function declaration emission through `ProtoEmissionPlan` while keeping colon-method proof separate.
++- Added high-confidence returned-module-root naming, exact operand-valued short-circuit recovery, serialized parameter-type preservation and unused iterator `_` naming.
++- Added deterministic recursive pretty-printing for large/complex `TableExpr` values without sorting or reordering semantic evaluation.
++
++### Changed
++
++- Fixed constructor recovery so an observable CALL no longer forces a table flush when its exact SSA result is itself the next proven constructor operation.
++- Fixed false MULTRET materialization in table construction by sharing CALL result cardinality with SETLIST/open-tail ownership.
++- Extended exact-SSA folding for one-use compiler temporaries while preserving debug lifetimes, repeated mutable-read snapshots and effect barriers.
++- Module field closures with stable ownership can now emit as `function module.name(...)` instead of anonymous assignment forms.
++- Value-position `and`/`or` recovery now preserves Luau operand-return semantics and conditional evaluation.
++- Large nested constructors now render structurally across multiple lines instead of as pathological single-line expressions.
++
++### Real-world source fidelity
++
++On the pinned v9 regression module:
++
++- synthetic temporaries: `148 → 4`;
++- constructor temporaries: `138 → 0`;
++- false MULTRET annotations: `33 → 0`;
++- anonymous module-field functions: `5 → 0`;
++- dot function declarations: `0 → 5`;
++- numbered `data*` / `color*` temporaries: `0` final;
++- final table constructors: `96`;
++- CALL expressions directly owned by tables: `47`;
++- final output is byte-identical across repeated decompilations.
++
++### Corpus / readability
++
++- Semantic corpus: `2304/2304`; Medal-compatible: `384/384`; all execution/syntax/recompilation/stability/zero-fallback gates remain `100%`.
++- Changed outputs: `1696/2304` across arithmetic, boolean, closure, conditional, loops, methods, MULTRET, recursion, strings and table families.
++- Global median readability: `92.42905 → 93.45525`.
++- Paired readability: `1056` wins, `496` losses, `752` ties. Several lexical-score losses correspond to human simplifications such as direct return-call folding and unused `_` bindings.
++- Deterministic corpus digest: `b2a8325981a45828cc4a687f87840529b2b15de518478f13602f5e444f64a3ac`.
++
++### Validation
++
++- pytest: `248 passed`, `0 failed`;
++- Ruff: `0` failures;
++- mypy: `0` issues across `67` source files;
++- `git diff --check`: clean;
++- clean-base `git apply --check`: clean;
++- Stage 0 shared analysis unchanged: decode/CFG/SSA/scope `3456` each, symbols `2880`.
++
++### Performance / limitations
++
++- Host wall measurements improved materially in the recorded run, but CPU increased from `26.969 s` to `29.406 s`; no unsupported net-speedup claim is made because the host was noisy.
++- Generic statement emission remains line-oriented; a complete statement AST is still future architecture work.
++- Repeated mutable table reads, true open MULTRET outside legal tail ownership, escaping tables and ambiguous/cross-block constructor ownership remain deliberately conservative.
++
+ ## [0.20.0.dev0-stage56] - 2026-08-10
+ 
+ ### Added
+diff --git a/README.md b/README.md
+index 9edd903b74835e9eaaf70058f04a32e4eaafa728..08e5c30594a15014dc9c0c88a8151bb8d0f749be 100644
+--- a/README.md
++++ b/README.md
+@@ -2,7 +2,7 @@
+ 
+ LunaUX is a local Luau bytecode decompiler/disassembler focused on Roblox. It keeps the heavy work on your machine, supports modern serialized Luau bytecode, and tries to produce readable Luau without executing the bytecode you give it.
+ 
+-**Current status:** **2304/2304 semantic passes**, 100% execution/syntax/recompilation/stability/zero-fallback, **384/384 Medal-compatible**, with **0 semantic failures** and **0 timeouts**. The Stage 0→6+ recovery roadmap is implemented in `main`: shared analysis, safety/effect infrastructure, semantic `SETLIST` recovery, exact-SSA folding with `CallFrame`, structural `ReadModifyWrite`, `ProtoEmissionPlan`, canonical CFG planning, and deterministic semantic naming.
++**Current status:** **2304/2304 semantic passes**, 100% execution/syntax/recompilation/stability/zero-fallback, **384/384 Medal-compatible**, with **0 semantic failures** and **0 timeouts**. Stage 7 source fidelity is now implemented in `main`: exact CALL/MULTRET result shapes, transactional call-valued table construction, stronger SSA expression folding, returned-module naming, dot-function declarations, value-position short-circuit recovery, type preservation, and deterministic complex-table formatting build on the completed Stage 0→6+ architecture.
+ 
+ ## Quick start
+ 
+@@ -133,6 +133,20 @@ Warmed decompiler-only performance measured **32.348 s / 71.23 cases/s** on the
+ 
+ The main remaining structuring limitation is deliberate: generic `elseif` and guard emission remains conservative until the AST emitter can own region closure boundaries end-to-end. The CFG planner records those regions now, but does not fabricate prettier source when emission ownership is not yet proven.
+ 
++## Stage 7: source fidelity
++
++Stage 7 targets the gap between semantically correct output and human-quality source on real modules. `CallResultShape` now makes fixed-zero, fixed-one, fixed-many and open CALL results explicit through shared `CallFrame` semantics. `TableBuildPlan` can transactionally retain owned CALL expressions inside pending table constructors when exact SSA ownership, evaluation order, escape state and result shape prove that doing so is safe. True open MULTRET tails remain conservative and preserve Luau tail semantics.
++
++That means nested call-valued tables can stay structural instead of exploding into constructor-only temporaries. The real v9 regression fixture moved from **148 → 4 synthetic temporaries**, **138 → 0 constructor temporaries**, and **33 → 0 false MULTRET annotations**. It now recovers **96 table constructors**, **47 CALL expressions directly in tables**, **5 `function module.*` declarations**, no numbered `data*`/`color*` temporaries, and deterministic module-root naming.
++
++Stage 7 also extends `ProtoEmissionPlan` with stable dot-field function declarations, recovers exact operand-valued `and`/`or` expressions, preserves serialized parameter types, uses `_` for proven unused non-debug iterator bindings, and adds deterministic multiline rendering for large or nested `TableExpr` values without reordering entries.
++
++Across the deterministic corpus, Stage 7 changes **1696/2304 outputs** while retaining **2304/2304 semantic**, **384/384 Medal-compatible**, and 100% execution/syntax/recompilation/stability/zero-fallback. Global median readability moves from **92.42905 → 93.45525** with **1056 wins, 496 losses and 752 ties**; several scorer losses are intentional human-readable simplifications such as direct return-call folding and unused `_` bindings. Stage 0 analysis construction remains unchanged at **3456 decode / CFG / SSA / scope** and **2880 symbol** builds.
++
++Validation: **248 pytest passed**, Ruff clean, mypy clean across **67 source files**, `git diff --check` clean, and clean-base `git apply --check` clean. Deterministic corpus digest: `b2a8325981a45828cc4a687f87840529b2b15de518478f13602f5e444f64a3ac`.
++
++The main remaining architecture item is a complete statement AST: generic function-body emission is still line-oriented even though table/call/expression ownership is now substantially more structural.
++
+ ## Recovery roadmap
+ 
+ | Stage | Focus | Target | Status |
+@@ -144,6 +158,7 @@ The main remaining structuring limitation is deliberate: generic `elseif` and gu
+ | **Stage 4** | `ReadModifyWrite` | Recover forms like `data.Stats.Score += data[1]`. | ✅ Complete |
+ | **Stage 5** | `ProtoEmissionPlan` | Human recursion, methods and closures. | ✅ Complete |
+ | **Stage 6+** | CFG structuring + naming | Canonical, deterministic source recovery. | ✅ Complete |
++| **Stage 7** | Source fidelity | CALL-valued constructors, exact MULTRET ownership, module functions and canonical table output. | ✅ Complete |
+ 
+ ## Progress so far
+ 
+@@ -162,6 +177,7 @@ The main remaining structuring limitation is deliberate: generic `elseif` and gu
+ | **Stage 4 / 0.20 dev** | Structural `ReadModifyWrite` recovery + AST compound assignments. |
+ | **Stage 5 / 0.20 dev** | SSA-owned `ProtoEmissionPlan` for recursion, methods, captures and closure emission. |
+ | **Stage 6+ / 0.20 dev** | Canonical CFG region planning + deterministic semantic naming. |
++| **Stage 7 / 0.20 dev** | Transactional table/CALL ownership, source-fidelity folding, module field declarations and canonical table formatting. |
+ 
+ ## Backend modes
+ 
+diff --git a/src/lunaux/backends/ast.py b/src/lunaux/backends/ast.py
+index 7f87ac6e9480bac7ccb0acc2e98ac8bf88678d19..38e75ca060297591ecd2eae65cd3ba60fe0e9251 100644
+--- a/src/lunaux/backends/ast.py
++++ b/src/lunaux/backends/ast.py
+@@ -351,7 +351,12 @@ def _render_child(
+     return rendered
+ 
+ 
+-def render_expression(expression: Expr) -> str:
++def render_expression(
++    expression: Expr,
++    *,
++    pretty_tables: bool = False,
++    indent: int = 0,
++) -> str:
+     if isinstance(expression, RawExpr):
+         return expression.text
+     if isinstance(expression, NameExpr):
+@@ -409,7 +414,37 @@ def render_expression(expression: Expr) -> str:
+                 fields.append(value)
+             else:
+                 fields.append(f"[{render_expression(field.key)}] = {value}")
+-        return "{" + ", ".join(fields) + "}"
++        compact = "{" + ", ".join(fields) + "}"
++        if (
++            not pretty_tables
++            or not expression.fields
++            or (
++                len(expression.fields) <= 3
++                and len(compact) <= 88
++                and not any(
++                    isinstance(field.value, TableExpr)
++                    and len(field.value.fields) > 3
++                    for field in expression.fields
++                )
++            )
++        ):
++            return compact
++        rendered_fields: list[str] = []
++        prefix = "    " * (indent + 1)
++        for field in expression.fields:
++            value = render_expression(
++                field.value,
++                pretty_tables=True,
++                indent=indent + 1,
++            )
++            if field.name is not None and _identifier(field.name):
++                item = f"{field.name} = {value}"
++            elif field.key is None:
++                item = value
++            else:
++                item = f"[{render_expression(field.key)}] = {value}"
++            rendered_fields.append(prefix + item + ",")
++        return "{\n" + "\n".join(rendered_fields) + "\n" + "    " * indent + "}"
+     if isinstance(expression, IfExpr):
+         return (
+             f"if {render_expression(expression.condition)} then "
+diff --git a/src/lunaux/backends/bytecode.py b/src/lunaux/backends/bytecode.py
+index 0d3871cfaa71f4221e04f85bdbb47fad853d71d1..7981f9cef20639820f12cde86cbd06bef207586c 100644
+--- a/src/lunaux/backends/bytecode.py
++++ b/src/lunaux/backends/bytecode.py
+@@ -247,6 +247,26 @@ def format_type_tag(
+     return f"{name}?" if optional else name
+ 
+ 
++def function_parameter_types(
++    proto: LuauProto,
++    userdata_types: dict[int, str] | None = None,
++) -> tuple[str, ...]:
++    """Decode exact fixed-parameter tags from a serialized function type."""
++
++    info = proto.function_type_info
++    if (
++        len(info) < 2
++        or (info[0] & 0x7F) != 5
++        or info[1] != proto.num_params
++        or len(info) < 2 + proto.num_params
++    ):
++        return ()
++    return tuple(
++        format_type_tag(tag, userdata_types)
++        for tag in info[2 : 2 + proto.num_params]
++    )
++
++
+ def _read_string_ref(reader: _Reader, strings: tuple[str, ...]) -> str | None:
+     string_id = reader.read_varuint()
+     if string_id == 0:
+ diff --git a/src/lunaux/backends/callframe.py b/src/lunaux/backends/callframe.py
+index 4899de1f84ee983753978e4cbf0b65024e7c0acb..9d432ef7c8d0c41ccd77d6e800ff3fbd57b53497 100644
+--- a/src/lunaux/backends/callframe.py
++++ b/src/lunaux/backends/callframe.py
+@@ -1,10 +1,19 @@
+ from __future__ import annotations
+ 
+ from collections.abc import Mapping
+-from dataclasses import dataclass
++from dataclasses import dataclass, field
++from enum import StrEnum
+ from types import MappingProxyType
+ 
+-from lunaux.backends.ssa import SSAMultiUse, SSAProgram, SSAValue
++from lunaux.backends.opcodes import get_jump_target
++from lunaux.backends.ssa import SSAMultiUse, SSAPhi, SSAProgram, SSAValue
++
++
++class CallResultShape(StrEnum):
++    FIXED_ZERO = "fixed-zero"
++    FIXED_ONE = "fixed-one"
++    FIXED_MANY = "fixed-many"
++    OPEN = "open"
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -29,14 +38,39 @@ class CallFrame:
+     def result_count(self) -> int | None:
+         return None if self.is_open_result else len(self.result_registers)
+ 
++    @property
++    def result_shape(self) -> CallResultShape:
++        if self.is_open_result:
++            return CallResultShape.OPEN
++        count = len(self.result_registers)
++        if count == 0:
++            return CallResultShape.FIXED_ZERO
++        if count == 1:
++            return CallResultShape.FIXED_ONE
++        return CallResultShape.FIXED_MANY
++
++    @property
++    def single_result_register(self) -> int | None:
++        return (
++            self.result_registers[0]
++            if self.result_shape == CallResultShape.FIXED_ONE
++            else None
++        )
++
+ 
+ @dataclass(frozen=True, slots=True)
+ class CallFramePlan:
+     frames: Mapping[int, CallFrame]
++    fastcall_result_phis: Mapping[int, SSAValue] = field(
++        default_factory=lambda: MappingProxyType({})
++    )
+ 
+     def at(self, pc: int) -> CallFrame | None:
+         return self.frames.get(pc)
+ 
++    def fastcall_result_at(self, pc: int) -> SSAValue | None:
++        return self.fastcall_result_phis.get(pc)
++
+ 
+ def plan_call_frames(program: SSAProgram) -> CallFramePlan:
+     frames: dict[int, CallFrame] = {}
+@@ -107,7 +141,53 @@ def plan_call_frames(program: SSAProgram) -> CallFramePlan:
+             dependencies=dependencies,
+         )
+ 
+-    return CallFramePlan(MappingProxyType(frames))
++    fastcall_result_phis: dict[int, SSAValue] = {}
++    phis_by_block: dict[int, list[SSAPhi]] = {}
++    for phi in program.phis:
++        phis_by_block.setdefault(phi.block, []).append(phi)
++    for pc, frame in frames.items():
++        if frame.result_shape != CallResultShape.FIXED_ONE:
++            continue
++        call_block = program.analysis.block_for_pc.get(pc)
++        if call_block is None:
++            continue
++        fallback = program.analysis.block_by_start.get(call_block)
++        if fallback is None or len(fallback.successors) != 1:
++            continue
++        join = next(iter(fallback.successors))
++        result = program.value_defined_at(pc, frame.callee_register)
++        if result is None:
++            continue
++        matching_phis = [
++            phi
++            for phi in phis_by_block.get(join, [])
++            if phi.register == frame.callee_register
++            and phi.operands.get(call_block) == result
++        ]
++        if len(matching_phis) != 1:
++            continue
++        has_fast_path = any(
++            instruction.instruction.name.startswith("FASTCALL")
++            and get_jump_target(instruction.instruction) == join
++            and program.analysis.block_by_start[
++                program.analysis.block_for_pc[instruction.pc]
++            ].successors
++            == frozenset({call_block, join})
++            for instruction in program.instructions.values()
++            if instruction.pc < pc and instruction.pc in program.analysis.block_for_pc
++        )
++        if has_fast_path:
++            fastcall_result_phis[pc] = matching_phis[0].result
++
++    return CallFramePlan(
++        MappingProxyType(frames),
++        MappingProxyType(fastcall_result_phis),
++    )
+ 
+ 
+-__all__ = ["CallFrame", "CallFramePlan", "plan_call_frames"]
++__all__ = [
++    "CallFrame",
++    "CallFramePlan",
++    "CallResultShape",
++    "plan_call_frames",
++]
+diff --git a/src/lunaux/backends/compat_quality_lifter.py b/src/lunaux/backends/compat_quality_lifter.py
+index c13cd593c5c1ec8b9f48c72714193765f689bdc7..98e1d25764f840539141a10ca4b1bb319f51c0c9 100644
+--- a/src/lunaux/backends/compat_quality_lifter.py
++++ b/src/lunaux/backends/compat_quality_lifter.py
+@@ -9,7 +9,7 @@ import lunaux.backends.lifter as legacy
+ import lunaux.backends.quality_lifter as quality
+ from lunaux.backends.ast import Expr, render_expression
+ from lunaux.backends.bytecode import LuauBytecodeModule
+-from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
++from lunaux.backends.opcodes import DecodedInstruction
+ from lunaux.backends.ssa import SSAValue
+ from lunaux.backends.table_recovery import PendingTableLiteral
+ 
+@@ -401,27 +401,7 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
+         self,
+         instruction: DecodedInstruction,
+     ) -> PendingTableLiteral | None:
+-        if self.module.version > 6:
+-            return super()._open_table_parent_for_producer(instruction)

@@ -9,7 +9,7 @@ import lunaux.backends.lifter as legacy
 import lunaux.backends.quality_lifter as quality
 from lunaux.backends.ast import Expr, render_expression
 from lunaux.backends.bytecode import LuauBytecodeModule
-from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
+from lunaux.backends.opcodes import DecodedInstruction
 from lunaux.backends.ssa import SSAValue
 from lunaux.backends.table_recovery import PendingTableLiteral
 
@@ -401,27 +401,7 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
         self,
         instruction: DecodedInstruction,
     ) -> PendingTableLiteral | None:
-        if self.module.version > 6:
-            return super()._open_table_parent_for_producer(instruction)
-        next_instruction = self.next_instruction_by_pc.get(instruction.pc)
-        if (
-            next_instruction is None
-            or next_instruction.name != "SETLIST"
-            or next_instruction.c != 0
-            or next_instruction.b != instruction.a
-        ):
-            return None
-        pending = self._pending_table_for_write(next_instruction)
-        if pending is None:
-            return None
-        access = self.analysis.register_accesses[instruction.pc]
-        if pending.register in access.uses:
-            return None
-        semantics = setlist_semantics(next_instruction)
-        if semantics is None:
-            return None
-        start_index = semantics.semantic_first_array_index
-        return pending if pending.can_add_open_tail(start_index) else None
+        return super()._open_table_parent_for_producer(instruction)
 
     def _handle_loop_prep(self, instruction: DecodedInstruction) -> bool:
         if self.module.version > 6 or instruction.name != "FORNPREP":
@@ -478,6 +458,7 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
         local_function: bool = True,
         anonymous_function: bool = False,
         method_declaration: tuple[Expr, str] | None = None,
+        field_function_declaration: tuple[Expr, str] | None = None,
     ) -> None:
         original_options = self.options
         if self.module.version <= 6:
@@ -504,6 +485,7 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
                 local_function=local_function,
                 anonymous_function=anonymous_function,
                 method_declaration=method_declaration,
+                field_function_declaration=field_function_declaration,
             )
         finally:
             self.options = original_options

@@ -38,7 +38,9 @@ def _decompile(payload: str) -> str:
 
 def test_real_v11_tables_alias_chain_keeps_transitive_provenance() -> None:
     assert _decompile(_TABLES) == (
-        'local data = {Name = "case-0", Stats = {Score = 0, Enabled = true}, 0, 0}\n'
+        'local data = {\n    Name = "case-0",\n'
+        "    Stats = {Score = 0, Enabled = true},\n"
+        "    0,\n    0,\n}\n"
         "data.Stats.Score += data[1]\n"
         "print(data.Name, data.Stats.Score, data[2])\n"
     )
@@ -52,8 +54,7 @@ def test_real_v11_tables_alias_chain_keeps_transitive_provenance() -> None:
             """local function proto_0(arg1): number
     local value2 = arg1 * 3 + 7
     local value3 = value2 / 2
-    local value = math.floor(value3)
-    return value % 19 + value2 ^ 2 % 23
+    return math.floor(value3) % 19 + value2 ^ 2 % 23
 end
 
 local callback = proto_0

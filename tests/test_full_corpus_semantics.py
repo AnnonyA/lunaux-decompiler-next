@@ -87,8 +87,9 @@ def test_field_alias_inlining_preserves_property_tokens() -> None:
     ]
 
     assert _safe_inline_simple_aliases(lines) == [
-        "record.Stats.Score = record.Stats.Score + record[1]",
-        'print(record.Stats.Score, record.Stats.Score, "Stats")',
+        "local Stats = record.Stats",
+        "Stats.Score = Stats.Score + record[1]",
+        'print(Stats.Score, record.Stats.Score, "Stats")',
     ]
 
 
@@ -100,7 +101,8 @@ def test_chained_field_aliases_inline_transitively() -> None:
     ]
 
     assert _safe_inline_simple_aliases(lines) == [
-        "root.branch.leaf = root.branch.leaf + root[1]",
+        "local branch = root.branch",
+        "branch.leaf = branch.leaf + root[1]",
     ]
 
 

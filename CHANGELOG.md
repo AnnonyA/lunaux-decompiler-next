@@ -2,6 +2,63 @@
 
 All notable changes are documented here.
 
+## [0.20.0.dev0-stage7] - 2026-08-11
+
+### Added
+
+- Added shared `CallResultShape` semantics for fixed-zero, fixed-one, fixed-many and open CALL results, including exact FASTCALL result-phi handling.
+- Added transactional `TableBuildPlan` ownership for call-valued and nested table construction with explicit escape, dependency, ordering and MULTRET rejection reasons.
+- Added a real serialized Luau v9 source-fidelity regression fixture with byte-level SHA verification and structural output assertions.
+- Added stable dot-field function declaration emission through `ProtoEmissionPlan` while keeping colon-method proof separate.
+- Added high-confidence returned-module-root naming, exact operand-valued short-circuit recovery, serialized parameter-type preservation and unused iterator `_` naming.
+- Added deterministic recursive pretty-printing for large/complex `TableExpr` values without sorting or reordering semantic evaluation.
+
+### Changed
+
+- Fixed constructor recovery so an observable CALL no longer forces a table flush when its exact SSA result is itself the next proven constructor operation.
+- Fixed false MULTRET materialization in table construction by sharing CALL result cardinality with SETLIST/open-tail ownership.
+- Extended exact-SSA folding for one-use compiler temporaries while preserving debug lifetimes, repeated mutable-read snapshots and effect barriers.
+- Module field closures with stable ownership can now emit as `function module.name(...)` instead of anonymous assignment forms.
+- Value-position `and`/`or` recovery now preserves Luau operand-return semantics and conditional evaluation.
+- Large nested constructors now render structurally across multiple lines instead of as pathological single-line expressions.
+
+### Real-world source fidelity
+
+On the pinned v9 regression module:
+
+- synthetic temporaries: `148 → 4`;
+- constructor temporaries: `138 → 0`;
+- false MULTRET annotations: `33 → 0`;
+- anonymous module-field functions: `5 → 0`;
+- dot function declarations: `0 → 5`;
+- numbered `data*` / `color*` temporaries: `0` final;
+- final table constructors: `96`;
+- CALL expressions directly owned by tables: `47`;
+- final output is byte-identical across repeated decompilations.
+
+### Corpus / readability
+
+- Semantic corpus: `2304/2304`; Medal-compatible: `384/384`; all execution/syntax/recompilation/stability/zero-fallback gates remain `100%`.
+- Changed outputs: `1696/2304` across arithmetic, boolean, closure, conditional, loops, methods, MULTRET, recursion, strings and table families.
+- Global median readability: `92.42905 → 93.45525`.
+- Paired readability: `1056` wins, `496` losses, `752` ties. Several lexical-score losses correspond to human simplifications such as direct return-call folding and unused `_` bindings.
+- Deterministic corpus digest: `b2a8325981a45828cc4a687f87840529b2b15de518478f13602f5e444f64a3ac`.
+
+### Validation
+
+- pytest: `248 passed`, `0 failed`;
+- Ruff: `0` failures;
+- mypy: `0` issues across `67` source files;
+- `git diff --check`: clean;
+- clean-base `git apply --check`: clean;
+- Stage 0 shared analysis unchanged: decode/CFG/SSA/scope `3456` each, symbols `2880`.
+
+### Performance / limitations
+
+- Host wall measurements improved materially in the recorded run, but CPU increased from `26.969 s` to `29.406 s`; no unsupported net-speedup claim is made because the host was noisy.
+- Generic statement emission remains line-oriented; a complete statement AST is still future architecture work.
+- Repeated mutable table reads, true open MULTRET outside legal tail ownership, escaping tables and ambiguous/cross-block constructor ownership remain deliberately conservative.
+
 ## [0.20.0.dev0-stage56] - 2026-08-10
 
 ### Added

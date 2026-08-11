@@ -202,6 +202,42 @@ def _replace_identifier_reference(line: str, name: str, replacement: str) -> str
     return "".join(output)
 
 
+def _count_identifier_references(line: str, name: str) -> int:
+    count = 0
+    index = 0
+    quote: str | None = None
+    escaped = False
+    while index < len(line):
+        char = line[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            index += 1
+            continue
+        if char == "-" and index + 1 < len(line) and line[index + 1] == "-":
+            break
+        if line.startswith(name, index):
+            before = line[index - 1] if index else ""
+            after_index = index + len(name)
+            after = line[after_index] if after_index < len(line) else ""
+            before_identifier = bool(before and (before.isalnum() or before == "_"))
+            after_identifier = bool(after and (after.isalnum() or after == "_"))
+            if not before_identifier and not after_identifier and before not in {".", ":"}:
+                count += 1
+                index = after_index
+                continue
+        index += 1
+    return count
+
+
 def _safe_inline_simple_aliases(lines: list[str]) -> list[str]:
     """Inline field aliases without rewriting property-name tokens.
 
@@ -240,6 +276,12 @@ def _safe_inline_simple_aliases(lines: list[str]) -> list[str]:
             for candidate in result[index + 1 : end]
         )
         if assigned_later:
+            continue
+        reference_count = sum(
+            _count_identifier_references(candidate, lhs)
+            for candidate in result[index + 1 : end]
+        )
+        if "." in rhs and reference_count > 1:
             continue
         aliases.append((index, lhs, rhs))
 
@@ -469,6 +511,7 @@ def install_full_corpus_semantics_fix() -> None:
         local_function: bool = True,
         anonymous_function: bool = False,
         method_declaration: tuple[Expr, str] | None = None,
+        field_function_declaration: tuple[Expr, str] | None = None,
     ) -> None:
         # Function headers are emitted before _name() is consulted.  Feed the debug
         # name attached to each SSA entry value into the existing parameter override
@@ -484,6 +527,7 @@ def install_full_corpus_semantics_fix() -> None:
                 local_function=local_function,
                 anonymous_function=anonymous_function,
                 method_declaration=method_declaration,
+                field_function_declaration=field_function_declaration,
             )
         finally:
             self.parameter_name_overrides.clear()

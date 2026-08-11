@@ -351,7 +351,12 @@ def _render_child(
     return rendered
 
 
-def render_expression(expression: Expr) -> str:
+def render_expression(
+    expression: Expr,
+    *,
+    pretty_tables: bool = False,
+    indent: int = 0,
+) -> str:
     if isinstance(expression, RawExpr):
         return expression.text
     if isinstance(expression, NameExpr):
@@ -409,7 +414,37 @@ def render_expression(expression: Expr) -> str:
                 fields.append(value)
             else:
                 fields.append(f"[{render_expression(field.key)}] = {value}")
-        return "{" + ", ".join(fields) + "}"
+        compact = "{" + ", ".join(fields) + "}"
+        if (
+            not pretty_tables
+            or not expression.fields
+            or (
+                len(expression.fields) <= 3
+                and len(compact) <= 88
+                and not any(
+                    isinstance(field.value, TableExpr)
+                    and len(field.value.fields) > 3
+                    for field in expression.fields
+                )
+            )
+        ):
+            return compact
+        rendered_fields: list[str] = []
+        prefix = "    " * (indent + 1)
+        for field in expression.fields:
+            value = render_expression(
+                field.value,
+                pretty_tables=True,
+                indent=indent + 1,
+            )
+            if field.name is not None and _identifier(field.name):
+                item = f"{field.name} = {value}"
+            elif field.key is None:
+                item = value
+            else:
+                item = f"[{render_expression(field.key)}] = {value}"
+            rendered_fields.append(prefix + item + ",")
+        return "{\n" + "\n".join(rendered_fields) + "\n" + "    " * indent + "}"
     if isinstance(expression, IfExpr):
         return (
             f"if {render_expression(expression.condition)} then "

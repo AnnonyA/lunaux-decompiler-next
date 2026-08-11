@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+from collections import Counter, defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Final
 
 from lunaux.backends.analysis import register_access
 from lunaux.backends.ast import Expr, LiteralExpr, TableExpr, TableField, render_expression
+from lunaux.backends.bytecode import LuauProto
+from lunaux.backends.callframe import CallFramePlan, CallResultShape
 from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
-from lunaux.backends.ssa import SSAValue
+from lunaux.backends.ssa import SSAProgram, SSAUse, SSAValue
 
 _TABLE_WRITE_OPS: Final[frozenset[str]] = frozenset(
     {"SETTABLE", "SETTABLEKS", "SETUDATAKS", "SETTABLEN", "SETLIST"}
@@ -58,6 +63,53 @@ _SAFE_GAP_OPS: Final[frozenset[str]] = frozenset(
 )
 
 TableIdentity = tuple[str, str | int]
+
+
+@dataclass(frozen=True, slots=True)
+class TableCallOwnership:
+    call_pc: int
+    consumer_pc: int
+    owner_value: SSAValue
+    result_value: SSAValue | None
+    result_shape: CallResultShape
+    protected_values: frozenset[SSAValue]
+
+
+@dataclass(frozen=True, slots=True)
+class TableBuildPlan:
+    table_identity_by_value: Mapping[SSAValue, SSAValue]
+    parent_by_table: Mapping[SSAValue, SSAValue]
+    calls: Mapping[int, TableCallOwnership]
+    rejection_counts: Mapping[str, int]
+
+    def table_identity(self, value: SSAValue | None) -> SSAValue | None:
+        return self.table_identity_by_value.get(value) if value is not None else None
+
+    def call_at(self, pc: int) -> TableCallOwnership | None:
+        return self.calls.get(pc)
+
+    def is_in_transaction(
+        self,
+        value: SSAValue,
+        protected_values: frozenset[SSAValue],
+    ) -> bool:
+        identity = self.table_identity(value)
+        seen: set[SSAValue] = set()
+        while identity is not None and identity not in seen:
+            if identity in protected_values:
+                return True
+            seen.add(identity)
+            identity = self.parent_by_table.get(identity)
+        return False
+
+    @classmethod
+    def empty(cls) -> TableBuildPlan:
+        return cls(
+            table_identity_by_value=MappingProxyType({}),
+            parent_by_table=MappingProxyType({}),
+            calls=MappingProxyType({}),
+            rejection_counts=MappingProxyType({}),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +308,29 @@ class PendingTableLiteral:
         self.dependencies.update(dependencies)
         return True
 
+    def add_open_setlist(
+        self,
+        start_index: int,
+        fixed_entries: tuple[tuple[int, Expr, frozenset[SSAValue]], ...],
+        tail: Expr,
+        tail_dependencies: frozenset[SSAValue] = frozenset(),
+    ) -> bool:
+        if self.open_tail is not None:
+            return False
+        if any(
+            index != start_index + offset
+            for offset, (index, _value, _dependencies) in enumerate(fixed_entries)
+        ):
+            return False
+        if not self.can_add_setlist_range(start_index, len(fixed_entries)):
+            return False
+        tail_index = start_index + len(fixed_entries)
+        if not fixed_entries and not self.can_add_open_tail(tail_index):
+            return False
+        if fixed_entries and not self.add_setlist_entries(fixed_entries):
+            return False
+        return self.add_open_tail(tail_index, tail, tail_dependencies)
+
     def expression(self) -> TableExpr:
         fields: list[TableField] = []
         next_array_index = 1
@@ -304,6 +379,277 @@ def table_write_source_registers(instruction: DecodedInstruction) -> frozenset[i
             )
         )
     return frozenset()
+
+
+def table_write_value_registers(instruction: DecodedInstruction) -> frozenset[int]:
+    if instruction.name in {"SETTABLE", "SETTABLEKS", "SETUDATAKS", "SETTABLEN"}:
+        return frozenset({instruction.a})
+    if instruction.name == "SETLIST":
+        semantics = setlist_semantics(instruction)
+        if semantics is None:
+            return frozenset()
+        return frozenset(
+            range(
+                semantics.first_value_register,
+                semantics.first_value_register + semantics.source_register_count,
+            )
+        )
+    return frozenset()
+
+
+def _debug_visible(proto: LuauProto, value: SSAValue) -> bool:
+    pc = value.origin_pc
+    if pc is None:
+        return False
+    return any(
+        local.register == value.register
+        and local.name is not None
+        and local.start_pc <= pc < local.end_pc
+        for local in proto.locals
+    ) or any(
+        local.register == value.register and local.start_pc <= pc < local.end_pc
+        for local in proto.typed_locals
+    )
+
+
+def _table_identities(program: SSAProgram) -> dict[SSAValue, SSAValue]:
+    identities: dict[SSAValue, SSAValue] = {}
+    for pc in sorted(program.instructions):
+        ssa_instruction = program.instructions[pc]
+        instruction = ssa_instruction.instruction
+        if instruction.name in {"NEWTABLE", "DUPTABLE"}:
+            value = program.value_defined_at(pc, instruction.a)
+            if value is not None:
+                identities[value] = value
+        elif instruction.name == "MOVE":
+            source = program.value_at_use(pc, instruction.b)
+            destination = program.value_defined_at(pc, instruction.a)
+            identity = identities.get(source) if source is not None else None
+            if identity is not None and destination is not None:
+                identities[destination] = identity
+    return identities
+
+
+def _matching_uses(
+    program: SSAProgram,
+    values: frozenset[SSAValue],
+) -> tuple[tuple[int, SSAUse], ...]:
+    return tuple(
+        (pc, use)
+        for pc in sorted(program.instructions)
+        for use in program.instructions[pc].uses
+        if use.value in values
+    )
+
+
+def _table_parents(
+    program: SSAProgram,
+    identities: Mapping[SSAValue, SSAValue],
+    rejections: Counter[str],
+) -> dict[SSAValue, SSAValue]:
+    aliases: dict[SSAValue, set[SSAValue]] = defaultdict(set)
+    for value, identity in identities.items():
+        aliases[identity].add(value)
+
+    parents: dict[SSAValue, SSAValue] = {}
+    for identity, values in aliases.items():
+        external: list[tuple[int, SSAValue]] = []
+        rejected = False
+        for pc, use in _matching_uses(program, frozenset(values)):
+            instruction = program.instructions[pc].instruction
+            if instruction.name == "MOVE" and use.register == instruction.b:
+                destination = program.value_defined_at(pc, instruction.a)
+                if destination is not None and identities.get(destination) == identity:
+                    continue
+
+            target_register = table_write_target_register(instruction)
+            if target_register is not None and target_register == use.register:
+                target = program.value_at_use(pc, target_register)
+                if target is not None and identities.get(target) == identity:
+                    continue
+
+            if use.register in table_write_value_registers(instruction):
+                target = (
+                    program.value_at_use(pc, target_register)
+                    if target_register is not None
+                    else None
+                )
+                parent = identities.get(target) if target is not None else None
+                if parent is not None and parent != identity:
+                    external.append((pc, parent))
+                    continue
+
+            rejected = True
+
+        if rejected:
+            rejections["table-escaped"] += 1
+            continue
+        if len(external) != 1:
+            if external:
+                rejections["multi-use-child"] += 1
+            continue
+        parents[identity] = external[0][1]
+    return parents
+
+
+def _protected_tables(
+    owner: SSAValue,
+    parents: Mapping[SSAValue, SSAValue],
+) -> frozenset[SSAValue]:
+    result: set[SSAValue] = set()
+    current: SSAValue | None = owner
+    while current is not None and current not in result:
+        result.add(current)
+        current = parents.get(current)
+    return frozenset(result)
+
+
+def _single_use(program: SSAProgram, value: SSAValue) -> tuple[int, SSAUse] | None:
+    uses = _matching_uses(program, frozenset({value}))
+    return uses[0] if len(uses) == 1 else None
+
+
+def _call_consumer(
+    program: SSAProgram,
+    pc: int,
+    shape: CallResultShape,
+    result_value: SSAValue | None,
+) -> tuple[int, SSAUse | None] | None:
+    if shape == CallResultShape.FIXED_ONE and result_value is not None:
+        return _single_use(program, result_value)
+    if shape != CallResultShape.OPEN:
+        return None
+    produced = program.multi_value_at(pc)
+    if produced is None:
+        return None
+    matches = tuple(use for use in program.multi_values.uses if use.value == produced)
+    if len(matches) != 1 or matches[0].kind != "setlist":
+        return None
+    return matches[0].consumer_pc, None
+
+
+def _call_gap_is_structural(
+    program: SSAProgram,
+    call_pc: int,
+    consumer_pc: int,
+    candidate_consumers: Mapping[int, int],
+) -> bool:
+    for pc in sorted(program.instructions):
+        if not call_pc < pc < consumer_pc:
+            continue
+        instruction = program.instructions[pc].instruction
+        if is_safe_table_gap(instruction):
+            continue
+        if instruction.name in {"CALL", "CALLFB"} and candidate_consumers.get(pc) == consumer_pc:
+            continue
+        return False
+    return True
+
+
+def plan_table_builds(
+    program: SSAProgram,
+    proto: LuauProto,
+    call_frames: CallFramePlan,
+) -> TableBuildPlan:
+    """Plan CALL ownership without treating physical registers as table identity.
+
+    A call may stay inside a pending constructor only when its exact SSA result (or
+    open SSA tuple) has one structural table-write consumer.  Parent protection is
+    derived from single-owner table SSA uses, so unrelated pending tables still flush
+    at the call barrier.
+    """
+
+    rejections: Counter[str] = Counter()
+    identities = _table_identities(program)
+    parents = _table_parents(program, identities, rejections)
+    raw: dict[int, tuple[int, SSAValue, SSAValue | None, CallResultShape]] = {}
+
+    for pc, frame in call_frames.frames.items():
+        result_value = (
+            program.value_defined_at(pc, frame.callee_register)
+            if frame.result_shape in {CallResultShape.FIXED_ONE, CallResultShape.OPEN}
+            else None
+        )
+        consumer = _call_consumer(program, pc, frame.result_shape, result_value)
+        if consumer is None:
+            if frame.result_shape in {
+                CallResultShape.FIXED_MANY,
+                CallResultShape.OPEN,
+            }:
+                rejections["open-multret"] += 1
+            elif frame.result_shape == CallResultShape.FIXED_ONE:
+                rejections["not-single-use"] += 1
+            continue
+        consumer_pc, result_use = consumer
+        ssa_consumer = program.instructions.get(consumer_pc)
+        if ssa_consumer is None:
+            rejections["non-table-consumer"] += 1
+            continue
+        instruction = ssa_consumer.instruction
+        target_register = table_write_target_register(instruction)
+        multi_use = program.multi_use_at(consumer_pc)
+        is_open_prefix = (
+            instruction.name == "SETLIST"
+            and instruction.c == 0
+            and result_use is not None
+            and multi_use is not None
+            and result_use.register in multi_use.prefix_registers
+        )
+        if (
+            target_register is None
+            or (
+                result_use is not None
+                and result_use.register not in table_write_value_registers(instruction)
+                and not is_open_prefix
+            )
+        ):
+            rejections["non-table-consumer"] += 1
+            continue
+        if frame.result_shape == CallResultShape.OPEN:
+            semantics = setlist_semantics(instruction)
+            if semantics is None or not semantics.is_open:
+                rejections["open-multret"] += 1
+                continue
+        target = program.value_at_use(consumer_pc, target_register)
+        owner = identities.get(target) if target is not None else None
+        if owner is None:
+            rejections["missing-table-owner"] += 1
+            continue
+        if program.analysis.block_for_pc.get(pc) != program.analysis.block_for_pc.get(
+            consumer_pc
+        ):
+            rejections["cross-block"] += 1
+            continue
+        if result_value is not None and _debug_visible(proto, result_value):
+            rejections["debug-binding"] += 1
+            continue
+        protected = _protected_tables(owner, parents)
+        if any(identities.get(dependency) in protected for dependency in frame.dependencies):
+            rejections["call-not-owned"] += 1
+            continue
+        raw[pc] = (consumer_pc, owner, result_value, frame.result_shape)
+
+    candidate_consumers = {pc: item[0] for pc, item in raw.items()}
+    calls: dict[int, TableCallOwnership] = {}
+    for pc, (consumer_pc, owner, result_value, shape) in raw.items():
+        if not _call_gap_is_structural(program, pc, consumer_pc, candidate_consumers):
+            rejections["observable-order-conflict"] += 1
+            continue
+        calls[pc] = TableCallOwnership(
+            call_pc=pc,
+            consumer_pc=consumer_pc,
+            owner_value=owner,
+            result_value=result_value,
+            result_shape=shape,
+            protected_values=_protected_tables(owner, parents),
+        )
+
+    return TableBuildPlan(
+        table_identity_by_value=MappingProxyType(dict(identities)),
+        parent_by_table=MappingProxyType(dict(parents)),
+        calls=MappingProxyType(dict(calls)),
+        rejection_counts=MappingProxyType(dict(sorted(rejections.items()))),
+    )
 
 
 def is_table_write(instruction: DecodedInstruction) -> bool:

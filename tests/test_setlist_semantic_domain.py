@@ -119,7 +119,9 @@ def test_real_legacy_mixed_table_recovers_fixed_setlist(version: int) -> None:
     )
 
     assert output.startswith(
-        'local value = {Name = "case-0", Stats = {Score = 0, Enabled = true}, 0, 0}\n'
+        'local value = {\n    Name = "case-0",\n'
+        "    Stats = {Score = 0, Enabled = true},\n"
+        "    0,\n    0,\n}\n"
     )
     assert "value[1] = 0" not in output
     assert "value[2] = 0" not in output
@@ -142,7 +144,7 @@ def test_two_contiguous_setlist_batches_extend_one_initializer() -> None:
 
     output = decompile_module(_module(code), {}, "contiguous-setlist.luau")
 
-    assert "local value = {10, 20, 30, 40}" in output
+    assert "local value = {\n    10,\n    20,\n    30,\n    40,\n}" in output
     assert "value[" not in output
 
 
@@ -161,8 +163,8 @@ def test_real_toolchain_non_one_batch_shape_uses_semantic_start_index() -> None:
 
     output = decompile_module(_module(tuple(words)), {}, "non-one-setlist.luau")
 
-    expected = ", ".join(str(value) for value in range(1, 33))
-    assert f"local value = {{{expected}}}" in output
+    expected = "\n".join(f"    {value}," for value in range(1, 33))
+    assert f"local value = {{\n{expected}\n}}" in output
     assert "value[17]" not in output
 
 

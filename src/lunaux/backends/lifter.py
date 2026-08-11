@@ -38,7 +38,9 @@ from lunaux.backends.bytecode import (
     LuauConstant,
     LuauProto,
     format_type_tag,
+    function_parameter_types,
 )
+from lunaux.backends.callframe import CallResultShape
 from lunaux.backends.canonical_cfg import build_canonical_cfg_plan
 from lunaux.backends.classes import (
     ClassRecoveryPlan,
@@ -83,17 +85,24 @@ from lunaux.backends.scopes import build_scope_tree
 from lunaux.backends.semantic_naming import (
     FunctionRole,
     build_semantic_name_plan,
+    infer_returned_module_root,
 )
 from lunaux.backends.ssa import SSAValue, build_ssa
 from lunaux.backends.state_machine import StateMachineRegion, recover_state_machines
-from lunaux.backends.structuring import build_structured_recovery
+from lunaux.backends.structuring import (
+    ValueShortCircuitRegion,
+    build_structured_recovery,
+)
 from lunaux.backends.symbols import SymbolRecovery, build_symbol_recovery
 from lunaux.backends.table_recovery import (
     PendingTableLiteral,
+    TableBuildPlan,
     is_safe_table_gap,
     is_table_write,
+    plan_table_builds,
     table_write_source_registers,
     table_write_target_register,
+    table_write_value_registers,
 )
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -251,7 +260,10 @@ class _Emitter:
             if statement and self.semicolons and text and not text.rstrip().endswith(";")
             else ""
         )
-        self.lines.append("    " * self.indent + text + suffix)
+        parts = text.splitlines() or [""]
+        for index, part in enumerate(parts):
+            line_suffix = suffix if index == len(parts) - 1 else ""
+            self.lines.append("    " * self.indent + part + line_suffix)
 
     def open(self, text: str) -> None:
         self.line(text)
@@ -500,7 +512,15 @@ class _FunctionLifter:
         self.inline_only_proto_ids = inline_only_proto_ids
         self.upvalue_bindings = upvalue_bindings or {}
         self.parameter_name_overrides = parameter_name_overrides or {}
-        self.parameter_type_overrides = parameter_type_overrides or {}
+        self.parameter_type_overrides = dict(parameter_type_overrides or {})
+        self.parameter_type_overrides.update(
+            {
+                index: type_name
+                for index, type_name in enumerate(
+                    function_parameter_types(proto, module.userdata_type_map)
+                )
+            }
+        )
         self.return_type_override = return_type_override
         self.module_analysis = module_analysis
         self.proto_emission_plan = proto_emission_plan
@@ -555,7 +575,7 @@ class _FunctionLifter:
             self.instructions,
             enabled=options.advanced_loops,
         )
-        self.structured_plan = build_structured_recovery(self.ssa)
+        self.structured_plan = build_structured_recovery(self.ssa, proto)
         self.canonical_cfg_plan = build_canonical_cfg_plan(
             self.analysis,
             self.instructions,
@@ -601,6 +621,11 @@ class _FunctionLifter:
             self.symbols,
             parameter_overrides=self.parameter_name_overrides,
             function_role=semantic_function_role,
+            returned_module_root=(
+                infer_returned_module_root(proto, self.ssa)
+                if proto.proto_id == module.main_proto_id
+                else None
+            ),
         )
         self.class_plan = (
             recover_classes(
@@ -634,6 +659,11 @@ class _FunctionLifter:
             ),
         )
         self.call_frames = self.inline_plan.call_frames
+        self.table_build_plan = (
+            plan_table_builds(self.ssa, proto, self.call_frames)
+            if options.reconstruct_table_literals
+            else TableBuildPlan.empty()
+        )
         self.rmw_plan = plan_read_modify_write(self.ssa, proto, self.scope_tree)
         self.inline_expressions: dict[SSAValue, Expr] = {}
         self.pending_rmw_rhs: dict[int, Expr] = {}
@@ -756,11 +786,23 @@ class _FunctionLifter:
             if options.combine_boolean_conditions
             else {}
         )
+        self.active_value_short_circuits = (
+            {
+                root: region
+                for root, region in self.structured_plan.value_short_circuit_by_root.items()
+                if root not in loop_condition_pcs
+                and not (region.skipped_pcs & machine_pcs)
+            }
+            if options.combine_boolean_conditions and options.inline_single_use_temporaries
+            else {}
+        )
         self.active_structuring_skip_pcs: set[int] = set()
         for region in self.active_phi_headers.values():
             self.active_structuring_skip_pcs.update(region.skipped_pcs)
         for chain in self.active_boolean_chains.values():
             self.active_structuring_skip_pcs.update(chain.skipped_pcs)
+        for short_circuit in self.active_value_short_circuits.values():
+            self.active_structuring_skip_pcs.update(short_circuit.skipped_pcs)
         self.labels = self._collect_labels()
 
     def _analyze_control_flow(self) -> None:
@@ -943,6 +985,13 @@ class _FunctionLifter:
     def _ref_expr(self, register: int, pc: int) -> Expr:
         value = self.ssa.value_at_use(pc, register)
         if value is not None:
+            pending = self.pending_tables.get(value)
+            if (
+                pending is not None
+                and self._table_value_can_inline(pending, pc)
+            ):
+                self.pending_tables.pop(value, None)
+                return pending.expression()
             callback = self.callback_expressions.get(value)
             if callback is not None:
                 return callback
@@ -1016,7 +1065,7 @@ class _FunctionLifter:
             lhs = "local " + self._annotated_name(register, name, pc)
             self.declared.add(name)
         self.register_names[register] = name
-        rendered = render_expression(resolved_expression)
+        rendered = render_expression(resolved_expression, pretty_tables=True)
         self.out.line(f"{lhs} = {rendered}", statement=True)
 
     def _assign_many(
@@ -1025,7 +1074,13 @@ class _FunctionLifter:
         expression: Expr | str,
         pc: int,
     ) -> None:
-        rendered_expression = render_expression(ensure_expr(expression))
+        if len(registers) == 1:
+            self._assign(registers[0], expression, pc)
+            return
+        rendered_expression = render_expression(
+            ensure_expr(expression),
+            pretty_tables=True,
+        )
         names = [self._definition_name(register, pc) for register in registers]
         new_flags = [name not in self.declared for name in names]
         if all(new_flags):
@@ -1140,6 +1195,19 @@ class _FunctionLifter:
         value = self.ssa.value_at_use(pc, register)
         return self.pending_tables.get(value) if value is not None else None
 
+    def _pending_table_for_identity(
+        self,
+        identity: SSAValue,
+    ) -> PendingTableLiteral | None:
+        return next(
+            (
+                pending
+                for pending in self.pending_tables.values()
+                if self.table_build_plan.table_identity(pending.value) == identity
+            ),
+            None,
+        )
+
     def _pending_table_for_write(
         self,
         instruction: DecodedInstruction,
@@ -1171,6 +1239,20 @@ class _FunctionLifter:
         instruction: DecodedInstruction,
     ) -> PendingTableLiteral | None:
         next_instruction = self.next_instruction_by_pc.get(instruction.pc)
+        ownership = (
+            self.table_build_plan.call_at(instruction.pc)
+            if instruction.name in {"CALL", "CALLFB"}
+            else None
+        )
+        if ownership is not None and ownership.result_shape == CallResultShape.OPEN:
+            if (
+                next_instruction is None
+                or next_instruction.pc != ownership.consumer_pc
+                or next_instruction.name != "SETLIST"
+                or next_instruction.c != 0
+            ):
+                return None
+            return self._pending_table_for_identity(ownership.owner_value)
         if (
             next_instruction is None
             or next_instruction.name != "SETLIST"
@@ -1203,26 +1285,53 @@ class _FunctionLifter:
             if instruction.name in {"CALL", "CALLFB", "GETVARARGS"}
             else None
         )
+        owned_call = (
+            self.table_build_plan.call_at(instruction.pc)
+            if instruction.name in {"CALL", "CALLFB"}
+            else None
+        )
+        protected_identities = (
+            owned_call.protected_values if owned_call is not None else frozenset()
+        )
         write_sources = (
             table_write_source_registers(instruction) if target_pending is not None else frozenset()
+        )
+        ssa_instruction = self.ssa.instruction_at(instruction.pc)
+        used_values = (
+            frozenset(use.value for use in ssa_instruction.uses)
+            if ssa_instruction is not None
+            else frozenset()
+        )
+        table_value_registers = table_write_value_registers(instruction)
+        source_table_values = frozenset(
+            value
+            for register in table_value_registers
+            if (value := self.ssa.value_at_use(instruction.pc, register)) is not None
         )
 
         for pending in sorted(
             tuple(self.pending_tables.values()),
             key=lambda item: (item.definition_pc, item.emit_pc),
         ):
+            if self.table_build_plan.is_in_transaction(
+                pending.value,
+                protected_identities,
+            ):
+                continue
             if pending is transfer_pending:
                 continue
             if pending is target_pending:
                 continue
             if pending is open_parent:
                 continue
+            if pending.value in source_table_values:
+                continue
             if target_pending is not None and pending.register in write_sources:
                 continue
-            if access.definitions & (frozenset({pending.register}) | pending.dependency_registers):
+            if access.definitions & pending.dependency_registers:
                 self._flush_pending_table(pending)
                 continue
-            if pending.register in access.uses:
+            if pending.value in used_values:
                 self._flush_pending_table(pending)
                 continue
             if is_table_write(instruction):
@@ -1252,6 +1361,145 @@ class _FunctionLifter:
         for use in instruction.uses:
             dependencies.update(self._dependencies_for_value(use.value, next_seen))
         return frozenset(dependencies)
+
+    def _structured_value_expression(
+        self,
+        value: SSAValue,
+        region: ValueShortCircuitRegion,
+        seen: frozenset[SSAValue] = frozenset(),
+    ) -> Expr | None:
+        if value in seen:
+            return None
+        if value.kind == "entry":
+            name = self.semantic_names.entry_names.get(
+                value.register,
+                self.register_names.get(value.register, f"arg{value.register + 1}"),
+            )
+            return NameExpr(name)
+        if (
+            value not in region.expression_values
+            or value.kind != "instruction"
+            or value.origin_pc is None
+        ):
+            return None
+        definition = self.ssa.instruction_at(value.origin_pc)
+        if definition is None:
+            return None
+        instruction = definition.instruction
+        next_seen = seen | frozenset({value})
+
+        def operand(register: int) -> Expr | None:
+            source = next(
+                (use.value for use in definition.uses if use.register == register),
+                None,
+            )
+            return (
+                self._structured_value_expression(source, region, next_seen)
+                if source is not None
+                else None
+            )
+
+        name = instruction.name
+        if name == "LOADNIL":
+            return LiteralExpr("nil")
+        if name == "LOADB" and instruction.c == 0:
+            return LiteralExpr("true" if instruction.b else "false")
+        if name == "LOADN":
+            return LiteralExpr(str(instruction.d))
+        if name == "LOADK":
+            return source_expr(_constant_expr(self.proto, instruction.d))
+        if name == "LOADKX":
+            return source_expr(_constant_expr(self.proto, instruction.aux or 0))
+        if name == "MOVE":
+            return operand(instruction.b)
+        if name == "GETGLOBAL":
+            return RawExpr(self._global_key(instruction), Precedence.POSTFIX)
+        if name == "GETIMPORT":
+            return RawExpr(
+                _decode_import(self.proto, instruction.aux),
+                Precedence.POSTFIX,
+            )
+        if name == "GETUPVAL":
+            binding = self.upvalue_bindings.get(instruction.b)
+            if binding is not None:
+                return binding
+            upvalue = (
+                self.proto.upvalue_names[instruction.b]
+                if instruction.b < len(self.proto.upvalue_names)
+                else None
+            )
+            return NameExpr(_sanitize_identifier(upvalue, f"upvalue_{instruction.b}"))
+        if name == "GETTABLE":
+            base = operand(instruction.b)
+            index = operand(instruction.c)
+            return IndexExpr(base, index) if base is not None and index is not None else None
+        if name in {"GETTABLEKS", "GETUDATAKS"}:
+            base = operand(instruction.b)
+            return FieldExpr(base, self._table_key(instruction)) if base is not None else None
+        if name == "GETTABLEN":
+            base = operand(instruction.b)
+            return (
+                IndexExpr(base, LiteralExpr(str(instruction.c + 1)))
+                if base is not None
+                else None
+            )
+        if name in _BINARY_OPS:
+            left = operand(instruction.b)
+            right = operand(instruction.c)
+            return (
+                BinaryExpr(left, _BINARY_OPS[name], right)
+                if left is not None and right is not None
+                else None
+            )
+        if name in _BINARY_CONST_OPS:
+            left = operand(instruction.b)
+            return (
+                BinaryExpr(
+                    left,
+                    _BINARY_CONST_OPS[name],
+                    source_expr(_constant_expr(self.proto, instruction.c)),
+                )
+                if left is not None
+                else None
+            )
+        if name in {"SUBRK", "DIVRK"}:
+            right = operand(instruction.c)
+            return (
+                BinaryExpr(
+                    source_expr(_constant_expr(self.proto, instruction.b)),
+                    "-" if name == "SUBRK" else "/",
+                    right,
+                )
+                if right is not None
+                else None
+            )
+        if name in _UNARY_OPS:
+            item = operand(instruction.b)
+            return UnaryExpr(_UNARY_OPS[name].strip(), item) if item is not None else None
+        if name == "CONCAT":
+            items = [operand(register) for register in range(instruction.b, instruction.c + 1)]
+            if any(item is None for item in items):
+                return None
+            expression = cast(Expr, items[-1])
+            for item in reversed(items[:-1]):
+                expression = BinaryExpr(cast(Expr, item), "..", expression)
+            return expression
+        return None
+
+    def _capture_value_short_circuit(
+        self,
+        region: ValueShortCircuitRegion,
+    ) -> bool:
+        left = self._structured_value_expression(region.left, region)
+        right = self._structured_value_expression(region.right, region)
+        if left is None or right is None:
+            return False
+        self.inline_expressions[region.result] = BinaryExpr(
+            left,
+            region.operator,
+            right,
+        )
+        return True
 
     def _table_value_can_inline(
         self,
@@ -1393,7 +1641,7 @@ class _FunctionLifter:
                 success = pending.add_setlist_entries(tuple(entries))
         elif instruction.name == "SETLIST" and instruction.c == 0:
             open_captured = self.pending_open_table_values.pop(
-                instruction.b,
+                pc,
                 None,
             )
             if open_captured is not None and open_captured[2] == pc:
@@ -1402,13 +1650,35 @@ class _FunctionLifter:
                 if semantics is None:
                     return False
                 start_index = semantics.semantic_first_array_index
-                success = pending.add_open_tail(
+                multi_use = self.ssa.multi_use_at(pc)
+                prefix_registers = (
+                    multi_use.prefix_registers
+                    if multi_use is not None and multi_use.kind == "setlist"
+                    else ()
+                )
+                fixed_entries: list[
+                    tuple[int, Expr, frozenset[SSAValue]]
+                ] = []
+                for offset, register in enumerate(prefix_registers):
+                    captured = self._capture_register_expression(
+                        pending,
+                        register,
+                        pc,
+                        allow_nested=True,
+                    )
+                    if captured is None:
+                        break
+                    prefix_value, prefix_dependencies = captured
+                    fixed_entries.append(
+                        (start_index + offset, prefix_value, prefix_dependencies)
+                    )
+                success = len(fixed_entries) == len(prefix_registers) and pending.add_open_setlist(
                     start_index,
+                    tuple(fixed_entries),
                     value,
                     dependencies,
                 )
                 if success:
-                    self._flush_pending_table(pending)
                     return True
 
         if success:
@@ -1473,16 +1743,34 @@ class _FunctionLifter:
         next_instruction = self.next_instruction_by_pc.get(instruction.pc)
         if parent is None or next_instruction is None:
             return False
-        dependencies = frozenset(
-            value
-            for register in self.analysis.register_accesses[instruction.pc].uses
-            if (value := self.ssa.value_at_use(instruction.pc, register)) is not None
-        )
-        self.pending_open_table_values[instruction.a] = (
+        dependency_values: set[SSAValue] = set()
+        for register in self.analysis.register_accesses[instruction.pc].uses:
+            value = self.ssa.value_at_use(instruction.pc, register)
+            if value is not None:
+                dependency_values.update(self._dependencies_for_value(value))
+        dependencies = frozenset(dependency_values)
+        self.pending_open_table_values[next_instruction.pc] = (
             expression,
             dependencies,
             next_instruction.pc,
         )
+        return True
+
+    def _capture_owned_table_call(
+        self,
+        instruction: DecodedInstruction,
+        expression: Expr,
+    ) -> bool:
+        ownership = self.table_build_plan.call_at(instruction.pc)
+        if (
+            ownership is None
+            or ownership.result_shape != CallResultShape.FIXED_ONE
+            or ownership.result_value is None
+            or self._pending_table_for_identity(ownership.owner_value) is None
+        ):
+            return False
+        self.inline_expressions[ownership.result_value] = expression
+        self.register_names.setdefault(instruction.a, f"v{instruction.a}")
         return True
 
     def _close_blocks(self, pc: int) -> None:
@@ -1665,7 +1953,7 @@ class _FunctionLifter:
             "inline-expression",
         }:
             return False
-        if instance.emission_kind == "method-declaration":
+        if instance.emission_kind in {"method-declaration", "field-declaration"}:
             return True
 
         child = self.module.protos[instance.child_proto_id]
@@ -1761,6 +2049,50 @@ class _FunctionLifter:
         ).lift(
             as_function=True,
             method_declaration=(base, instance.method_name),
+        )
+        return True
+
+    def _emit_planned_field_function(self, instruction: DecodedInstruction) -> bool:
+        if self.parent_proto_plan is None:
+            return False
+        instance = self.parent_proto_plan.at_terminal(instruction.pc)
+        if (
+            instance is None
+            or instance.emission_kind != "field-declaration"
+            or instance.field_name is None
+        ):
+            return False
+        pending = self._pending_table_for_write(instruction)
+        if pending is not None:
+            self._flush_pending_table(pending)
+        creation = self.instruction_by_pc.get(instance.creation_pc)
+        if creation is None:
+            return False
+        child = self.module.protos[instance.child_proto_id]
+        bindings, _dependencies = self._callback_capture_bindings(creation, child)
+        context = self.contextual_plan.for_value(instance.closure_value)
+        base = self._ref_expr(instruction.b, instruction.pc)
+        _FunctionLifter(
+            self.module,
+            child,
+            self.proto_names,
+            self.options,
+            self.out,
+            inline_only_proto_ids=self.inline_only_proto_ids,
+            upvalue_bindings=bindings,
+            parameter_name_overrides=(
+                dict(context.parameter_names) if context is not None else None
+            ),
+            parameter_type_overrides=(
+                dict(context.parameter_types) if context is not None else None
+            ),
+            return_type_override=context.return_type if context is not None else None,
+            module_analysis=self.module_analysis,
+            proto_emission_plan=self.proto_emission_plan,
+            semantic_function_role="normal",
+        ).lift(
+            as_function=True,
+            field_function_declaration=(base, instance.field_name),
         )
         return True
 
@@ -2024,6 +2356,7 @@ class _FunctionLifter:
         local_function: bool = True,
         anonymous_function: bool = False,
         method_declaration: tuple[Expr, str] | None = None,
+        field_function_declaration: tuple[Expr, str] | None = None,
     ) -> None:
         parameters = []
         for register in range(self.proto.num_params):
@@ -2057,6 +2390,13 @@ class _FunctionLifter:
                 header = (
                     f"function {render_expression(receiver)}:"
                     f"{_sanitize_identifier(method_name, 'method')}"
+                    f"({', '.join(parameters)})"
+                )
+            elif field_function_declaration is not None:
+                receiver, field_name = field_function_declaration
+                header = (
+                    f"function {render_expression(receiver)}."
+                    f"{_sanitize_identifier(field_name, 'field')}"
                     f"({', '.join(parameters)})"
                 )
             elif anonymous_function:
@@ -2110,6 +2450,15 @@ class _FunctionLifter:
                 else:
                     typed.append(name)
             self.out.line("-- upvalues: " + ", ".join(typed))
+
+        rejected_value_regions = [
+            region
+            for region in self.active_value_short_circuits.values()
+            if not self._capture_value_short_circuit(region)
+        ]
+        for region in rejected_value_regions:
+            self.active_value_short_circuits.pop(region.root_pc, None)
+            self.active_structuring_skip_pcs.difference_update(region.skipped_pcs)
 
         for instruction in self.instructions:
             self._finalize_phi_regions(instruction.pc)
@@ -2237,6 +2586,10 @@ class _FunctionLifter:
             instruction
         ):
             return
+        if name in {"SETTABLEKS", "SETUDATAKS"} and self._emit_planned_field_function(
+            instruction
+        ):
+            return
         if (
             name in {"NEWTABLE", "DUPTABLE"}
             and self.options.recover_classes
@@ -2354,9 +2707,10 @@ class _FunctionLifter:
             )
             self._assign(instruction.a, expression, pc)
         elif name in {"SETTABLEKS", "SETUDATAKS"}:
+            value = self._ref_expr(instruction.a, pc)
             self.out.line(
                 f"{_field(self._ref(instruction.b, pc), self._table_key(instruction))} "
-                f"= {self._ref(instruction.a, pc)}",
+                f"= {render_expression(value, pretty_tables=True)}",
                 statement=True,
             )
         elif name == "GETTABLEN":
@@ -2451,18 +2805,18 @@ class _FunctionLifter:
                     )
         elif name in {"NEWCLOSURE", "DUPCLOSURE"}:
             child_id = closure_proto_id(self.proto, instruction)
-            value = self.ssa.value_defined_at(pc, instruction.a)
+            closure_value = self.ssa.value_defined_at(pc, instruction.a)
             if (
                 child_id is not None
-                and value is not None
-                and value in self.callback_plan.proto_by_value
+                and closure_value is not None
+                and closure_value in self.callback_plan.proto_by_value
             ):
                 expression, dependencies = self._anonymous_function_expr(
                     child_id,
                     instruction,
                 )
-                self.callback_expressions[value] = expression
-                self.callback_dependencies[value] = dependencies
+                self.callback_expressions[closure_value] = expression
+                self.callback_dependencies[closure_value] = dependencies
                 self.register_names.setdefault(instruction.a, f"v{instruction.a}")
                 return
             expression = (
@@ -2483,6 +2837,20 @@ class _FunctionLifter:
                 slot = "sealed" if instruction.aux == 0xFFFFFFFF else str(instruction.aux)
                 self.out.line(f"-- call feedback slot: {slot}")
             expression = self._call_expression(instruction)
+            fastcall_result = self.call_frames.fastcall_result_at(pc)
+            if (
+                fastcall_result is not None
+                and self.options.inline_single_use_temporaries
+                and self.ssa.uses_of(fastcall_result) == 1
+            ):
+                self.inline_expressions[fastcall_result] = expression
+                self.register_names.setdefault(instruction.a, f"v{instruction.a}")
+                return
+            if self.options.reconstruct_table_literals and self._capture_owned_table_call(
+                instruction,
+                expression,
+            ):
+                return
             if instruction.c == 1:
                 self.out.line(render_expression(expression), statement=True)
             elif instruction.c == 0:

@@ -12,6 +12,8 @@ from lunaux.backends.analysis import (
     ControlFlowAnalysis,
     register_access,
 )
+from lunaux.backends.bytecode import LuauProto
+from lunaux.backends.effects import is_transparent_instruction
 from lunaux.backends.opcodes import DecodedInstruction, get_jump_target
 from lunaux.backends.ssa import SSAPhi, SSAProgram, SSAValue
 
@@ -112,6 +114,18 @@ class BooleanChain:
 
 
 @dataclass(frozen=True, slots=True)
+class ValueShortCircuitRegion:
+    root_pc: int
+    join_pc: int
+    operator: Literal["and", "or"]
+    result: SSAValue
+    left: SSAValue
+    right: SSAValue
+    expression_values: frozenset[SSAValue]
+    skipped_pcs: frozenset[int]
+
+
+@dataclass(frozen=True, slots=True)
 class StructuredRecoveryPlan:
     phi_regions: tuple[PhiIfRegion, ...]
     phi_by_header: Mapping[int, PhiIfRegion]
@@ -119,8 +133,167 @@ class StructuredRecoveryPlan:
     captured_phi_values: frozenset[SSAValue]
     boolean_chains: tuple[BooleanChain, ...]
     boolean_by_root: Mapping[int, BooleanChain]
+    value_short_circuits: tuple[ValueShortCircuitRegion, ...]
+    value_short_circuit_by_root: Mapping[int, ValueShortCircuitRegion]
     skipped_condition_pcs: frozenset[int]
     skipped_structuring_pcs: frozenset[int]
+
+
+def _debug_visible(proto: LuauProto | None, value: SSAValue) -> bool:
+    if proto is None or value.origin_pc is None:
+        return False
+    pc = value.origin_pc
+    return any(
+        local.register == value.register and local.start_pc <= pc < local.end_pc
+        for local in proto.locals
+    ) or any(
+        local.register == value.register and local.start_pc <= pc < local.end_pc
+        for local in proto.typed_locals
+    )
+
+
+def _expression_graph(
+    program: SSAProgram,
+    value: SSAValue,
+    allowed_blocks: frozenset[int],
+    proto: LuauProto | None,
+    seen: frozenset[SSAValue] = frozenset(),
+) -> tuple[frozenset[SSAValue], frozenset[int]] | None:
+    if value in seen:
+        return None
+    if value.kind == "entry":
+        return frozenset(), frozenset()
+    if value.kind != "instruction" or value.origin_pc is None:
+        return None
+    definition = program.instructions.get(value.origin_pc)
+    if (
+        definition is None
+        or definition.instruction.name not in _PURE_PHI_VALUE_OPS
+        or (
+            definition.instruction.name == "LOADB"
+            and definition.instruction.c != 0
+        )
+        or program.analysis.block_for_pc.get(value.origin_pc) not in allowed_blocks
+        or _debug_visible(proto, value)
+    ):
+        return None
+    values: set[SSAValue] = {value}
+    pcs: set[int] = {value.origin_pc}
+    next_seen = seen | frozenset({value})
+    for use in definition.uses:
+        child = _expression_graph(
+            program,
+            use.value,
+            allowed_blocks,
+            proto,
+            next_seen,
+        )
+        if child is None:
+            return None
+        values.update(child[0])
+        pcs.update(child[1])
+    return frozenset(values), frozenset(pcs)
+
+
+def _value_short_circuits(
+    program: SSAProgram,
+    proto: LuauProto | None,
+) -> tuple[ValueShortCircuitRegion, ...]:
+    analysis = program.analysis
+    phis_by_block: dict[int, list[SSAPhi]] = defaultdict(list)
+    for phi in program.phis:
+        phis_by_block[phi.block].append(phi)
+    result: list[ValueShortCircuitRegion] = []
+    for branch in analysis.branches:
+        join = branch.join
+        header = analysis.block_by_start.get(branch.header)
+        rhs = analysis.block_by_start.get(branch.fallthrough)
+        if (
+            join is None
+            or branch.taken != join
+            or header is None
+            or rhs is None
+            or header.terminator is None
+            or header.terminator.name not in {"JUMPIF", "JUMPIFNOT"}
+            or rhs.successors != frozenset({join})
+        ):
+            continue
+        condition = header.terminator
+        left = program.value_at_use(condition.pc, condition.a)
+        if left is None:
+            continue
+        matching = [
+            (phi, phi.operands.get(branch.header), phi.operands.get(branch.fallthrough))
+            for phi in phis_by_block.get(join, [])
+        ]
+        matching = [
+            (phi, lhs, rhs_value)
+            for phi, lhs, rhs_value in matching
+            if lhs == left and rhs_value is not None
+        ]
+        if len(matching) != 1:
+            continue
+        phi, _lhs, right = matching[0]
+        assert right is not None
+        left_graph = _expression_graph(
+            program,
+            left,
+            frozenset({branch.header}),
+            proto,
+        )
+        right_graph = _expression_graph(
+            program,
+            right,
+            frozenset({branch.fallthrough}),
+            proto,
+        )
+        if left_graph is None or right_graph is None:
+            continue
+        expression_values = left_graph[0] | right_graph[0]
+        definition_pcs = left_graph[1] | right_graph[1]
+        rhs_definitions = {
+            definition.pc
+            for definition in rhs.instructions
+            if definition.name not in _IGNORED_OPS | _UNCONDITIONAL_JUMPS
+        }
+        if rhs_definitions != set(right_graph[1]):
+            continue
+        left_start = min(left_graph[1], default=condition.pc)
+        if any(
+            pc not in left_graph[1]
+            and not is_transparent_instruction(ssa_instruction.instruction)
+            for pc, ssa_instruction in program.instructions.items()
+            if left_start <= pc < condition.pc
+        ):
+            continue
+        allowed_use_pcs = definition_pcs | frozenset({condition.pc})
+        if any(
+            use.value in expression_values and pc not in allowed_use_pcs
+            for pc, ssa_instruction in program.instructions.items()
+            for use in ssa_instruction.uses
+        ):
+            continue
+        skipped = set(definition_pcs)
+        skipped.add(condition.pc)
+        if (
+            rhs.terminator is not None
+            and rhs.terminator.name in _UNCONDITIONAL_JUMPS
+            and get_jump_target(rhs.terminator) == join
+        ):
+            skipped.add(rhs.terminator.pc)
+        result.append(
+            ValueShortCircuitRegion(
+                root_pc=condition.pc,
+                join_pc=join,
+                operator="or" if condition.name == "JUMPIF" else "and",
+                result=phi.result,
+                left=left,
+                right=right,
+                expression_values=expression_values,
+                skipped_pcs=frozenset(skipped),
+            )
+        )
+    return tuple(sorted(result, key=lambda item: (item.root_pc, item.join_pc)))
 
 
 def _condition_only(block: BasicBlock) -> bool:
@@ -445,13 +618,17 @@ def _merge_phi_condition_chains(
     return tuple(merged_regions), remaining_chains
 
 
-def build_structured_recovery(program: SSAProgram) -> StructuredRecoveryPlan:
+def build_structured_recovery(
+    program: SSAProgram,
+    proto: LuauProto | None = None,
+) -> StructuredRecoveryPlan:
     phi_regions = _phi_regions(program)
     boolean_chains = _boolean_chains(program.analysis)
     phi_regions, boolean_chains = _merge_phi_condition_chains(
         phi_regions,
         boolean_chains,
     )
+    value_short_circuits = _value_short_circuits(program, proto)
 
     phi_by_join: dict[int, list[PhiIfRegion]] = defaultdict(list)
     captured_values: set[SSAValue] = set()
@@ -465,6 +642,8 @@ def build_structured_recovery(program: SSAProgram) -> StructuredRecoveryPlan:
     for chain in boolean_chains:
         skipped_condition_pcs.update(chain.condition_pcs[1:])
         skipped_structuring_pcs.update(chain.skipped_pcs)
+    for short_circuit in value_short_circuits:
+        skipped_structuring_pcs.update(short_circuit.skipped_pcs)
 
     return StructuredRecoveryPlan(
         phi_regions=phi_regions,
@@ -478,6 +657,10 @@ def build_structured_recovery(program: SSAProgram) -> StructuredRecoveryPlan:
         captured_phi_values=frozenset(captured_values),
         boolean_chains=boolean_chains,
         boolean_by_root=MappingProxyType({chain.root_pc: chain for chain in boolean_chains}),
+        value_short_circuits=value_short_circuits,
+        value_short_circuit_by_root=MappingProxyType(
+            {short_circuit.root_pc: short_circuit for short_circuit in value_short_circuits}
+        ),
         skipped_condition_pcs=frozenset(skipped_condition_pcs),
         skipped_structuring_pcs=frozenset(skipped_structuring_pcs),
     )

@@ -175,7 +175,8 @@ def test_module_table_exports_inline_function_fields() -> None:
     output = decompile_module(_module(child, main, main=1), {}, "module.luau")
 
     assert "-- Roblox ModuleScript export: table" in output
-    assert "Start = function()" in output
+    assert "function module.Start(): number" in output
+    assert "Start = function()" not in output
     assert "return 1" in output
     assert "local function start" not in output
 
@@ -209,7 +210,8 @@ def test_require_dependency_uses_module_path_for_name_and_report() -> None:
     output = decompile_module(_module(main, main=0), {}, "consumer.luau")
 
     assert "-- Roblox module dependencies: script.Parent.InventoryService" in output
-    assert "local inventoryService = require(script.Parent.InventoryService)" in output
+    assert "return require(script.Parent.InventoryService)" in output
+    assert "local inventoryService" not in output
     assert "-- Roblox ModuleScript export: module" in output
 
 

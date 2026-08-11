@@ -106,7 +106,9 @@ def test_real_v6_uses_stage3_callframe_and_nested_stage4_rmw() -> None:
     }
 
     assert outputs == {
-        'local value = {Name = "case-0", Stats = {Score = 0, Enabled = true}, 0, 0}\n'
+        'local value = {\n    Name = "case-0",\n'
+        "    Stats = {Score = 0, Enabled = true},\n"
+        "    0,\n    0,\n}\n"
         "value.Stats.Score += value[1]\n"
         "print(value.Name, value.Stats.Score, value[2])\n"
     }

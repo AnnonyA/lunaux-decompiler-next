@@ -284,6 +284,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
         local_function: bool = True,
         anonymous_function: bool = False,
         method_declaration: tuple[Expr, str] | None = None,
+        field_function_declaration: tuple[Expr, str] | None = None,
     ) -> None:
         original_override = self.return_type_override
         original_symbols = self.symbols
@@ -298,6 +299,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
                 local_function=local_function,
                 anonymous_function=anonymous_function,
                 method_declaration=method_declaration,
+                field_function_declaration=field_function_declaration,
             )
         finally:
             self.return_type_override = original_override
@@ -307,25 +309,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
         self,
         instruction: DecodedInstruction,
     ) -> PendingTableLiteral | None:
-        next_instruction = self.next_instruction_by_pc.get(instruction.pc)
-        if (
-            next_instruction is None
-            or next_instruction.name != "SETLIST"
-            or next_instruction.c != 0
-            or next_instruction.b != instruction.a
-        ):
-            return None
-        pending = self._pending_table_for_write(next_instruction)
-        if pending is None:
-            return None
-        access = self.analysis.register_accesses[instruction.pc]
-        if pending.register in access.uses:
-            return None
-        semantics = setlist_semantics(next_instruction)
-        if semantics is None:
-            return None
-        start_index = semantics.semantic_first_array_index
-        return pending if pending.can_add_open_tail(start_index) else None
+        return super()._open_table_parent_for_producer(instruction)
 
     def _record_table_write(self, instruction: DecodedInstruction) -> bool:
         if instruction.name != "SETLIST":
@@ -362,11 +346,37 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
             if len(entries) == count and pending.add_setlist_entries(tuple(entries)):
                 return True
         else:
-            open_captured = self.pending_open_table_values.pop(instruction.b, None)
+            open_captured = self.pending_open_table_values.pop(pc, None)
             if open_captured is not None and open_captured[2] == pc:
                 value, dependencies, _consumer_pc = open_captured
-                if pending.add_open_tail(start_index, value, dependencies):
-                    self._flush_pending_table(pending)
+                multi_use = self.ssa.multi_use_at(pc)
+                prefix_registers = (
+                    multi_use.prefix_registers
+                    if multi_use is not None and multi_use.kind == "setlist"
+                    else ()
+                )
+                fixed_entries: list[
+                    tuple[int, Expr, frozenset[SSAValue]]
+                ] = []
+                for offset, register in enumerate(prefix_registers):
+                    captured = self._capture_register_expression(
+                        pending,
+                        register,
+                        pc,
+                        allow_nested=True,
+                    )
+                    if captured is None:
+                        break
+                    prefix_value, prefix_dependencies = captured
+                    fixed_entries.append(
+                        (start_index + offset, prefix_value, prefix_dependencies)
+                    )
+                if len(fixed_entries) == len(prefix_registers) and pending.add_open_setlist(
+                    start_index,
+                    tuple(fixed_entries),
+                    value,
+                    dependencies,
+                ):
                     return True
 
         self._flush_pending_table(pending)

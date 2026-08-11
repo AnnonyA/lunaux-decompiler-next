@@ -232,6 +232,7 @@ def _analyze_multi_values(analysis: ControlFlowAnalysis) -> SSAMultiValuePlan:
 class _SSABuilder:
     def __init__(self, analysis: ControlFlowAnalysis) -> None:
         self.analysis = analysis
+        self.multi_values = _analyze_multi_values(analysis)
         self.counters: dict[int, int] = defaultdict(int)
         self.stacks: dict[int, list[SSAValue]] = defaultdict(list)
         self.entry_values: dict[int, SSAValue] = {}
@@ -315,9 +316,15 @@ class _SSABuilder:
 
         for instruction in block.instructions:
             access = self.analysis.register_accesses[instruction.pc]
+            multi_use = self.multi_values.use_at(instruction.pc)
+            use_registers = access.uses | (
+                frozenset(multi_use.prefix_registers)
+                if multi_use is not None
+                else frozenset()
+            )
             uses = tuple(
                 SSAUse(register=register, value=self._current(register))
-                for register in sorted(access.uses)
+                for register in sorted(use_registers)
             )
             for use in uses:
                 self.use_counts[use.value] += 1
@@ -379,7 +386,7 @@ class _SSABuilder:
                 }
             ),
             definitions=MappingProxyType(dict(sorted(self.definitions.items()))),
-            multi_values=_analyze_multi_values(self.analysis),
+            multi_values=self.multi_values,
         )
 
 

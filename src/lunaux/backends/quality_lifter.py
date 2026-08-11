@@ -241,7 +241,8 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
         serialized_type = legacy._local_type(self.module, self.proto, register, pc)
         if serialized_type and serialized_type != "any":
             return f"{name}: {serialized_type}"
-        return name
+        parameter_type = self.parameter_type_overrides.get(register) if pc == 0 else None
+        return f"{name}: {parameter_type}" if parameter_type and parameter_type != "any" else name
 
     def _resolve_phi_expression(
         self,
@@ -505,6 +506,23 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
             preferred = ("index", "value", "item")
             for offset in range(variable_count):
                 register = instruction.a + 3 + offset
+                loop_value = (
+                    self.ssa.value_defined_at(loop_instruction.pc, register)
+                    if loop_instruction is not None
+                    else None
+                )
+                debug_binding = (
+                    self.scope_tree.binding_for_register(register, loop_instruction.pc)
+                    if loop_instruction is not None
+                    else None
+                )
+                if (
+                    loop_value is not None
+                    and self.ssa.uses_of(loop_value) == 0
+                    and debug_binding is None
+                ):
+                    variables.append("_")
+                    continue
                 base = (
                     preferred[offset]
                     if offset < len(preferred)

@@ -112,7 +112,7 @@ def test_child_with_external_use_is_not_absorbed() -> None:
     output = decompile_module(_module(code, constants), {}, "shared-child.luau")
 
     assert "{Value = 7}" in output
-    assert "{Child = tbl" in output
+    assert "local tbl1: table = {Child = module}" in output
     assert "Child = {Value = 7}" not in output
 
 
@@ -201,5 +201,5 @@ def test_noncontiguous_open_setlist_uses_conservative_fallback() -> None:
     output = decompile_module(_module(code, constants), {}, "open-gap.luau")
 
     assert "{[2] = 2}" in output
-    assert "multiple returns" in output
+    assert "-- set all stack values from var1 into tbl1 starting at 2" in output
     assert "set all stack values" in output

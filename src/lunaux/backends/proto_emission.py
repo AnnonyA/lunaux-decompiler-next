@@ -16,6 +16,7 @@ from lunaux.backends.roblox_recovery import (
     plan_inline_callbacks,
 )
 from lunaux.backends.scopes import Binding, ScopeTree
+from lunaux.backends.semantic_naming import valid_identifier
 from lunaux.backends.ssa import SSAInstruction, SSAProgram, SSAValue
 
 if TYPE_CHECKING:
@@ -27,6 +28,7 @@ EmissionKind = Literal[
     "local-function",
     "predeclared-assignment",
     "method-declaration",
+    "field-declaration",
     "inline-expression",
 ]
 
@@ -61,6 +63,7 @@ class ProtoInstancePlan:
     recursive: bool
     recursion_group: tuple[int, ...]
     method_name: str | None
+    field_name: str | None
     method_receiver: SSAValue | None
     rejection_reasons: tuple[str, ...]
 
@@ -462,6 +465,7 @@ def _plan_parent(
         )
         kind: EmissionKind = "shared-proto"
         method_name: str | None = None
+        field_name: str | None = None
         method_receiver: SSAValue | None = None
 
         if terminal_instruction is not None:
@@ -500,6 +504,22 @@ def _plan_parent(
                 else:
                     kind = "method-declaration"
                     method_name = candidate_name
+                    method_receiver = receiver
+
+                if (
+                    kind == "shared-proto"
+                    and valid_identifier(candidate_name)
+                    and _stable_method_base(program, receiver)
+                    and _transparent_gap(
+                        program,
+                        instruction.pc,
+                        sink.pc,
+                        allowed,
+                    )
+                    and not recursive
+                ):
+                    kind = "field-declaration"
+                    field_name = candidate_name
                     method_receiver = receiver
 
         if kind == "shared-proto" and recursive:
@@ -551,6 +571,7 @@ def _plan_parent(
                 recursive=recursive,
                 recursion_group=(instruction.pc,) if recursive else (),
                 method_name=method_name,
+                field_name=field_name,
                 method_receiver=method_receiver,
                 rejection_reasons=tuple(reasons),
             )
@@ -606,7 +627,7 @@ def _plan_parent(
         instance.terminal_pc: instance
         for instance in instances
         if instance.terminal_pc is not None
-        and instance.emission_kind == "method-declaration"
+        and instance.emission_kind in {"method-declaration", "field-declaration"}
     }
     skipped_pcs = {
         pc
@@ -616,7 +637,7 @@ def _plan_parent(
             *instance.capture_pcs,
             *(
                 instance.alias_move_pcs
-                if instance.emission_kind == "method-declaration"
+                if instance.emission_kind in {"method-declaration", "field-declaration"}
                 else frozenset()
             ),
         )

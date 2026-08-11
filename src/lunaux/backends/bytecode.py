@@ -247,6 +247,26 @@ def format_type_tag(
     return f"{name}?" if optional else name
 
 
+def function_parameter_types(
+    proto: LuauProto,
+    userdata_types: dict[int, str] | None = None,
+) -> tuple[str, ...]:
+    """Decode exact fixed-parameter tags from a serialized function type."""
+
+    info = proto.function_type_info
+    if (
+        len(info) < 2
+        or (info[0] & 0x7F) != 5
+        or info[1] != proto.num_params
+        or len(info) < 2 + proto.num_params
+    ):
+        return ()
+    return tuple(
+        format_type_tag(tag, userdata_types)
+        for tag in info[2 : 2 + proto.num_params]
+    )
+
+
 def _read_string_ref(reader: _Reader, strings: tuple[str, ...]) -> str | None:
     string_id = reader.read_varuint()
     if string_id == 0:

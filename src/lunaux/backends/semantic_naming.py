@@ -209,6 +209,65 @@ def _allocate(base: str, occupied: set[str]) -> str:
     return result
 
 
+def _canonical_move(program: SSAProgram, value: SSAValue | None) -> SSAValue | None:
+    current = value
+    seen: set[SSAValue] = set()
+    while (
+        current is not None
+        and current not in seen
+        and current.kind == "instruction"
+        and current.origin_pc is not None
+    ):
+        seen.add(current)
+        definition = program.instructions.get(current.origin_pc)
+        if definition is None or definition.instruction.name != "MOVE":
+            break
+        current = program.value_at_use(
+            current.origin_pc,
+            definition.instruction.b,
+        )
+    return current
+
+
+def infer_returned_module_root(
+    proto: LuauProto,
+    program: SSAProgram,
+) -> SSAValue | None:
+    """Return a proven top-level module table, never a guessed local table."""
+
+    if proto.num_params != 0:
+        return None
+    returned: list[SSAValue] = []
+    for pc in sorted(program.instructions):
+        instruction = program.instructions[pc].instruction
+        if instruction.name != "RETURN":
+            continue
+        if instruction.b != 2:
+            return None
+        value = _canonical_move(program, program.value_at_use(pc, instruction.a))
+        if value is None:
+            return None
+        returned.append(value)
+    if not returned or any(value != returned[0] for value in returned[1:]):
+        return None
+    root = returned[0]
+    if root.kind != "instruction" or root.origin_pc is None:
+        return None
+    definition = program.instructions.get(root.origin_pc)
+    if definition is None or definition.instruction.name not in {"NEWTABLE", "DUPTABLE"}:
+        return None
+    has_named_field = any(
+        instruction.instruction.name in {"SETTABLEKS", "SETUDATAKS"}
+        and _canonical_move(
+            program,
+            program.value_at_use(instruction.pc, instruction.instruction.b),
+        )
+        == root
+        for instruction in program.instructions.values()
+    )
+    return root if has_named_field else None
+
+
 def build_semantic_name_plan(
     proto: LuauProto,
     instructions: Sequence[DecodedInstruction],
@@ -218,6 +277,7 @@ def build_semantic_name_plan(
     *,
     parameter_overrides: Mapping[int, str] = MappingProxyType({}),
     function_role: FunctionRole = "normal",
+    returned_module_root: SSAValue | None = None,
 ) -> SemanticNamePlan:
     first_use_by_value: dict[SSAValue, int] = {}
     for ssa_instruction in sorted(
@@ -271,7 +331,18 @@ def build_semantic_name_plan(
             source: NameSource
             confidence = 0
             detail = ""
-            if symbol is not None and valid_identifier(symbol.name) and not generated_identifier(
+            field = _field_hint(proto, instruction)
+            if value == returned_module_root:
+                candidate = "module"
+                source = "structural-role"
+                confidence = 95
+                detail = "unique named-field table returned by the module root"
+            elif field is not None and (symbol is None or symbol.confidence < 75):
+                candidate = field
+                source = "field"
+                confidence = 70
+                detail = "exact GETTABLEKS field"
+            elif symbol is not None and valid_identifier(symbol.name) and not generated_identifier(
                 symbol.name
             ):
                 candidate = symbol.name
@@ -279,7 +350,6 @@ def build_semantic_name_plan(
                 confidence = max(75, symbol.confidence)
                 detail = ", ".join(symbol.evidence)
             else:
-                field = _field_hint(proto, instruction)
                 if field is not None:
                     candidate = field
                     source = "field"

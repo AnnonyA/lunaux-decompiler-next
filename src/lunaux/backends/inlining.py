@@ -14,7 +14,7 @@ from lunaux.backends.effects import (
     classify_instruction,
     is_transparent_instruction,
 )
-from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
+from lunaux.backends.opcodes import DecodedInstruction, get_jump_target, setlist_semantics
 from lunaux.backends.ssa import SSAProgram, SSAValue
 
 _INLINEABLE_DEFINITIONS = frozenset(
@@ -192,6 +192,8 @@ def _debug_visible(proto: LuauProto, register: int, pc: int) -> bool:
 def _use_sites(program: SSAProgram) -> Mapping[SSAValue, tuple[int, ...]]:
     sites: dict[SSAValue, list[int]] = defaultdict(list)
     for pc, instruction in program.instructions.items():
+        if instruction.instruction.name.startswith("FASTCALL"):
+            continue
         for use in instruction.uses:
             sites[use.value].append(pc)
     return MappingProxyType({value: tuple(sorted(set(pcs))) for value, pcs in sites.items()})
@@ -201,7 +203,80 @@ def _use_occurrences(program: SSAProgram, value: SSAValue) -> int:
     return sum(
         use.value == value
         for instruction in program.instructions.values()
+        if not instruction.instruction.name.startswith("FASTCALL")
         for use in instruction.uses
+    )
+
+
+def _debug_visible_through(
+    proto: LuauProto,
+    register: int,
+    definition_pc: int,
+    use_pc: int,
+) -> bool:
+    return any(
+        local.register == register
+        and local.start_pc <= use_pc
+        and local.end_pc > definition_pc
+        for local in proto.locals
+    ) or any(
+        local.register == register
+        and local.start_pc <= use_pc
+        and local.end_pc > definition_pc
+        for local in proto.typed_locals
+    )
+
+
+def _fastcall_bridge(
+    program: SSAProgram,
+    definition_pc: int,
+    consumer_pc: int,
+) -> bool:
+    definition_block = program.analysis.block_for_pc.get(definition_pc)
+    consumer_block = program.analysis.block_for_pc.get(consumer_pc)
+    if definition_block is None or consumer_block is None:
+        return False
+    fallback = program.analysis.block_by_start.get(definition_block)
+    if fallback is None or fallback.successors != frozenset({consumer_block}):
+        return False
+    return any(
+        instruction.instruction.name.startswith("FASTCALL")
+        and get_jump_target(instruction.instruction) == consumer_block
+        and definition_block
+        in program.analysis.block_by_start[
+            program.analysis.block_for_pc[instruction.pc]
+        ].successors
+        and consumer_block
+        in program.analysis.block_by_start[
+            program.analysis.block_for_pc[instruction.pc]
+        ].successors
+        for instruction in program.instructions.values()
+        if instruction.pc < definition_pc
+        and instruction.pc in program.analysis.block_for_pc
+    )
+
+
+def _fastcall_value_bridge(
+    program: SSAProgram,
+    definition_pc: int,
+    use_pc: int,
+) -> bool:
+    definition_block = program.analysis.block_for_pc.get(definition_pc)
+    use_block = program.analysis.block_for_pc.get(use_pc)
+    if definition_block is None or use_block is None:
+        return False
+    if definition_block == use_block:
+        return True
+    header = program.analysis.block_by_start.get(definition_block)
+    if header is None:
+        return False
+    return any(
+        instruction.instruction.name.startswith("FASTCALL")
+        and instruction.pc > definition_pc
+        and use_block in header.successors
+        and get_jump_target(instruction.instruction) in header.successors
+        for instruction in program.instructions.values()
+        if program.analysis.block_for_pc.get(instruction.pc) == definition_block
     )
 
 
@@ -352,7 +427,14 @@ def plan_expression_inlining(
         if definition_pc >= consumer_pc:
             return None
         block = program.analysis.block_for_pc.get(definition_pc)
-        if block is None or block != program.analysis.block_for_pc.get(consumer_pc):
+        consumer_block = program.analysis.block_for_pc.get(consumer_pc)
+        if block is None or (
+            block != consumer_block
+            and not (
+                definition.instruction.name in {"CALL", "CALLFB"}
+                and _fastcall_bridge(program, definition_pc, consumer_pc)
+            )
+        ):
             return None
         effect = classify_instruction(definition.instruction)
         if not effect.expression_capable:
@@ -459,6 +541,110 @@ def plan_expression_inlining(
                 effect=classify_instruction(definition.instruction),
             )
             selected[value] = candidate
+
+    # Literals carry no evaluation, allocation, lookup, or metamethod effect.  A
+    # single-use literal can therefore cross a CFG join (including FASTCALL's
+    # optimized/fallback diamond) without reordering any observable operation.
+    for value, use_pcs in sites.items():
+        if value in selected or value.kind != "instruction" or value.origin_pc is None:
+            continue
+        portable_definition = program.instructions.get(value.origin_pc)
+        if (
+            portable_definition is None
+            or classify_instruction(portable_definition.instruction).kind
+            != EffectKind.LITERAL
+            or (
+                portable_definition.instruction.name == "LOADB"
+                and portable_definition.instruction.c != 0
+            )
+            or len(portable_definition.definitions) != 1
+            or _use_occurrences(program, value) != 1
+            or len(use_pcs) != 1
+        ):
+            continue
+        use_pc = use_pcs[0]
+        if (
+            _debug_visible_through(proto, value.register, value.origin_pc, use_pc)
+            or not _fastcall_value_bridge(program, value.origin_pc, use_pc)
+            or sum(
+                operand == value
+                for operand in _ordered_operand_values(
+                    program,
+                    program.instructions[use_pc].instruction,
+                    resolved_call_frames,
+                )
+            )
+            != 1
+        ):
+            continue
+        if program.instructions[use_pc].instruction.name not in _SUPPORTED_CONSUMERS:
+            continue
+        candidate = InlineCandidate(
+            value=value,
+            definition_pc=value.origin_pc,
+            use_pc=use_pc,
+            register=value.register,
+            dependencies=frozenset(),
+            evaluation_pcs=(value.origin_pc,),
+            effect=classify_instruction(portable_definition.instruction),
+        )
+        selected[value] = candidate
+
+    # A MOVE of an entry binding is only a lexical reference.  It can cross
+    # lookup/setup instructions when no call, mutation, control edge, or
+    # redefinition of that entry register intervenes.
+    for value, use_pcs in sites.items():
+        if value in selected or value.kind != "instruction" or value.origin_pc is None:
+            continue
+        move_definition = program.instructions.get(value.origin_pc)
+        if (
+            move_definition is None
+            or move_definition.instruction.name != "MOVE"
+            or _use_occurrences(program, value) != 1
+            or len(use_pcs) != 1
+        ):
+            continue
+        source = program.value_at_use(value.origin_pc, move_definition.instruction.b)
+        if source is None or source.kind != "entry":
+            continue
+        use_pc = use_pcs[0]
+        if (
+            _debug_visible_through(proto, value.register, value.origin_pc, use_pc)
+            or sum(
+                operand == value
+                for operand in _ordered_operand_values(
+                    program,
+                    program.instructions[use_pc].instruction,
+                    resolved_call_frames,
+                )
+            )
+            != 1
+        ):
+            continue
+        gap = [
+            instruction
+            for pc, instruction in program.instructions.items()
+            if value.origin_pc < pc < use_pc
+        ]
+        if any(
+            effect.writes_state
+            or effect.may_call
+            or effect.changes_control_flow
+            or any(item.register == source.register for item in instruction.definitions)
+            for instruction in gap
+            for effect in (classify_instruction(instruction.instruction),)
+        ):
+            continue
+        candidate = InlineCandidate(
+            value=value,
+            definition_pc=value.origin_pc,
+            use_pc=use_pc,
+            register=value.register,
+            dependencies=frozenset({source}),
+            evaluation_pcs=(value.origin_pc,),
+            effect=classify_instruction(move_definition.instruction),
+        )
+        selected[value] = candidate
 
     by_definition = {
         (candidate.definition_pc, candidate.register): candidate for candidate in selected.values()

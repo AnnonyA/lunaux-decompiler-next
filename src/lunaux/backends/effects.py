@@ -29,6 +29,11 @@ class InstructionEffect:
 
     @property
     def expression_capable(self) -> bool:
+        if self.kind == EffectKind.CALL:
+            # Calls are expression syntax even though they are effectful.  The
+            # inlining planner may move one only across an otherwise empty,
+            # same-block evaluation gap while preserving its single SSA use.
+            return True
         return (
             not self.writes_state
             and not self.changes_control_flow
@@ -174,7 +179,7 @@ def classify_instruction(instruction: DecodedInstruction) -> InstructionEffect:
 
 
 def is_transparent_instruction(instruction: DecodedInstruction) -> bool:
-    return instruction.name in {
+    return instruction.name.startswith("FASTCALL") or instruction.name in {
         "NOP",
         "COVERAGE",
         "LOADNIL",

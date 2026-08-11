@@ -2,7 +2,7 @@
 
 LunaUX is a local Luau bytecode decompiler/disassembler focused on Roblox. It keeps the heavy work on your machine, supports modern serialized Luau bytecode, and tries to produce readable Luau without executing the bytecode you give it.
 
-**Current status:** **2304/2304 semantic passes**, 100% execution/syntax/recompilation/stability/zero-fallback, **384/384 Medal-compatible**, with **0 semantic failures** and **0 timeouts**. The Stage 0→6+ recovery roadmap is implemented in `main`: shared analysis, safety/effect infrastructure, semantic `SETLIST` recovery, exact-SSA folding with `CallFrame`, structural `ReadModifyWrite`, `ProtoEmissionPlan`, canonical CFG planning, and deterministic semantic naming.
+**Current status:** **2304/2304 semantic passes**, 100% execution/syntax/recompilation/stability/zero-fallback, **384/384 Medal-compatible**, with **0 semantic failures** and **0 timeouts**. Stage 7 source fidelity is now implemented in `main`: exact CALL/MULTRET result shapes, transactional call-valued table construction, stronger SSA expression folding, returned-module naming, dot-function declarations, value-position short-circuit recovery, type preservation, and deterministic complex-table formatting build on the completed Stage 0→6+ architecture.
 
 ## Quick start
 
@@ -133,6 +133,20 @@ Warmed decompiler-only performance measured **32.348 s / 71.23 cases/s** on the 
 
 The main remaining structuring limitation is deliberate: generic `elseif` and guard emission remains conservative until the AST emitter can own region closure boundaries end-to-end. The CFG planner records those regions now, but does not fabricate prettier source when emission ownership is not yet proven.
 
+## Stage 7: source fidelity
+
+Stage 7 targets the gap between semantically correct output and human-quality source on real modules. `CallResultShape` now makes fixed-zero, fixed-one, fixed-many and open CALL results explicit through shared `CallFrame` semantics. `TableBuildPlan` can transactionally retain owned CALL expressions inside pending table constructors when exact SSA ownership, evaluation order, escape state and result shape prove that doing so is safe. True open MULTRET tails remain conservative and preserve Luau tail semantics.
+
+That means nested call-valued tables can stay structural instead of exploding into constructor-only temporaries. The real v9 regression fixture moved from **148 → 4 synthetic temporaries**, **138 → 0 constructor temporaries**, and **33 → 0 false MULTRET annotations**. It now recovers **96 table constructors**, **47 CALL expressions directly in tables**, **5 `function module.*` declarations**, no numbered `data*`/`color*` temporaries, and deterministic module-root naming.
+
+Stage 7 also extends `ProtoEmissionPlan` with stable dot-field function declarations, recovers exact operand-valued `and`/`or` expressions, preserves serialized parameter types, uses `_` for proven unused non-debug iterator bindings, and adds deterministic multiline rendering for large or nested `TableExpr` values without reordering entries.
+
+Across the deterministic corpus, Stage 7 changes **1696/2304 outputs** while retaining **2304/2304 semantic**, **384/384 Medal-compatible**, and 100% execution/syntax/recompilation/stability/zero-fallback. Global median readability moves from **92.42905 → 93.45525** with **1056 wins, 496 losses and 752 ties**; several scorer losses are intentional human-readable simplifications such as direct return-call folding and unused `_` bindings. Stage 0 analysis construction remains unchanged at **3456 decode / CFG / SSA / scope** and **2880 symbol** builds.
+
+Validation: **248 pytest passed**, Ruff clean, mypy clean across **67 source files**, `git diff --check` clean, and clean-base `git apply --check` clean. Deterministic corpus digest: `b2a8325981a45828cc4a687f87840529b2b15de518478f13602f5e444f64a3ac`.
+
+The main remaining architecture item is a complete statement AST: generic function-body emission is still line-oriented even though table/call/expression ownership is now substantially more structural.
+
 ## Recovery roadmap
 
 | Stage | Focus | Target | Status |
@@ -144,6 +158,7 @@ The main remaining structuring limitation is deliberate: generic `elseif` and gu
 | **Stage 4** | `ReadModifyWrite` | Recover forms like `data.Stats.Score += data[1]`. | ✅ Complete |
 | **Stage 5** | `ProtoEmissionPlan` | Human recursion, methods and closures. | ✅ Complete |
 | **Stage 6+** | CFG structuring + naming | Canonical, deterministic source recovery. | ✅ Complete |
+| **Stage 7** | Source fidelity | CALL-valued constructors, exact MULTRET ownership, module functions and canonical table output. | ✅ Complete |
 
 ## Progress so far
 
@@ -162,6 +177,7 @@ The main remaining structuring limitation is deliberate: generic `elseif` and gu
 | **Stage 4 / 0.20 dev** | Structural `ReadModifyWrite` recovery + AST compound assignments. |
 | **Stage 5 / 0.20 dev** | SSA-owned `ProtoEmissionPlan` for recursion, methods, captures and closure emission. |
 | **Stage 6+ / 0.20 dev** | Canonical CFG region planning + deterministic semantic naming. |
+| **Stage 7 / 0.20 dev** | Transactional table/CALL ownership, source-fidelity folding, module field declarations and canonical table formatting. |
 
 ## Backend modes
 

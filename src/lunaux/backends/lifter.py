@@ -39,6 +39,7 @@ from lunaux.backends.bytecode import (
     LuauProto,
     format_type_tag,
 )
+from lunaux.backends.canonical_cfg import build_canonical_cfg_plan
 from lunaux.backends.classes import (
     ClassRecoveryPlan,
     collect_class_method_proto_ids,
@@ -61,6 +62,12 @@ from lunaux.backends.opcodes import (
     get_jump_target,
     setlist_semantics,
 )
+from lunaux.backends.proto_emission import (
+    ParentProtoEmissionPlan,
+    ProtoEmissionPlan,
+    ProtoInstancePlan,
+    build_proto_emission_plan,
+)
 from lunaux.backends.read_modify_write import (
     ReadModifyWrite,
     StorageKind,
@@ -73,6 +80,10 @@ from lunaux.backends.roblox_recovery import (
     plan_inline_callbacks,
 )
 from lunaux.backends.scopes import build_scope_tree
+from lunaux.backends.semantic_naming import (
+    FunctionRole,
+    build_semantic_name_plan,
+)
 from lunaux.backends.ssa import SSAValue, build_ssa
 from lunaux.backends.state_machine import StateMachineRegion, recover_state_machines
 from lunaux.backends.structuring import build_structured_recovery
@@ -478,6 +489,8 @@ class _FunctionLifter:
         parameter_type_overrides: dict[int, str] | None = None,
         return_type_override: str | None = None,
         module_analysis: ModuleAnalysis | None = None,
+        proto_emission_plan: ProtoEmissionPlan | None = None,
+        semantic_function_role: FunctionRole = "normal",
     ) -> None:
         self.module = module
         self.proto = proto
@@ -490,6 +503,8 @@ class _FunctionLifter:
         self.parameter_type_overrides = parameter_type_overrides or {}
         self.return_type_override = return_type_override
         self.module_analysis = module_analysis
+        self.proto_emission_plan = proto_emission_plan
+        self.semantic_function_role = semantic_function_role
         if module_analysis is None:
             self.scope_tree = build_scope_tree(proto)
             self.instructions = list(decode_words(proto.code))
@@ -511,12 +526,21 @@ class _FunctionLifter:
         self.pending_namecalls: dict[int, tuple[Expr, str]] = {}
         self.block_closures: dict[int, list[str]] = defaultdict(list)
         self.else_transitions: dict[int, int] = {}
-        self.callback_plan = plan_inline_callbacks(
-            module,
-            proto,
-            self.instructions,
-            self.ssa,
-            enabled=options.inline_roblox_callbacks,
+        self.parent_proto_plan: ParentProtoEmissionPlan | None = (
+            proto_emission_plan.for_parent(proto.proto_id)
+            if proto_emission_plan is not None
+            else None
+        )
+        self.callback_plan = (
+            self.parent_proto_plan.callback_plan
+            if self.parent_proto_plan is not None
+            else plan_inline_callbacks(
+                module,
+                proto,
+                self.instructions,
+                self.ssa,
+                enabled=options.inline_roblox_callbacks,
+            )
         )
         self.callback_expressions: dict[SSAValue, Expr] = {}
         self.callback_dependencies: dict[SSAValue, frozenset[SSAValue]] = {}
@@ -532,6 +556,16 @@ class _FunctionLifter:
             enabled=options.advanced_loops,
         )
         self.structured_plan = build_structured_recovery(self.ssa)
+        self.canonical_cfg_plan = build_canonical_cfg_plan(
+            self.analysis,
+            self.instructions,
+            self.structured_plan,
+            self.advanced_loop_plan,
+            self.state_machine_plan,
+        )
+        self.structured_plan = self.canonical_cfg_plan.structured
+        self.advanced_loop_plan = self.canonical_cfg_plan.advanced_loops
+        self.state_machine_plan = self.canonical_cfg_plan.state_machines
         self.phi_conditions: dict[int, Expr] = {}
         self.pending_tables: dict[SSAValue, PendingTableLiteral] = {}
         self.pending_open_table_values: dict[
@@ -559,6 +593,15 @@ class _FunctionLifter:
                 flow_sensitive_types=options.flow_sensitive_types,
                 roblox_api_types=options.roblox_api_types,
             )
+        self.semantic_names = build_semantic_name_plan(
+            proto,
+            self.instructions,
+            self.ssa,
+            self.scope_tree,
+            self.symbols,
+            parameter_overrides=self.parameter_name_overrides,
+            function_role=semantic_function_role,
+        )
         self.class_plan = (
             recover_classes(
                 module,
@@ -581,11 +624,21 @@ class _FunctionLifter:
             enabled=options.contextual_functions,
             module_analysis=module_analysis,
         )
-        self.inline_plan = plan_expression_inlining(self.ssa, proto)
+        self.inline_plan = plan_expression_inlining(
+            self.ssa,
+            proto,
+            call_frames=(
+                self.parent_proto_plan.call_frames
+                if self.parent_proto_plan is not None
+                else None
+            ),
+        )
         self.call_frames = self.inline_plan.call_frames
         self.rmw_plan = plan_read_modify_write(self.ssa, proto, self.scope_tree)
         self.inline_expressions: dict[SSAValue, Expr] = {}
         self.pending_rmw_rhs: dict[int, Expr] = {}
+        self.planned_function_names: dict[int, str] = {}
+        self.emitted_recursion_groups: set[tuple[int, ...]] = set()
         self.instruction_by_pc = {instruction.pc: instruction for instruction in self.instructions}
         self.instruction_index_by_pc = {
             instruction.pc: index for index, instruction in enumerate(self.instructions)
@@ -858,6 +911,10 @@ class _FunctionLifter:
             self.register_names[register] = active
             return active
         if self.options.smart_variable_names and self.symbols is not None:
+            planned = self.semantic_names.name_at_use(self.ssa, pc, register)
+            if planned is not None:
+                self.register_names[register] = planned
+                return planned
             recovered = self.symbols.name_at_use(pc, register)
             if recovered is not None:
                 self.register_names[register] = recovered
@@ -873,6 +930,10 @@ class _FunctionLifter:
             self.register_names[register] = active
             return active
         if self.options.smart_variable_names and self.symbols is not None:
+            planned = self.semantic_names.name_at_definition(self.ssa, pc, register)
+            if planned is not None:
+                self.register_names[register] = planned
+                return planned
             recovered = self.symbols.name_at_definition(pc, register)
             if recovered is not None:
                 self.register_names[register] = recovered
@@ -1490,12 +1551,16 @@ class _FunctionLifter:
         self,
         child_id: int,
         instruction: DecodedInstruction,
+        *,
+        capture_bindings: dict[int, Expr] | None = None,
     ) -> tuple[Expr, frozenset[SSAValue]]:
         child = self.module.protos[child_id]
         bindings, dependencies = self._callback_capture_bindings(
             instruction,
             child,
         )
+        if capture_bindings:
+            bindings.update(capture_bindings)
         callback_out = _Emitter(self.options.semicolons)
         closure_value = self.ssa.value_defined_at(instruction.pc, instruction.a)
         callback_types = (
@@ -1524,11 +1589,180 @@ class _FunctionLifter:
             parameter_type_overrides=parameter_type_overrides,
             return_type_override=context.return_type if context is not None else None,
             module_analysis=self.module_analysis,
+            proto_emission_plan=self.proto_emission_plan,
         ).lift(as_function=True, anonymous_function=True)
         return (
             RawExpr(callback_out.render().strip(), Precedence.ATOM),
             dependencies,
         )
+
+    def _planned_function_name(self, instance: ProtoInstancePlan) -> str:
+        existing = self.planned_function_names.get(instance.creation_pc)
+        if existing is not None:
+            return existing
+        fallback = "recursiveFunction" if instance.recursive else "localFunction"
+        base = _sanitize_identifier(instance.binding_hint, fallback)
+        candidate = base
+        suffix = 2
+        occupied = self.declared | set(self.planned_function_names.values())
+        while candidate in occupied:
+            candidate = f"{base}{suffix}"
+            suffix += 1
+        self.planned_function_names[instance.creation_pc] = candidate
+        return candidate
+
+    def _recursion_group_names(
+        self,
+        group: tuple[int, ...],
+    ) -> dict[int, str]:
+        assert self.parent_proto_plan is not None
+        return {
+            pc: self._planned_function_name(self.parent_proto_plan.by_creation_pc[pc])
+            for pc in group
+        }
+
+    def _planned_capture_overrides(
+        self,
+        instance: ProtoInstancePlan,
+        *,
+        own_name: str | None = None,
+        group_names: dict[int, str] | None = None,
+    ) -> dict[int, Expr]:
+        overrides: dict[int, Expr] = {}
+        binding_names: dict[object, str] = {}
+        if group_names is not None and self.parent_proto_plan is not None:
+            for creation_pc, name in group_names.items():
+                binding = self.parent_proto_plan.by_creation_pc[creation_pc].binding
+                if binding is not None:
+                    binding_names[binding] = name
+        for capture in instance.captures:
+            if own_name is not None and capture.source_value == instance.closure_value:
+                overrides[capture.upvalue_index] = NameExpr(own_name)
+                continue
+            group_name = binding_names.get(capture.source_binding)
+            if group_name is not None:
+                overrides[capture.upvalue_index] = NameExpr(group_name)
+        return overrides
+
+    def _emit_predeclared_group(self, instance: ProtoInstancePlan) -> dict[int, str]:
+        group = instance.recursion_group
+        names = self._recursion_group_names(group)
+        if group not in self.emitted_recursion_groups:
+            self.out.line(
+                "local " + ", ".join(names[pc] for pc in group),
+                statement=True,
+            )
+            self.declared.update(names.values())
+            self.emitted_recursion_groups.add(group)
+        return names
+
+    def _emit_planned_closure(self, instruction: DecodedInstruction) -> bool:
+        if self.parent_proto_plan is None:
+            return False
+        instance = self.parent_proto_plan.at_creation(instruction.pc)
+        if instance is None or instance.emission_kind in {
+            "shared-proto",
+            "inline-expression",
+        }:
+            return False
+        if instance.emission_kind == "method-declaration":
+            return True
+
+        child = self.module.protos[instance.child_proto_id]
+        context = self.contextual_plan.for_value(instance.closure_value)
+        if instance.emission_kind == "predeclared-assignment":
+            group_names = self._emit_predeclared_group(instance)
+            name = group_names[instance.creation_pc]
+            expression, _dependencies = self._anonymous_function_expr(
+                instance.child_proto_id,
+                instruction,
+                capture_bindings=self._planned_capture_overrides(
+                    instance,
+                    own_name=name,
+                    group_names=group_names,
+                ),
+            )
+            self.out.line(
+                f"{name} = {render_expression(expression)}",
+                statement=True,
+            )
+        else:
+            name = self._planned_function_name(instance)
+            bindings, _dependencies = self._callback_capture_bindings(
+                instruction,
+                child,
+            )
+            bindings.update(
+                self._planned_capture_overrides(instance, own_name=name)
+            )
+            _FunctionLifter(
+                self.module,
+                child,
+                self.proto_names,
+                self.options,
+                self.out,
+                inline_only_proto_ids=self.inline_only_proto_ids,
+                upvalue_bindings=bindings,
+                parameter_name_overrides=(
+                    dict(context.parameter_names) if context is not None else None
+                ),
+                parameter_type_overrides=(
+                    dict(context.parameter_types) if context is not None else None
+                ),
+                return_type_override=context.return_type if context is not None else None,
+                module_analysis=self.module_analysis,
+                proto_emission_plan=self.proto_emission_plan,
+                semantic_function_role=(
+                    "recursive" if instance.recursive else "normal"
+                ),
+            ).lift(
+                as_function=True,
+                function_name_override=name,
+                local_function=True,
+            )
+        self.register_names[instruction.a] = name
+        self.declared.add(name)
+        return True
+
+    def _emit_planned_method(self, instruction: DecodedInstruction) -> bool:
+        if self.parent_proto_plan is None:
+            return False
+        instance = self.parent_proto_plan.at_terminal(instruction.pc)
+        if instance is None or instance.method_name is None:
+            return False
+        pending = self._pending_table_for_write(instruction)
+        if pending is not None:
+            self._flush_pending_table(pending)
+        creation = self.instruction_by_pc.get(instance.creation_pc)
+        if creation is None:
+            return False
+        child = self.module.protos[instance.child_proto_id]
+        bindings, _dependencies = self._callback_capture_bindings(creation, child)
+        context = self.contextual_plan.for_value(instance.closure_value)
+        base = self._ref_expr(instruction.b, instruction.pc)
+        _FunctionLifter(
+            self.module,
+            child,
+            self.proto_names,
+            self.options,
+            self.out,
+            inline_only_proto_ids=self.inline_only_proto_ids,
+            upvalue_bindings=bindings,
+            parameter_name_overrides=(
+                dict(context.parameter_names) if context is not None else {0: "self"}
+            ),
+            parameter_type_overrides=(
+                dict(context.parameter_types) if context is not None else None
+            ),
+            return_type_override=context.return_type if context is not None else None,
+            module_analysis=self.module_analysis,
+            proto_emission_plan=self.proto_emission_plan,
+            semantic_function_role="method",
+        ).lift(
+            as_function=True,
+            method_declaration=(base, instance.method_name),
+        )
+        return True
 
     def _call_expression(self, instruction: DecodedInstruction) -> Expr:
         frame = self.call_frames.at(instruction.pc)
@@ -1789,9 +2023,14 @@ class _FunctionLifter:
         function_name_override: str | None = None,
         local_function: bool = True,
         anonymous_function: bool = False,
+        method_declaration: tuple[Expr, str] | None = None,
     ) -> None:
         parameters = []
         for register in range(self.proto.num_params):
+            if method_declaration is not None and register == 0:
+                self.register_names[register] = "self"
+                self.declared.add("self")
+                continue
             recovered_name = (
                 self.symbols.entry_names.get(register)
                 if self.options.smart_variable_names and self.symbols is not None
@@ -1800,6 +2039,7 @@ class _FunctionLifter:
             contextual_name = self.parameter_name_overrides.get(register)
             name = (
                 _local_name(self.proto, register, 0)
+                or self.semantic_names.entry_names.get(register)
                 or contextual_name
                 or recovered_name
                 or f"arg{register + 1}"
@@ -1812,7 +2052,14 @@ class _FunctionLifter:
             parameters.append("...")
 
         if as_function:
-            if anonymous_function:
+            if method_declaration is not None:
+                receiver, method_name = method_declaration
+                header = (
+                    f"function {render_expression(receiver)}:"
+                    f"{_sanitize_identifier(method_name, 'method')}"
+                    f"({', '.join(parameters)})"
+                )
+            elif anonymous_function:
                 header = f"function({', '.join(parameters)})"
             else:
                 function_name = function_name_override or self.proto_names[self.proto.proto_id]
@@ -1867,7 +2114,10 @@ class _FunctionLifter:
         for instruction in self.instructions:
             self._finalize_phi_regions(instruction.pc)
             self._flush_tables_before(instruction)
-            if instruction.pc in self.callback_plan.capture_pcs:
+            if instruction.pc in self.callback_plan.capture_pcs or (
+                self.parent_proto_plan is not None
+                and instruction.pc in self.parent_proto_plan.skipped_pcs
+            ):
                 continue
             self._close_blocks(instruction.pc)
             state_machine = self.state_machine_plan.at(instruction.pc)
@@ -1962,6 +2212,7 @@ class _FunctionLifter:
                 parameter_type_overrides=dict(method.parameter_types),
                 return_type_override=method.return_type,
                 module_analysis=self.module_analysis,
+                proto_emission_plan=self.proto_emission_plan,
             ).lift(
                 as_function=True,
                 function_name_override=method_name,
@@ -1977,6 +2228,14 @@ class _FunctionLifter:
         loop_action = self.active_loop_actions.get(pc)
         if loop_action is not None:
             self._emit_loop_action(instruction, loop_action)
+            return
+        if name in {"NEWCLOSURE", "DUPCLOSURE"} and self._emit_planned_closure(
+            instruction
+        ):
+            return
+        if name in {"SETTABLEKS", "SETUDATAKS"} and self._emit_planned_method(
+            instruction
+        ):
             return
         if (
             name in {"NEWTABLE", "DUPTABLE"}
@@ -2390,7 +2649,7 @@ def decompile_module(
     out.line()
 
     names = _proto_names(module)
-    inline_only_proto_ids = collect_inline_only_proto_ids(
+    legacy_inline_only_proto_ids = collect_inline_only_proto_ids(
         module,
         enabled=resolved.inline_roblox_callbacks,
         module_analysis=module_analysis,
@@ -2409,6 +2668,15 @@ def decompile_module(
         recover_metatable_classes=resolved.recover_metatable_classes,
         enabled=resolved.contextual_functions,
         module_analysis=module_analysis,
+    )
+    proto_emission_plan = build_proto_emission_plan(
+        module,
+        module_analysis,
+        contextual_contexts,
+        inline_callbacks=resolved.inline_roblox_callbacks,
+    )
+    inline_only_proto_ids = (
+        legacy_inline_only_proto_ids | proto_emission_plan.owned_proto_ids
     )
     main_analysis = module_analysis.for_proto(module.main_proto)
     roblox_report = analyze_roblox_recovery(
@@ -2436,7 +2704,7 @@ def decompile_module(
     for proto in module.protos:
         if (
             proto.proto_id == module.main_proto_id
-            or proto.proto_id in inline_only_proto_ids
+            or proto.proto_id not in proto_emission_plan.preemit_proto_ids
             or proto.proto_id in class_method_proto_ids
         ):
             continue
@@ -2456,6 +2724,7 @@ def decompile_module(
             ),
             return_type_override=context.return_type if context is not None else None,
             module_analysis=module_analysis,
+            proto_emission_plan=proto_emission_plan,
         ).lift(
             as_function=True,
             function_name_override=(
@@ -2475,6 +2744,7 @@ def decompile_module(
         out,
         inline_only_proto_ids=inline_only_proto_ids,
         module_analysis=module_analysis,
+        proto_emission_plan=proto_emission_plan,
     ).lift(as_function=False)
     return out.render()
 

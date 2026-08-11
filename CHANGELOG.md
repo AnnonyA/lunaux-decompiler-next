@@ -2,6 +2,69 @@
 
 All notable changes are documented here.
 
+## [0.20.0.dev0-stage56] - 2026-08-10
+
+### Added
+
+- Added `ProtoEmissionPlan`, a shared SSA-owned plan for closure/proto emission, alias ownership, capture/upvalue provenance, recursion groups, method evidence and inline-consumer decisions.
+- Added conservative direct-recursion recovery with human `local function` declarations when lexical visibility is proven.
+- Added mutual-recursion SCC handling with explicit predeclarations when declaration sugar would change visibility.
+- Added proof-based method declaration recovery, including colon syntax only when the receiver, field and call evidence agree.
+- Added `CanonicalCFGPlan` as a common region-planning authority for loops, short-circuit boolean chains, phi diamonds, branch regions, recovered state machines and irreducible fallbacks.
+- Added deterministic `SemanticNamePlan` naming based on debug bindings, function/parameter roles, contextual evidence and stable fallback names.
+- Added focused positive and negative regression suites for proto emission and canonical CFG planning.
+
+### Changed
+
+- Closure ownership now follows exact `SSAValue` identity instead of physical-register history, including MOVE aliases and repeated register lifetimes.
+- CallFrame ownership is reused by proto planning instead of maintaining a competing call/closure decision path.
+- Recursive closures can now emit as named local functions, while unsafe recursion groups remain explicitly predeclared.
+- Proven table-field functions can emit as methods without using rendered source strings as semantic identity.
+- Existing callback, contextual-function, class, MULTRET, table-initializer and ReadModifyWrite recovery now share the Stage 5/6 planning infrastructure.
+- CFG structuring now records canonical region evidence using existing dominator/postdominator, loop, phi, short-circuit and state-machine analysis.
+- Variable/function naming is more deterministic and role-aware while preserving valid debug metadata as the strongest evidence.
+- Generic `elseif`/guard source emission remains conservative where AST region-closure ownership is not yet complete.
+
+### Readability
+
+- Changed `552/2304` deterministic corpus outputs: `176` v3, `176` v6 and `200` v11.
+- Global median readability: `90.7895 → 92.12` after Stage 5 and `92.42905` final.
+- Paired comparison: `544` wins, `8` losses and `1752` ties.
+- The eight scorer losses remove genuine unnecessary materialization and did not produce semantic regressions.
+
+### Performance
+
+Warmed decompiler-only measurements:
+
+- Stage 3+4 base: `32.348 s`, `71.23 cases/s`.
+- Stage 5: `32.568 s`, `70.74 cases/s`.
+- Final Stage 5+6: `21.509 s`, `107.12 cases/s`.
+- Shared Stage 0 construction remains `3456` decode / CFG / SSA / scope analyses; symbol recovery is `2880` builds on the final corpus.
+
+### Validation
+
+Validated locally against the Stage 3+4 code base `a96259eec6fe07b9b181c15cb3317ce831c414a6` before publication:
+
+- pytest: `244 passed`.
+- Ruff: `0` errors.
+- mypy: `0` errors across `67` source files.
+- `git diff --check`: passed.
+- `git apply --check`: passed for the final patch against its recorded base.
+- Semantic corpus: `2304/2304`.
+- Medal-compatible semantic gate: `384/384`.
+- Execution: `100%`.
+- Syntax: `100%`.
+- Recompilation: `100%`.
+- Stability: `100%`.
+- Zero fallback: `100%`.
+- Semantic failures: `0`.
+- Timeouts: `0`.
+- Deterministic digest: `81aa1f1ed69d2f209813e802d14d7160b545829b1881c3a8d20f9e0147fdc598`.
+
+### Known limitation
+
+- Canonical CFG planning now identifies generic `elseif`/early-guard regions, but source emission intentionally stays conservative until the AST emitter can own region closure boundaries end-to-end. This prevents pretty-printing from changing control-flow semantics.
+
 ## [0.20.0.dev0-stage0] - 2026-08-10
 
 ### Added

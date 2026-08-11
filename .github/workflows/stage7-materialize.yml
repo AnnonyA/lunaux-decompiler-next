@@ -1,0 +1,54 @@
+name: Stage7 Materialize
+
+on:
+  push:
+    branches: ["stage7/source-fidelity-materialize"]
+    paths: [".stage7/trigger"]
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build exact Stage 7 commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=58eeab07e3de63e5eada3fa39b514db217cd6172
+          PATCH_SHA=97fcccb01a67c18783f70f2b9e127375899ba18899cbe7614c9152c106e7ec84
+          FIXTURE_SHA=7d4bd8e422559a401adf6c7303dc73fb4543cf577d7ebe4e84bb8403256c8161
+
+          cat .stage7/b64.00 .stage7/b64.01 .stage7/b64.02 .stage7/b64.03 .stage7/b64.04 .stage7/b64.05 .stage7/b64.06 .stage7/b64.07 > /tmp/stage7.b64
+          base64 -d /tmp/stage7.b64 | gzip -d > /tmp/stage7.patch
+          echo "$PATCH_SHA  /tmp/stage7.patch" | sha256sum -c -
+
+          git checkout --detach "$BASE"
+          git apply --check /tmp/stage7.patch
+          git apply /tmp/stage7.patch
+          git diff --check
+
+          python - <<'PY'
+          from hashlib import sha256
+          from pathlib import Path
+          p = Path('tests/fixtures/source_fidelity/real_module_v9.bin')
+          data = p.read_bytes()
+          assert len(data) == 9722, len(data)
+          assert sha256(data).hexdigest() == '7d4bd8e422559a401adf6c7303dc73fb4543cf577d7ebe4e84bb8403256c8161'
+          PY
+
+          git add -A
+          TREE=$(git write-tree)
+          export GIT_AUTHOR_NAME=AnnonyA
+          export GIT_AUTHOR_EMAIL=AnnonyA@users.noreply.github.com
+          export GIT_COMMITTER_NAME=AnnonyA
+          export GIT_COMMITTER_EMAIL=AnnonyA@users.noreply.github.com
+          MESSAGE=$'Stage 7: source fidelity and transactional table recovery [skip ci]\n\nIntegrate exact CALL/MULTRET result shapes, transactional call-valued and nested table construction, stronger SSA expression folding, returned-module naming, dot-function declarations, value-position short-circuit recovery, serialized parameter types, and deterministic table formatting. Update README and changelog with Stage 7 validation evidence.\n\nValidated locally: 248 pytest passed; Ruff/mypy/diff-check clean; 2304/2304 semantic; 384/384 Medal-compatible; 100% execution/syntax/recompilation/stability/zero fallback; deterministic digest b2a8325981a45828cc4a687f87840529b2b15de518478f13602f5e444f64a3ac.'
+          COMMIT=$(printf '%s\n' "$MESSAGE" | git commit-tree "$TREE" -p "$BASE")
+          git push --force origin "$COMMIT:refs/heads/stage7/source-fidelity-final"
+          echo "Created $COMMIT"

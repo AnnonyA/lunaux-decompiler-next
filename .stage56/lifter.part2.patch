@@ -1,0 +1,165 @@
+@@ -1490,12 +1551,16 @@ class _FunctionLifter:
+         self,
+         child_id: int,
+         instruction: DecodedInstruction,
++        *,
++        capture_bindings: dict[int, Expr] | None = None,
+     ) -> tuple[Expr, frozenset[SSAValue]]:
+         child = self.module.protos[child_id]
+         bindings, dependencies = self._callback_capture_bindings(
+             instruction,
+             child,
+         )
++        if capture_bindings:
++            bindings.update(capture_bindings)
+         callback_out = _Emitter(self.options.semicolons)
+         closure_value = self.ssa.value_defined_at(instruction.pc, instruction.a)
+         callback_types = (
+@@ -1524,12 +1589,181 @@ class _FunctionLifter:
+             parameter_type_overrides=parameter_type_overrides,
+             return_type_override=context.return_type if context is not None else None,
+             module_analysis=self.module_analysis,
++            proto_emission_plan=self.proto_emission_plan,
+         ).lift(as_function=True, anonymous_function=True)
+         return (
+             RawExpr(callback_out.render().strip(), Precedence.ATOM),
+             dependencies,
+         )
+ 
++    def _planned_function_name(self, instance: ProtoInstancePlan) -> str:
++        existing = self.planned_function_names.get(instance.creation_pc)
++        if existing is not None:
++            return existing
++        fallback = "recursiveFunction" if instance.recursive else "localFunction"
++        base = _sanitize_identifier(instance.binding_hint, fallback)
++        candidate = base
++        suffix = 2
++        occupied = self.declared | set(self.planned_function_names.values())
++        while candidate in occupied:
++            candidate = f"{base}{suffix}"
++            suffix += 1
++        self.planned_function_names[instance.creation_pc] = candidate
++        return candidate
++
++    def _recursion_group_names(
++        self,
++        group: tuple[int, ...],
++    ) -> dict[int, str]:
++        assert self.parent_proto_plan is not None
++        return {
++            pc: self._planned_function_name(self.parent_proto_plan.by_creation_pc[pc])
++            for pc in group
++        }
++
++    def _planned_capture_overrides(
++        self,
++        instance: ProtoInstancePlan,
++        *,
++        own_name: str | None = None,
++        group_names: dict[int, str] | None = None,
++    ) -> dict[int, Expr]:
++        overrides: dict[int, Expr] = {}
++        binding_names: dict[object, str] = {}
++        if group_names is not None and self.parent_proto_plan is not None:
++            for creation_pc, name in group_names.items():
++                binding = self.parent_proto_plan.by_creation_pc[creation_pc].binding
++                if binding is not None:
++                    binding_names[binding] = name
++        for capture in instance.captures:
++            if own_name is not None and capture.source_value == instance.closure_value:
++                overrides[capture.upvalue_index] = NameExpr(own_name)
++                continue
++            group_name = binding_names.get(capture.source_binding)
++            if group_name is not None:
++                overrides[capture.upvalue_index] = NameExpr(group_name)
++        return overrides
++
++    def _emit_predeclared_group(self, instance: ProtoInstancePlan) -> dict[int, str]:
++        group = instance.recursion_group
++        names = self._recursion_group_names(group)
++        if group not in self.emitted_recursion_groups:
++            self.out.line(
++                "local " + ", ".join(names[pc] for pc in group),
++                statement=True,
++            )
++            self.declared.update(names.values())
++            self.emitted_recursion_groups.add(group)
++        return names
++
++    def _emit_planned_closure(self, instruction: DecodedInstruction) -> bool:
++        if self.parent_proto_plan is None:
++            return False
++        instance = self.parent_proto_plan.at_creation(instruction.pc)
++        if instance is None or instance.emission_kind in {
++            "shared-proto",
++            "inline-expression",
++        }:
++            return False
++        if instance.emission_kind == "method-declaration":
++            return True
++
++        child = self.module.protos[instance.child_proto_id]
++        context = self.contextual_plan.for_value(instance.closure_value)
++        if instance.emission_kind == "predeclared-assignment":
++            group_names = self._emit_predeclared_group(instance)
++            name = group_names[instance.creation_pc]
++            expression, _dependencies = self._anonymous_function_expr(
++                instance.child_proto_id,
++                instruction,
++                capture_bindings=self._planned_capture_overrides(
++                    instance,
++                    own_name=name,
++                    group_names=group_names,
++                ),
++            )
++            self.out.line(
++                f"{name} = {render_expression(expression)}",
++                statement=True,
++            )
++        else:
++            name = self._planned_function_name(instance)
++            bindings, _dependencies = self._callback_capture_bindings(
++                instruction,
++                child,
++            )
++            bindings.update(
++                self._planned_capture_overrides(instance, own_name=name)
++            )
++            _FunctionLifter(
++                self.module,
++                child,
++                self.proto_names,
++                self.options,
++                self.out,
++                inline_only_proto_ids=self.inline_only_proto_ids,
++                upvalue_bindings=bindings,
++                parameter_name_overrides=(
++                    dict(context.parameter_names) if context is not None else None
++                ),
++                parameter_type_overrides=(
++                    dict(context.parameter_types) if context is not None else None
++                ),
++                return_type_override=context.return_type if context is not None else None,
++                module_analysis=self.module_analysis,
++                proto_emission_plan=self.proto_emission_plan,
++                semantic_function_role=(
++                    "recursive" if instance.recursive else "normal"
++                ),
++            ).lift(
++                as_function=True,
++                function_name_override=name,
++                local_function=True,
++            )
++        self.register_names[instruction.a] = name
++        self.declared.add(name)
++        return True
++
++    def _emit_planned_method(self, instruction: DecodedInstruction) -> bool:
++        if self.parent_proto_plan is None:
++            return False
++        instance = self.parent_proto_plan.at_terminal(instruction.pc)
++        if instance is None or instance.method_name is None:
++            return False
++        pending = self._pending_table_for_write(instruction)
++        if pending is not None:
++            self._flush_pending_table(pending)

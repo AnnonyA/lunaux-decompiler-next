@@ -468,6 +468,7 @@ def install_full_corpus_semantics_fix() -> None:
         function_name_override: str | None = None,
         local_function: bool = True,
         anonymous_function: bool = False,
+        method_declaration: tuple[Expr, str] | None = None,
     ) -> None:
         # Function headers are emitted before _name() is consulted.  Feed the debug
         # name attached to each SSA entry value into the existing parameter override
@@ -482,6 +483,7 @@ def install_full_corpus_semantics_fix() -> None:
                 function_name_override=function_name_override,
                 local_function=local_function,
                 anonymous_function=anonymous_function,
+                method_declaration=method_declaration,
             )
         finally:
             self.parameter_name_overrides.clear()

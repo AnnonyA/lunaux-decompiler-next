@@ -283,6 +283,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
         function_name_override: str | None = None,
         local_function: bool = True,
         anonymous_function: bool = False,
+        method_declaration: tuple[Expr, str] | None = None,
     ) -> None:
         original_override = self.return_type_override
         original_symbols = self.symbols
@@ -296,6 +297,7 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
                 function_name_override=function_name_override,
                 local_function=local_function,
                 anonymous_function=anonymous_function,
+                method_declaration=method_declaration,
             )
         finally:
             self.return_type_override = original_override
@@ -376,6 +378,13 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
     ) -> bool:
         if instruction.name not in {"NEWCLOSURE", "DUPCLOSURE"}:
             return False
+        planned = (
+            self.parent_proto_plan.at_creation(instruction.pc)
+            if self.parent_proto_plan is not None
+            else None
+        )
+        if planned is not None and planned.emission_kind != "shared-proto":
+            return False
         child_id = closure_proto_id(self.proto, instruction)
         if child_id is None:
             return False
@@ -416,6 +425,8 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
                     dict(context.parameter_types) if context is not None else None
                 ),
                 return_type_override=context.return_type if context is not None else None,
+                module_analysis=self.module_analysis,
+                proto_emission_plan=self.proto_emission_plan,
             ).lift(
                 as_function=True,
                 function_name_override=name,

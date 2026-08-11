@@ -317,9 +317,11 @@ def _ordered_operand_values(
 def plan_expression_inlining(
     program: SSAProgram,
     proto: LuauProto,
+    *,
+    call_frames: CallFramePlan | None = None,
 ) -> ExpressionInliningPlan:
     sites = _use_sites(program)
-    call_frames = plan_call_frames(program)
+    resolved_call_frames = call_frames or plan_call_frames(program)
     selected: dict[SSAValue, InlineCandidate] = {}
     memo: dict[tuple[SSAValue, int], tuple[tuple[SSAValue, ...], tuple[int, ...]] | None] = {}
 
@@ -358,7 +360,11 @@ def plan_expression_inlining(
 
         values: list[SSAValue] = []
         pcs: list[int] = []
-        operands = _ordered_operand_values(program, definition.instruction, call_frames)
+        operands = _ordered_operand_values(
+            program,
+            definition.instruction,
+            resolved_call_frames,
+        )
         for operand in operands:
             if operand not in selected:
                 continue
@@ -379,7 +385,7 @@ def plan_expression_inlining(
         consumer = program.instructions[consumer_pc].instruction
         if consumer.name not in _SUPPORTED_CONSUMERS:
             continue
-        operands = _ordered_operand_values(program, consumer, call_frames)
+        operands = _ordered_operand_values(program, consumer, resolved_call_frames)
         suffix: list[tuple[tuple[SSAValue, ...], tuple[int, ...]]] = []
         for operand in reversed(operands):
             graph = graph_for(operand, consumer_pc)
@@ -460,7 +466,7 @@ def plan_expression_inlining(
     return ExpressionInliningPlan(
         candidates=MappingProxyType(selected),
         by_definition=MappingProxyType(by_definition),
-        call_frames=call_frames,
+        call_frames=resolved_call_frames,
     )
 
 

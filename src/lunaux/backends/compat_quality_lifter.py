@@ -477,6 +477,7 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
         function_name_override: str | None = None,
         local_function: bool = True,
         anonymous_function: bool = False,
+        method_declaration: tuple[Expr, str] | None = None,
     ) -> None:
         original_options = self.options
         if self.module.version <= 6:
@@ -502,6 +503,7 @@ class _CompatibilityQualityFunctionLifter(quality._QualityFunctionLifter):
                 function_name_override=function_name_override,
                 local_function=local_function,
                 anonymous_function=anonymous_function,
+                method_declaration=method_declaration,
             )
         finally:
             self.options = original_options

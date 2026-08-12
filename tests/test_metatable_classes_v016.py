@@ -189,13 +189,13 @@ def test_decompiler_emits_one_contextual_class_declaration() -> None:
         "point.luau",
     )
 
-    assert source.count("class Point") == 1
-    assert "-- recovered from metatable __index pattern" in source
-    assert "public x" in source
-    assert "function new(arg1): Point" in source
-    assert "function getX(self: Point)" in source
-    assert "function __tostring(self: Point): string" in source
-    assert "Point.__index = Point" not in source
+    assert source.count("local Point = {}") == 1
+    assert "Point.__index = Point" in source
+    assert "class Point" not in source
+    assert "public x" not in source
+    assert "function Point.new(arg1): Point" in source
+    assert "function Point:getX()" in source
+    assert "function Point.__tostring(self: Point): string" in source
     assert "local new_impl" not in source
     assert "return Point" in source
 

@@ -72,7 +72,10 @@ def test_decompiles_phi_diamond_to_if_expression() -> None:
 
     result = decompile_module(_module(proto), {}, "PhiDiamond")
 
-    assert "return if arg1 then 10 else 20" in result
+    assert "local result = 20" in result
+    assert "if arg1 then" in result
+    assert "result = 10" in result
+    assert "return result" in result
     assert "jump to" not in result
 
 

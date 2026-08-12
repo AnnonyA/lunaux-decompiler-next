@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Literal
@@ -276,6 +276,7 @@ def build_semantic_name_plan(
     symbols: SymbolRecovery | None,
     *,
     parameter_overrides: Mapping[int, str] = MappingProxyType({}),
+    reserved_names: Collection[str] = frozenset(),
     function_role: FunctionRole = "normal",
     returned_module_root: SSAValue | None = None,
 ) -> SemanticNamePlan:
@@ -291,7 +292,7 @@ def build_semantic_name_plan(
         for scope in scope_tree.scopes.values()
         for binding in scope.bindings
         if valid_identifier(binding.name)
-    }
+    } | {name for name in reserved_names if valid_identifier(name)}
     entry_names: dict[int, str] = {}
     entry_occupied = set(reserved)
     for register in range(proto.num_params):

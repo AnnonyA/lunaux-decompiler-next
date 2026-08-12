@@ -35,73 +35,15 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
     def _persistent_multret_plan(
         self,
     ) -> tuple[dict[int, SSAMultiValue], dict[int, SSAMultiUse]]:
-        """Track Luau's open stack top until consumed, replaced, or clobbered.
-
-        Medal keeps the dynamic stack top alive across ordinary instructions. We retain
-        that useful behavior, but invalidate the tuple if an intervening instruction
-        overwrites any register in its open tail; this preserves LunaUX's conservative
-        guarantee for bytecode that does not prove the tuple remained intact.
-        """
+        """Expose the shared SSA open-tuple analysis to the compatibility lifter."""
 
         cached = getattr(self, "_v020_persistent_multret_plan", None)
         if cached is not None:
             return cast(tuple[dict[int, SSAMultiValue], dict[int, SSAMultiUse]], cached)
-
-        values: dict[int, SSAMultiValue] = {}
-        uses: dict[int, SSAMultiUse] = {}
-        for block in self.analysis.blocks:
-            if block.start_pc not in self.analysis.reachable:
-                continue
-            pending: SSAMultiValue | None = None
-            for instruction in block.instructions:
-                consumed = False
-                consumer: tuple[str, int] | None = None
-                if instruction.name in {"CALL", "CALLFB"} and instruction.b == 0:
-                    consumer = ("arguments", instruction.a + 1)
-                elif instruction.name == "RETURN" and instruction.b == 0:
-                    consumer = ("return", instruction.a)
-                else:
-                    semantics = setlist_semantics(instruction)
-                    if semantics is not None and semantics.is_open:
-                        consumer = ("setlist", semantics.first_value_register)
-
-                if consumer is not None and pending is not None:
-                    kind, base_register = consumer
-                    if pending.base_register >= base_register:
-                        uses[instruction.pc] = SSAMultiUse(
-                            consumer_pc=instruction.pc,
-                            base_register=base_register,
-                            kind=kind,  # type: ignore[arg-type]
-                            value=pending,
-                            prefix_registers=tuple(range(base_register, pending.base_register)),
-                        )
-                        consumed = True
-
-                producer: SSAMultiValue | None = None
-                if instruction.name in {"CALL", "CALLFB"} and instruction.c == 0:
-                    producer = SSAMultiValue(
-                        origin_pc=instruction.pc,
-                        base_register=instruction.a,
-                        kind="call",
-                    )
-                elif instruction.name == "GETVARARGS" and instruction.b == 0:
-                    producer = SSAMultiValue(
-                        origin_pc=instruction.pc,
-                        base_register=instruction.a,
-                        kind="varargs",
-                    )
-
-                if producer is not None:
-                    values[instruction.pc] = producer
-                    pending = producer
-                elif consumed:
-                    pending = None
-                elif pending is not None:
-                    access = self.analysis.register_accesses[instruction.pc]
-                    if any(register >= pending.base_register for register in access.definitions):
-                        pending = None
-
-        cached_plan = (values, uses)
+        cached_plan = (
+            dict(self.ssa.multi_values.by_origin_pc),
+            dict(self.ssa.multi_values.by_consumer_pc),
+        )
         self._v020_persistent_multret_plan = cached_plan
         return cached_plan
 
@@ -519,12 +461,11 @@ class _MultiRetFunctionLifter(legacy._FunctionLifter):
                     if value is not None:
                         self._forced_value_names()[value] = variable
             self.declared.update(variables)
-            iterator = self._ref(instruction.a, instruction.pc)
-            state = self._ref(instruction.a + 1, instruction.pc)
-            control = self._ref(instruction.a + 2, instruction.pc)
+            iterator_operands = self._generic_iterator_operands(instruction)
             return self._open_until(
                 close_pc,
-                f"for {', '.join(variables)} in {iterator}, {state}, {control} do",
+                f"for {', '.join(variables)} in "
+                f"{', '.join(render_expression(item) for item in iterator_operands)} do",
             )
         return False
 

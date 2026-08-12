@@ -11,14 +11,15 @@ from lunaux.backends.analysis import (
     analyze_control_flow,
     reverse_postorder,
 )
-from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
+from lunaux.backends.opcodes import (
+    DecodedInstruction,
+    get_jump_target,
+    setlist_semantics,
+)
 
 SSAValueKind = Literal["entry", "instruction", "phi"]
 SSAMultiValueKind = Literal["call", "varargs"]
 SSAMultiUseKind = Literal["arguments", "return", "setlist"]
-
-_MULTI_VALUE_PASSTHROUGH_OPS = frozenset({"NOP", "COVERAGE"})
-
 
 @dataclass(frozen=True, order=True, slots=True)
 class SSAValue:
@@ -185,48 +186,182 @@ def _multi_value_consumer(
 
 
 def _analyze_multi_values(analysis: ControlFlowAnalysis) -> SSAMultiValuePlan:
-    values: list[SSAMultiValue] = []
-    uses: list[SSAMultiUse] = []
+    values = tuple(
+        producer
+        for block in analysis.blocks
+        if block.start_pc in analysis.reachable
+        for instruction in block.instructions
+        if (producer := _multi_value_producer(instruction)) is not None
+    )
+    producer_by_pc = {value.origin_pc: value for value in values}
+    block_by_start = analysis.block_by_start
+    reachable_blocks = tuple(
+        block for block in analysis.blocks if block.start_pc in analysis.reachable
+    )
 
-    for block in analysis.blocks:
-        if block.start_pc not in analysis.reachable:
+    # FASTCALL is a guarded fast path for the fallback CALL at the end of its other
+    # successor.  When that CALL is open, both edges produce the same dynamic tuple
+    # at the join even though only the fallback edge contains a CALL instruction.
+    # Record that opcode-defined edge value explicitly; this is a CFG relation, not
+    # replay of the physical result registers.
+    fastcall_edge_values: dict[tuple[int, int], SSAMultiValue] = {}
+    for block in reachable_blocks:
+        if not block.instructions:
             continue
-        pending: SSAMultiValue | None = None
+        fastcall = block.instructions[-1]
+        if not fastcall.name.startswith("FASTCALL"):
+            continue
+        join = get_jump_target(fastcall)
+        if join is None or join not in block.successors or len(block.successors) != 2:
+            continue
+        fallback_starts = tuple(successor for successor in block.successors if successor != join)
+        if len(fallback_starts) != 1:
+            continue
+        fallback = block_by_start.get(fallback_starts[0])
+        if (
+            fallback is None
+            or fallback.successors != frozenset({join})
+            or not fallback.instructions
+        ):
+            continue
+        fallback_call = fallback.instructions[-1]
+        producer = producer_by_pc.get(fallback_call.pc)
+        if producer is None or fallback_call.name not in {"CALL", "CALLFB"}:
+            continue
+        fastcall_edge_values[(block.start_pc, join)] = producer
+
+    # An open Luau tuple is a semantic stack-top value.  It can survive an ordinary
+    # basic-block boundary (notably the fallback edge created by FASTCALL), but only
+    # while every incoming path carries the exact same producer and no instruction
+    # overwrites a register in its open tail.  This is a forward must-analysis: joins
+    # with different or unknown producers deliberately collapse to no value.
+    incoming: dict[int, SSAMultiValue | None] = {
+        block.start_pc: None for block in reachable_blocks
+    }
+    outgoing: dict[int, SSAMultiValue | None] = {
+        block.start_pc: None for block in reachable_blocks
+    }
+    uses_by_pc: dict[int, SSAMultiUse] = {}
+
+    def transfer(
+        block_start: int,
+        pending: SSAMultiValue | None,
+    ) -> SSAMultiValue | None:
+        block = block_by_start[block_start]
         for instruction in block.instructions:
-            producer = _multi_value_producer(instruction)
             consumer = _multi_value_consumer(instruction)
             consumed = False
-
             if consumer is not None and pending is not None:
                 kind, base_register = consumer
                 if pending.base_register >= base_register:
-                    uses.append(
-                        SSAMultiUse(
-                            consumer_pc=instruction.pc,
-                            base_register=base_register,
-                            kind=kind,
-                            value=pending,
-                            prefix_registers=tuple(
-                                range(base_register, pending.base_register)
-                            ),
-                        )
+                    uses_by_pc[instruction.pc] = SSAMultiUse(
+                        consumer_pc=instruction.pc,
+                        base_register=base_register,
+                        kind=kind,
+                        value=pending,
+                        prefix_registers=tuple(
+                            range(base_register, pending.base_register)
+                        ),
                     )
                     consumed = True
 
+            producer = producer_by_pc.get(instruction.pc)
             if producer is not None:
-                values.append(producer)
                 pending = producer
             elif consumed:
                 pending = None
-            elif instruction.name not in _MULTI_VALUE_PASSTHROUGH_OPS:
-                pending = None
+            elif pending is not None:
+                definitions = analysis.register_accesses[instruction.pc].definitions
+                if any(register >= pending.base_register for register in definitions):
+                    pending = None
+        return pending
+
+    changed = True
+    while changed:
+        changed = False
+        for block in reachable_blocks:
+            predecessors = tuple(
+                predecessor
+                for predecessor in block.predecessors
+                if predecessor in analysis.reachable
+            )
+            if not predecessors:
+                next_incoming: SSAMultiValue | None = None
+            else:
+                predecessor_values = tuple(
+                    fastcall_edge_values.get((pc, block.start_pc), outgoing[pc])
+                    for pc in predecessors
+                )
+                first = predecessor_values[0]
+                next_incoming = (
+                    first
+                    if all(value == first for value in predecessor_values[1:])
+                    else None
+                )
+            if incoming[block.start_pc] != next_incoming:
+                incoming[block.start_pc] = next_incoming
+                changed = True
+            next_outgoing = transfer(block.start_pc, next_incoming)
+            if outgoing[block.start_pc] != next_outgoing:
+                outgoing[block.start_pc] = next_outgoing
+                changed = True
+
+    # Re-run transfer once in program order so the final immutable use map is not an
+    # artifact of work-list iteration order.
+    uses_by_pc.clear()
+    for block in reachable_blocks:
+        block_incoming = incoming[block.start_pc]
+        transfer(block.start_pc, block_incoming)
+    uses = tuple(uses_by_pc[pc] for pc in sorted(uses_by_pc))
 
     return SSAMultiValuePlan(
-        values=tuple(values),
-        uses=tuple(uses),
+        values=values,
+        uses=uses,
         by_origin_pc=MappingProxyType({value.origin_pc: value for value in values}),
         by_consumer_pc=MappingProxyType({use.consumer_pc: use for use in uses}),
     )
+
+
+def is_fastcall_fallback_bridge(
+    program: SSAProgram,
+    producer_pc: int,
+    consumer_pc: int,
+) -> bool:
+    """Whether an open fallback CALL and its consumer meet at a FASTCALL join."""
+
+    fastcall_pc = fastcall_for_fallback_call(program, producer_pc)
+    if fastcall_pc is None:
+        return False
+    fastcall = program.instructions[fastcall_pc].instruction
+    consumer_block = program.analysis.block_for_pc.get(consumer_pc)
+    return consumer_block is not None and get_jump_target(fastcall) == consumer_block
+
+
+def fastcall_for_fallback_call(program: SSAProgram, producer_pc: int) -> int | None:
+    """Return the opcode-verified FASTCALL paired with a fallback CALL."""
+
+    producer_block = program.analysis.block_for_pc.get(producer_pc)
+    if producer_block is None:
+        return None
+    fallback = program.analysis.block_by_start.get(producer_block)
+    if (
+        fallback is None
+        or len(fallback.successors) != 1
+        or not fallback.instructions
+        or fallback.instructions[-1].pc != producer_pc
+    ):
+        return None
+    join = next(iter(fallback.successors))
+    matches = tuple(
+        block.instructions[-1].pc
+        for block in program.analysis.blocks
+        if block.start_pc in program.analysis.reachable
+        and block.instructions
+        and block.instructions[-1].name.startswith("FASTCALL")
+        and get_jump_target(block.instructions[-1]) == join
+        and block.successors == frozenset({producer_block, join})
+    )
+    return matches[0] if len(matches) == 1 else None
 
 
 class _SSABuilder:
@@ -239,14 +374,49 @@ class _SSABuilder:
         self.instructions: dict[int, SSAInstruction] = {}
         self.definitions: dict[tuple[int, int], SSAValue] = {}
         self.use_counts: dict[SSAValue, int] = defaultdict(int)
+        phi_keys = {(phi.block, phi.register) for phi in analysis.phi_nodes}
+
+        # Open SETLIST prefix registers are discovered only after the CFG open-tuple
+        # analysis, so ordinary liveness cannot request their FASTCALL result phis.
+        # Add exactly those opcode-defined join phis whose fallback CALL writes a
+        # consumed prefix and whose join dominates that consumer.
+        for use in self.multi_values.uses:
+            consumer_block = analysis.block_for_pc.get(use.consumer_pc)
+            if consumer_block is None:
+                continue
+            prefix_registers = frozenset(use.prefix_registers)
+            for fallback in analysis.blocks:
+                if len(fallback.successors) != 1 or not fallback.instructions:
+                    continue
+                call = fallback.instructions[-1]
+                if (
+                    call.name not in {"CALL", "CALLFB"}
+                    or call.c != 2
+                    or call.a not in prefix_registers
+                ):
+                    continue
+                join = next(iter(fallback.successors))
+                if not analysis.dominates(join, consumer_block):
+                    continue
+                fastcall_blocks = tuple(
+                    block
+                    for block in analysis.blocks
+                    if block.instructions
+                    and block.instructions[-1].name.startswith("FASTCALL")
+                    and get_jump_target(block.instructions[-1]) == join
+                    and block.successors == frozenset({fallback.start_pc, join})
+                )
+                if len(fastcall_blocks) == 1:
+                    phi_keys.add((join, call.a))
+
         self.phis: dict[tuple[int, int], _PhiBuilder] = {
-            (phi.block, phi.register): _PhiBuilder(
-                block=phi.block,
-                register=phi.register,
+            (block, register): _PhiBuilder(
+                block=block,
+                register=register,
                 result=None,
                 operands={},
             )
-            for phi in analysis.phi_nodes
+            for block, register in sorted(phi_keys)
         }
         self.phis_by_block: dict[int, list[_PhiBuilder]] = defaultdict(list)
         for phi in self.phis.values():

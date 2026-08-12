@@ -494,6 +494,11 @@ def install_full_corpus_semantics_fix() -> None:
         register, use_pc = _numeric_for_visible_register(self, instruction, target)
         proposed = self._friendly_name(self._name(register, use_pc))
         variable = "index" if proposed.startswith("value") else proposed
+        base = variable
+        suffix = 2
+        while variable in self.declared:
+            variable = f"{base}{suffix}"
+            suffix += 1
         self._force_register_name(register, instruction.pc, target, variable)
         self.register_names[register] = variable
         self.declared.add(variable)

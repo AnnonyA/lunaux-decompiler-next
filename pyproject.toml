@@ -41,9 +41,9 @@ byteweft = "lunaux.cli:app"
 lunaux = "lunaux.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/AnnonyA/lunaux-decompiler-next"
-Repository = "https://github.com/AnnonyA/lunaux-decompiler-next"
-Issues = "https://github.com/AnnonyA/lunaux-decompiler-next/issues"
+Homepage = "https://github.com/AnnonyA/byteweft"
+Repository = "https://github.com/AnnonyA/byteweft"
+Issues = "https://github.com/AnnonyA/byteweft/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lunaux"]

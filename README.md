@@ -27,16 +27,16 @@ form.
 Windows:
 
 ```bat
-git clone https://github.com/AnnonyA/lunaux-decompiler-next.git
-cd lunaux-decompiler-next
+git clone https://github.com/AnnonyA/byteweft.git
+cd byteweft
 run.bat
 ```
 
 Linux:
 
 ```bash
-git clone https://github.com/AnnonyA/lunaux-decompiler-next.git
-cd lunaux-decompiler-next
+git clone https://github.com/AnnonyA/byteweft.git
+cd byteweft
 chmod +x run.sh
 ./run.sh
 ```

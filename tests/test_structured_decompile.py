@@ -3,6 +3,7 @@ from __future__ import annotations
 from lunaux.backends.bytecode import LuauBytecodeModule, LuauConstant, LuauProto
 from lunaux.backends.lifter import decompile_module
 from lunaux.backends.opcodes import opcode_names
+from lunaux.backends.reconstructed import decompile_module as decompile_reconstructed_module
 
 
 def _opcode(name: str) -> int:
@@ -109,3 +110,112 @@ def test_decompiles_straight_line_table_writes_to_literal() -> None:
     assert '{Name = "Sword", Damage = 25, "Fire"}' in result
     assert ".Name =" not in result
     assert ".Damage =" not in result
+
+
+def test_closes_nested_if_before_transitioning_outer_else() -> None:
+    proto = _proto(
+        (
+            _ad("JUMPIFNOT", a=0, d=7),
+            _ad("JUMPIFNOT", a=1, d=3),
+            _ad("LOADN", a=2, d=10),
+            _abc("SETUPVAL", a=2, b=0),
+            _ad("JUMP", d=3),
+            _ad("LOADN", a=2, d=20),
+            _abc("SETUPVAL", a=2, b=0),
+            _ad("JUMP", d=2),
+            _ad("LOADN", a=2, d=30),
+            _abc("SETUPVAL", a=2, b=0),
+            _abc("RETURN", b=1),
+        ),
+        num_params=2,
+        max_stack_size=3,
+    )
+
+    result = decompile_module(_module(proto), {}, "NestedIfOuterElse")
+
+    assert """if arg1 then
+    if arg2 then
+        upvalue_0 = 10
+    else
+        upvalue_0 = 20
+    end
+else
+    upvalue_0 = 30
+end""" in result
+    assert "else\n    else" not in result
+
+
+def test_generic_for_is_not_reclassified_as_repeat_regions() -> None:
+    proto = _proto(
+        (
+            _abc("LOADNIL", a=0),
+            _abc("LOADNIL", a=1),
+            _abc("LOADNIL", a=2),
+            _ad("FORGPREP", a=0, d=2),
+            _abc("SETUPVAL", a=3, b=0),
+            _abc("NOP"),
+            _ad("FORGLOOP", a=0, d=-3),
+            1,
+            _abc("RETURN", b=1),
+        ),
+        max_stack_size=4,
+    )
+
+    result = decompile_module(_module(proto), {}, "GenericFor")
+
+    assert "for " in result
+    assert "until" not in result
+    assert "repeat" not in result
+
+
+def test_advanced_loop_action_is_not_reopened_as_legacy_while() -> None:
+    proto = _proto(
+        (
+            _abc("LOADB", a=0, b=1),
+            _ad("JUMPIF", a=0, d=3),
+            _ad("LOADN", a=1, d=1),
+            _abc("SETUPVAL", a=1, b=0),
+            _ad("JUMPBACK", d=-5),
+            _abc("RETURN", b=1),
+        ),
+        max_stack_size=2,
+    )
+
+    result = decompile_module(_module(proto), {}, "AdvancedLoopBreak")
+
+    assert result.count("while ") == 1
+    assert "while not true do" in result
+
+
+def test_phi_declaration_assignment_and_uses_share_one_name() -> None:
+    constants = (
+        LuauConstant(kind="string", value="Model", tag=3),
+        LuauConstant(kind="string", value="IsA", tag=3),
+        LuauConstant(kind="string", value="PrimaryPart", tag=3),
+    )
+    proto = _proto(
+        (
+            _ad("LOADK", a=4, d=0),
+            _abc("NAMECALL", a=2, b=0),
+            1,
+            _abc("CALL", a=2, b=3, c=2),
+            _ad("JUMPIFNOT", a=2, d=3),
+            _abc("GETTABLEKS", a=1, b=0),
+            2,
+            _ad("JUMP", d=1),
+            _abc("MOVE", a=1, b=0),
+            _ad("JUMPIF", a=1, d=1),
+            _abc("RETURN", b=1),
+            _abc("RETURN", a=1, b=2),
+        ),
+        constants=constants,
+        num_params=1,
+        max_stack_size=5,
+    )
+
+    result = decompile_reconstructed_module(_module(proto), {}, "PhiName")
+
+    assert "local result\nresult = if" in result
+    assert "if not result then" in result
+    assert "return result" in result
+    assert "PrimaryPart2" not in result

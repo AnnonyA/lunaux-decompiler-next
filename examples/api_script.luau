@@ -1,4 +1,4 @@
--- LunaUX Next local API client
+-- ByteWeft local API client
 -- Requires an authorized environment that provides request, getscriptbytecode,
 -- and either base64encode or crypt.base64.encode.
 

@@ -79,6 +79,23 @@ def _analyze(module: LuauBytecodeModule, proto: LuauProto):
     return instructions, ssa, recovery
 
 
+def test_semantic_naming_ignores_unreachable_trailing_return() -> None:
+    proto = _proto(
+        proto_id=0,
+        code=(
+            _ad("JUMPBACK", 0, -1),
+            _abc("RETURN", 0, 1, 0),
+        ),
+    )
+    module = _module(proto)
+    instructions, ssa, _ = _analyze(module, proto)
+
+    assert [instruction.pc for instruction in instructions] == [0, 1]
+    assert ssa.instruction_at(0) is not None
+    assert ssa.instruction_at(1) is None
+    assert decompile_module(module, {}, "unreachable-return.luac")
+
+
 def test_getservice_recovers_service_name_and_type() -> None:
     constants = (
         LuauConstant("string", "game", 3),

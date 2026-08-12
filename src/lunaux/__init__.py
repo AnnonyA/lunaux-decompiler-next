@@ -1,5 +1,5 @@
-"""Public package metadata for LunaUX Next."""
+"""Public package metadata for ByteWeft."""
 
 __all__ = ["__version__"]
 
-__version__ = "0.20.0.dev0"
+__version__ = "0.21.0.dev0"

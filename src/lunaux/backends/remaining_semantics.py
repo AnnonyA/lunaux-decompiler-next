@@ -419,10 +419,11 @@ def _fresh_lifetime_name(
     lifter: _SafeCompatibilityQualityFunctionLifter,
     register: int,
     captured_identifiers: frozenset[str],
+    preferred: str | None = None,
 ) -> str:
     """Allocate a new lexical name when a physical register outlives a REF capture."""
 
-    base = f"value{register + 1}"
+    base = preferred or f"value{register + 1}"
     occupied = (
         set(lifter.declared)
         | set(lifter.register_names.values())
@@ -515,6 +516,48 @@ def install_remaining_semantics_fix() -> None:
                 return name
 
         name = original_definition_name(self, register, pc)
+        expired_structural_binding = any(
+            forced_register == register
+            and end_pc < pc
+            and structural_name == name
+            for forced_register, _start_pc, end_pc, structural_name
+            in self._structural_register_names()
+        )
+        if (
+            value is not None
+            and value not in captured_names
+            and name in self.declared
+            and expired_structural_binding
+            and self._all_phi_names().get(value) is None
+            and self._structural_name(register, pc) is None
+            and self.scope_tree.binding_for_register(register, pc) is None
+        ):
+            # ``declared`` spans the whole emitted function while a structural loop
+            # variable ends at its loop boundary.  If a fresh SSA lifetime inherits
+            # that expired physical-register name, ``name = ...`` creates a global.
+            # Without a phi, new structural binding, or debug binding there is no
+            # proof of shared lexical storage.  Allocate a deterministic new local,
+            # using exact semantic naming evidence when it is available.
+            semantic_name = self.semantic_names.name_at_definition(
+                self.ssa,
+                pc,
+                register,
+            )
+            preferred = (
+                self._friendly_name(semantic_name)
+                if semantic_name is not None
+                else None
+            )
+            self._forced_value_names().pop(value, None)
+            self.register_names.pop(register, None)
+            name = _fresh_lifetime_name(
+                self,
+                register,
+                captured_identifiers,
+                preferred,
+            )
+            self._forced_value_names()[value] = name
+            self.register_names[register] = name
         if (
             value is not None
             and value not in captured_names

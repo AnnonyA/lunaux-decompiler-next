@@ -11,6 +11,19 @@ from tests.fakes import FakeBackend
 def test_service_sanitizes_filename() -> None:
     service = DecompilerService(FakeBackend(), max_bytecode_bytes=100)
     result = service.decompile(b"abc", DecompileOptions(), "folder/Example.luau")
+    assert result.startswith("-- [[ ByteWeft v")
+    assert "decompiled:Example.luau" in result
+
+
+def test_service_can_return_deterministic_backend_body_without_header() -> None:
+    service = DecompilerService(FakeBackend(), max_bytecode_bytes=100)
+
+    result = service.decompile(
+        b"abc",
+        DecompileOptions(include_header=False),
+        "Example.luau",
+    )
+
     assert result.startswith("decompiled:Example.luau")
 
 

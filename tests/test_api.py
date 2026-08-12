@@ -38,7 +38,9 @@ def test_decompile_returns_structured_result() -> None:
         json={"bytecode": encoded(b"abc"), "filename": "A.luau"},
     )
     assert response.status_code == 200
-    assert response.json()["result"].startswith("decompiled:A.luau:3")
+    result = response.json()["result"]
+    assert result.startswith("-- [[ ByteWeft v")
+    assert "decompiled:A.luau:3" in result
 
 
 def test_classic_decompile_returns_plain_source() -> None:
@@ -48,7 +50,8 @@ def test_classic_decompile_returns_plain_source() -> None:
     )
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
-    assert response.text.startswith("decompiled:A.luau:3")
+    assert response.text.startswith("-- [[ ByteWeft v")
+    assert "decompiled:A.luau:3" in response.text
 
 
 def test_classic_api_accepts_pascal_case_options() -> None:
@@ -62,6 +65,20 @@ def test_classic_api_accepts_pascal_case_options() -> None:
     )
     assert response.status_code == 200
     assert response.text.endswith(":False")
+
+
+def test_api_can_disable_the_presentation_header() -> None:
+    response = client().post(
+        "/decompile",
+        json={
+            "bytecode": encoded(b"abc"),
+            "filename": "A.luau",
+            "options": {"IncludeHeader": False},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.text.startswith("decompiled:A.luau:3")
 
 
 def test_classic_disassemble_returns_plain_text() -> None:

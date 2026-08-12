@@ -1,35 +1,30 @@
-# LunaUX Decompiler Next
+# ByteWeft
 
-LunaUX is a local Luau bytecode decompiler focused on producing safe, readable
-source instead of register-shaped output. It supports modern Roblox Luau
-bytecode, runs entirely on your machine, and never executes the bytecode it is
-decompiling.
+ByteWeft is a local Luau bytecode decompiler. It rebuilds control flow, SSA value
+identity, scopes, tables, calls, closures, and Roblox-specific patterns before it
+writes source. The goal is simple: output that reads like Luau, not a transcript of
+reused VM registers.
 
-The current development build passes all **2,304 semantic corpus cases** and
-all **384 Medal-compatible cases**, with 100% syntax, recompilation, execution,
-stability, and zero-fallback coverage.
+The project was formerly called LunaUX Next. The Python package remains `lunaux`
+for compatibility, and the old `lunaux` command is still available as an alias.
 
-## Why LunaUX?
+## What it recovers
 
-Decompilation is more than translating opcodes line by line. LunaUX rebuilds
-control flow and value identity before emitting source, which lets it recover
-things such as:
+- mixed and nested table constructors, including fixed and open `SETLIST` writes;
+- numeric and generic loops with evidence-backed `break` and `continue` ownership;
+- short-circuit values, conditional expressions, and conservative repeat loops;
+- fixed/open calls and exact multiple-return behavior;
+- recursive functions, closures, captures, methods, and module fields;
+- debug names and serialized Luau types when the bytecode preserves them;
+- Roblox services, events, callbacks, modules, and common API types.
 
-- nested and mixed table constructors;
-- numeric and generic loops with correct `break` and `continue` ownership;
-- short-circuit expressions and conditional values;
-- exact fixed/open call and multiple-return behavior;
-- recursive functions, closures, methods, and captured variables;
-- safe compound assignments such as `data.Stats.Score += data[1]`;
-- debug names and serialized Luau types when that information survives.
+ByteWeft does not invent comments, names, or source structure that compilation
+destroyed. When a prettier form cannot be proven safe, it keeps the conservative
+form.
 
-When the bytecode does not prove a prettier reconstruction, LunaUX keeps a
-conservative form. It does not guess destroyed names or replay old physical
-register contents as if they were stable variables.
+## Install and run
 
-## Quick start
-
-### Windows
+Windows:
 
 ```bat
 git clone https://github.com/AnnonyA/lunaux-decompiler-next.git
@@ -37,7 +32,7 @@ cd lunaux-decompiler-next
 run.bat
 ```
 
-### Linux
+Linux:
 
 ```bash
 git clone https://github.com/AnnonyA/lunaux-decompiler-next.git
@@ -46,97 +41,55 @@ chmod +x run.sh
 ./run.sh
 ```
 
-The local API starts at `http://127.0.0.1:8000`, with interactive documentation
-at `http://127.0.0.1:8000/docs`.
-
-## CLI
+Direct CLI use:
 
 ```bash
-lunaux decompile input.luac -o recovered.luau
-lunaux disassemble input.luac -o instructions.txt
+byteweft decompile input.luac -o recovered.luau
+byteweft disassemble input.luac -o instructions.txt
 ```
 
-Available backend modes:
-
-```text
-auto          native -> Unluau -> Python
-native        native luna extension only
-unluau        Unluau only
-reconstructed Python engine only
-```
-
-`auto` is recommended for normal use.
-
-## Roblox client
-
-Start the local LunaUX server, then use the provided client in an authorized
-environment with `request`, `getscriptbytecode`, and Base64 support:
+Every normal decompilation begins with a provenance header such as:
 
 ```luau
-loadstring(game:HttpGet(
-    "https://raw.githubusercontent.com/AnnonyA/lunaux-decompiler-next/main/examples/api_script.luau"
-))()
-
-local module = game:GetService("ReplicatedStorage"):WaitForChild("MyModule")
-print(decompile(module))
+-- [[ ByteWeft v0.21.0.dev0 | decompiled at 2026-08-12T12:00:00Z | bytecode v9 | types v3 ]]
 ```
 
-See [`examples/api_script.luau`](examples/api_script.luau) for the complete
-client.
+Use `--no-header` when a byte-for-byte deterministic body is needed. Setting
+`SOURCE_DATE_EPOCH` makes the header timestamp reproducible.
+
+The local API runs at `http://127.0.0.1:8000`; its documentation is at `/docs`.
+The client in [`examples/api_script.luau`](examples/api_script.luau) can be used in
+an authorized Roblox environment.
 
 ## How it works
 
-The reconstructed backend follows a structural pipeline:
-
 ```text
-serialized bytecode
-  -> shared module analysis
-  -> CFG, dominance, scopes, and SSA
-  -> effects, calls, tables, captures, and proto ownership
+serialized Luau bytecode
+  -> shared decode, CFG, dominance, scopes, and SSA
+  -> effects, call frames, table ownership, captures, and proto ownership
   -> structured regions and semantic AST
   -> canonical Luau renderer
 ```
 
-Recent work hardened the difficult interactions between phi values, FASTCALL
-paths, open tuples, `SETLIST`, nested loops, mutual recursion, and closure
-cells. Analysis is cached once per prototype and shared by all collectors.
+This release additionally fixes unreachable-instruction symbol analysis, generic
+loop successor modeling, nested-loop ownership, reused-register lexical lifetimes,
+mixed boolean guards, and call-valued table construction. Those fixes are based on
+SSA values and CFG evidence; they do not replay historical physical registers.
 
-## Validation
+## Compatibility and validation
 
-The current tree is validated with:
+- Luau bytecode versions 3 through 13;
+- experimental version 100 class bytecode;
+- Python 3.11, 3.12, and 3.13;
+- native, Unluau, and portable Python backends;
+- legacy `lunaux` CLI and `LUNAUX_*` environment variables remain supported.
 
-- **258 pytest tests**;
-- Ruff and strict Mypy across 67 source files;
-- **2,304 / 2,304** semantic corpus cases;
-- **384 / 384** Medal-compatible cases;
-- a real Luau v13 MegaStress fixture with 89 prototypes;
-- deterministic differential execution over 19 seeds;
-- a bounded compile/decompile/recompile fuzz campaign.
+The last published full corpus gate passed 2,304/2,304 semantic cases and 384/384
+Medal-compatible cases with 100% syntax, recompilation, execution, stability, and
+zero-fallback coverage. Correctness is a release constraint, not a readability
+tradeoff.
 
-Corpus readability improved from `93.45525` to `93.5133` in the latest stage,
-with 56 paired wins and no losses. Readability is telemetry only: semantic
-correctness remains the hard requirement.
-
-## Supported formats
-
-- Luau bytecode versions **3 through 13**;
-- experimental version **100** class bytecode;
-- modern serialized type metadata where available;
-- Roblox-oriented module, event, class, and API recovery.
-
-## Honest limits
-
-A compiler destroys comments, formatting, and sometimes local names or source
-structure. LunaUX cannot recover information that is no longer in the
-bytecode. Its goal is deterministic, idiomatic Luau backed by evidence—not a
-fictional claim that the exact original source was restored.
-
-Use LunaUX only on bytecode you are authorized to inspect.
-
-## Project links
-
-- [Changelog](CHANGELOG.md)
-- [Documentation](docs/)
-- [Issues](https://github.com/AnnonyA/lunaux-decompiler-next/issues)
+See [CHANGELOG.md](CHANGELOG.md) for release details and [docs/](docs/) for the
+architecture notes. Use ByteWeft only on bytecode you are authorized to inspect.
 
 Licensed under the [Apache License 2.0](LICENSE).

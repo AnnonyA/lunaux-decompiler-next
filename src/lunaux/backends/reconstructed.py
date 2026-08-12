@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Final
 
+from lunaux import __version__
 from lunaux.backends.bytecode import (
     BytecodeFormatError,
     LuauBytecodeModule,
@@ -147,7 +148,7 @@ class ReconstructedBackend:
 
     @property
     def version(self) -> str:
-        return "0.20.0.dev0"
+        return __version__
 
     def decompile(
         self,
@@ -166,7 +167,7 @@ class ReconstructedBackend:
         label = filename or "<bytecode>"
         lines = [
             _COMPATIBILITY_NOTICE.rstrip(),
-            f"-- LunaUX Next could not parse {label} as serialized Luau bytecode.",
+            f"-- ByteWeft could not parse {label} as serialized Luau bytecode.",
         ]
         if parse_error is not None:
             lines.append(f"-- Parse error: {parse_error}")

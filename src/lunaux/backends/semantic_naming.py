@@ -317,8 +317,11 @@ def build_semantic_name_plan(
     evidence_by_value: dict[SSAValue, NameEvidence] = {}
     conflicts: dict[str, list[str]] = {}
     for instruction in sorted(instructions, key=lambda item: item.pc):
+        current_instruction = program.instruction_at(instruction.pc)
+        if current_instruction is None:
+            continue
         for value in sorted(
-            (item for item in program.instructions[instruction.pc].definitions),
+            current_instruction.definitions,
             key=lambda item: (item.register, item.version),
         ):
             if program.uses_of(value) <= 0 or _debug_binding_for_value(

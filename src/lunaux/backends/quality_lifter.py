@@ -161,6 +161,12 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
             groups[find(value)].append(value)
 
         loop_names = super()._loop_carried_names()
+        captured_name_provider = getattr(self, "_captured_reference_names", None)
+        captured_names = (
+            cast(dict[SSAValue, str], captured_name_provider())
+            if callable(captured_name_provider)
+            else {}
+        )
         result: dict[SSAValue, str] = {}
         used: set[str] = set(self.declared)
         for values in groups.values():
@@ -168,6 +174,15 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
                 (loop_names[value] for value in values if value in loop_names),
                 None,
             )
+            if existing is None:
+                existing = next(
+                    (
+                        captured_names[value]
+                        for value in values
+                        if value in captured_names
+                    ),
+                    None,
+                )
             if existing is not None:
                 name: str | None = self._friendly_name(existing)
             else:
@@ -211,6 +226,30 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
 
         self._quality_all_phi_names = result
         return result
+
+    def _assign_phi_result(self, value: SSAValue, expression: Expr, pc: int) -> None:
+        name = self._all_phi_names().get(value)
+        if name is None:
+            super()._assign_phi_result(value, expression, pc)
+            return
+        if self.ssa.uses_of(value) <= 0:
+            return
+        binding = self.scope_tree.binding_for_register(value.register, pc)
+        if (
+            self.options.inline_single_use_temporaries
+            and self.ssa.uses_of(value) == 1
+            and binding is None
+        ):
+            self.inline_expressions[value] = expression
+            return
+        is_new = name not in self.declared
+        lhs = self._annotated_name(value.register, name, pc) if is_new else name
+        self.out.line(
+            f"{'local ' if is_new else ''}{lhs} = {render_expression(expression)}",
+            statement=True,
+        )
+        self.declared.add(name)
+        self.register_names[value.register] = name
 
     def _name(self, register: int, pc: int) -> str:
         structural = self._structural_name(register, pc)

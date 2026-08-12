@@ -49,7 +49,7 @@ def test_real_source_fidelity_output_is_deterministic() -> None:
     assert len(outputs) == 1
     output = outputs.pop()
     assert hashlib.sha256(output.encode()).hexdigest() == (
-        "e26ee5299517871ddfba45b7d510a9acbf4c269c61c11d7a518268a4789d827a"
+        "9471cdd9e4d314dec11063b81500ba5575dfe74a8db5ea37d760f5a1a94ba71a"
     )
 
 

@@ -3,9 +3,9 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "lunaux-next"
-version = "0.20.0.dev0"
-description = "A multi-engine Luau decompiler with MULTRET-aware SSA, advanced control-flow recovery, Roblox semantics, and differential benchmarking"
+name = "byteweft"
+version = "0.21.0.dev0"
+description = "An evidence-driven Luau bytecode decompiler with structural SSA recovery"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -37,6 +37,7 @@ dev = [
 ]
 
 [project.scripts]
+byteweft = "lunaux.cli:app"
 lunaux = "lunaux.cli:app"
 
 [project.urls]

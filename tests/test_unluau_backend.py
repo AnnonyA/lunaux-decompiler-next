@@ -131,3 +131,17 @@ def test_settings_accept_unluau_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.backend_mode is BackendMode.UNLUAU
     assert settings.unluau_path == "C:/Tools/Unluau.CLI.exe"
     assert settings.external_timeout_seconds == 90
+
+
+def test_byteweft_environment_names_override_legacy_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LUNAUX_BACKEND_MODE", "native")
+    monkeypatch.setenv("LUNAUX_UNLUAU_PATH", "C:/Legacy/Unluau.exe")
+    monkeypatch.setenv("BYTEWEFT_BACKEND_MODE", "unluau")
+    monkeypatch.setenv("BYTEWEFT_UNLUAU_PATH", "C:/Tools/Unluau.CLI.exe")
+
+    settings = Settings.from_env()
+
+    assert settings.backend_mode is BackendMode.UNLUAU
+    assert settings.unluau_path == "C:/Tools/Unluau.CLI.exe"

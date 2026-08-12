@@ -5,8 +5,8 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 cd "$ROOT_DIR"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-HOST="${LUNAUX_HOST:-127.0.0.1}"
-PORT="${LUNAUX_PORT:-8000}"
+HOST="${BYTEWEFT_HOST:-${LUNAUX_HOST:-127.0.0.1}}"
+PORT="${BYTEWEFT_PORT:-${LUNAUX_PORT:-8000}}"
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     echo "Python 3.11 or newer was not found." >&2
@@ -30,12 +30,12 @@ fi
 
 VENV_PYTHON=".venv/bin/python"
 
-echo "Installing or updating LunaUX Next..."
+echo "Installing or updating ByteWeft..."
 "$VENV_PYTHON" -m pip install --upgrade pip
 "$VENV_PYTHON" -m pip install -e .
 
 echo
-echo "Starting LunaUX Next at http://${HOST}:${PORT}"
+echo "Starting ByteWeft at http://${HOST}:${PORT}"
 echo "API documentation: http://${HOST}:${PORT}/docs"
 echo "Press Ctrl+C to stop the server."
 echo

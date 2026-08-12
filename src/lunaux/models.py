@@ -7,11 +7,12 @@ class DecompileOptions(BaseModel):
     """Formatting and reconstruction preferences passed to the backend.
 
     Both Python-style field names (``string_interpolation``) and the classic
-    LunaUX API names (``StringInterpolation``) are accepted.
+    Legacy API names (``StringInterpolation``) are accepted.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
+    include_header: bool = Field(default=True, alias="IncludeHeader")
     semicolons: bool = Field(default=False, alias="Semicolons")
     string_interpolation: bool = Field(default=True, alias="StringInterpolation")
     upvalue_comment: bool = Field(default=True, alias="UpvalueComment")

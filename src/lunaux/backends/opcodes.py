@@ -211,7 +211,17 @@ _JUMP_D_OPS = frozenset(
     }
 )
 _FASTCALL_OPS = frozenset({"FASTCALL", "FASTCALL1", "FASTCALL2", "FASTCALL2K", "FASTCALL3"})
-_NON_FALLTHROUGH_OPS = frozenset({"RETURN", "JUMP", "JUMPBACK", "JUMPX"})
+_NON_FALLTHROUGH_OPS = frozenset(
+    {
+        "RETURN",
+        "JUMP",
+        "JUMPBACK",
+        "JUMPX",
+        "FORGPREP",
+        "FORGPREP_INEXT",
+        "FORGPREP_NEXT",
+    }
+)
 _LOOP_JUMPS = frozenset({"JUMPBACK", "FORGLOOP", "FORNLOOP"})
 
 _MIN_VERSION = {

@@ -390,6 +390,11 @@ def install_full_corpus_semantics_fix() -> None:
         if value is not None and value in self._captured_reference_names():
             return original_name(self, register, pc)
         if value is not None:
+            phi_name = self._all_phi_names().get(value)
+            if phi_name is not None:
+                self._forced_value_names()[value] = phi_name
+                self.register_names[register] = phi_name
+                return phi_name
             debug_name = _debug_value_names(self).get(value)
             if debug_name is not None:
                 self._forced_value_names()[value] = debug_name
@@ -423,6 +428,12 @@ def install_full_corpus_semantics_fix() -> None:
         value = self.ssa.value_defined_at(pc, register)
         if value is not None and value in self._captured_reference_names():
             return original_definition_name(self, register, pc)
+        if value is not None:
+            phi_name = self._all_phi_names().get(value)
+            if phi_name is not None:
+                self._forced_value_names()[value] = phi_name
+                self.register_names[register] = phi_name
+                return phi_name
 
         debug_value = value
         if debug_value is None:

@@ -1,6 +1,6 @@
 # Architecture
 
-LunaUX Next separates transport, validation, formatting options, and backend execution. The current native adapter is intentionally small so a future open engine can replace it without changing the CLI or HTTP API.
+ByteWeft separates transport, validation, formatting options, and backend execution. The current native adapter is intentionally small so a future open engine can replace it without changing the CLI or HTTP API.
 
 ## Current layers
 

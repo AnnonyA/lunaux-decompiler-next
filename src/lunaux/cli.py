@@ -63,7 +63,7 @@ def main(
         ),
     ] = False,
 ) -> None:
-    """LunaUX Next local Luau bytecode analysis tools."""
+    """ByteWeft local Luau bytecode analysis tools."""
     del version, show_hash
 
 
@@ -118,12 +118,17 @@ def _run(
     output_directory: Path | None,
     output: Path | None,
     input_format: InputFormat,
+    include_header: bool = True,
 ) -> None:
     try:
         bytecode = _read(input_path, input_format)
         service = _service()
         if operation == "decompile":
-            result = service.decompile(bytecode, DecompileOptions(), input_path.name)
+            result = service.decompile(
+                bytecode,
+                DecompileOptions(IncludeHeader=include_header),
+                input_path.name,
+            )
         else:
             result = service.disassemble(bytecode, input_path.name)
         _write_or_print(
@@ -154,9 +159,10 @@ def decompile(
     output_directory: Annotated[Path | None, typer.Argument(file_okay=False)] = None,
     output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
     input_format: Annotated[InputFormat, typer.Option("--input-format")] = InputFormat.AUTO,
+    include_header: Annotated[bool, typer.Option("--header/--no-header")] = True,
 ) -> None:
     """Decompile a raw or Base64-encoded Luau bytecode file."""
-    _run("decompile", input_path, output_directory, output, input_format)
+    _run("decompile", input_path, output_directory, output, input_format, include_header)
 
 
 @app.command(name="decomp")
@@ -165,9 +171,10 @@ def decomp_alias(
     output_directory: Annotated[Path | None, typer.Argument(file_okay=False)] = None,
     output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
     input_format: Annotated[InputFormat, typer.Option("--input-format")] = InputFormat.AUTO,
+    include_header: Annotated[bool, typer.Option("--header/--no-header")] = True,
 ) -> None:
     """Alias for ``decompile``."""
-    _run("decompile", input_path, output_directory, output, input_format)
+    _run("decompile", input_path, output_directory, output, input_format, include_header)
 
 
 @app.command()
@@ -228,10 +235,10 @@ def doctor() -> None:
         error_console.print(f"[red]Configuration error:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
-    table = Table(title="LunaUX Next diagnostics")
+    table = Table(title="ByteWeft diagnostics")
     table.add_column("Check")
     table.add_column("Value")
-    table.add_row("LunaUX Next", __version__)
+    table.add_row("ByteWeft", __version__)
     table.add_row("Python", sys.version.split()[0])
     table.add_row("Backend mode", settings.backend_mode.value)
     table.add_row("Backend module", settings.backend_module)
@@ -249,5 +256,5 @@ def doctor() -> None:
 
 @app.command(name="version")
 def version_command() -> None:
-    """Print the LunaUX Next version."""
+    """Print the ByteWeft version."""
     typer.echo(__version__)

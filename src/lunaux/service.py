@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import PurePath
 
 from lunaux.backends.base import DecompilerBackend
+from lunaux.branding import decompilation_header
 from lunaux.errors import ErrorCode, LunaUXError
 from lunaux.models import DecompileOptions
 
@@ -39,6 +40,8 @@ class DecompilerService:
         safe_name = self._validate(bytecode, filename)
         resolved = options or DecompileOptions()
         result = self.backend.decompile(bytecode, resolved.to_backend_dict(), safe_name)
+        if resolved.include_header:
+            result = decompilation_header(bytecode) + result
         if len(result) > resolved.max_output_characters:
             raise LunaUXError(
                 ErrorCode.BACKEND_FAILURE,

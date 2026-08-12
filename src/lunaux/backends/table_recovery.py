@@ -10,7 +10,7 @@ from typing import Final
 from lunaux.backends.analysis import register_access
 from lunaux.backends.ast import Expr, LiteralExpr, TableExpr, TableField, render_expression
 from lunaux.backends.bytecode import LuauProto
-from lunaux.backends.callframe import CallFramePlan, CallResultShape
+from lunaux.backends.callframe import CallFrame, CallFramePlan, CallResultShape
 from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
 from lunaux.backends.ssa import (
     SSAProgram,
@@ -86,6 +86,7 @@ class TableBuildPlan:
     parent_by_table: Mapping[SSAValue, SSAValue]
     calls: Mapping[int, TableCallOwnership]
     fastcall_bridges: Mapping[int, TableCallOwnership]
+    protected_values_by_pc: Mapping[int, frozenset[SSAValue]]
     rejection_counts: Mapping[str, int]
 
     def table_identity(self, value: SSAValue | None) -> SSAValue | None:
@@ -93,6 +94,9 @@ class TableBuildPlan:
 
     def call_at(self, pc: int) -> TableCallOwnership | None:
         return self.calls.get(pc) or self.fastcall_bridges.get(pc)
+
+    def protected_at(self, pc: int) -> frozenset[SSAValue]:
+        return self.protected_values_by_pc.get(pc, frozenset())
 
     def is_in_transaction(
         self,
@@ -115,6 +119,7 @@ class TableBuildPlan:
             parent_by_table=MappingProxyType({}),
             calls=MappingProxyType({}),
             fastcall_bridges=MappingProxyType({}),
+            protected_values_by_pc=MappingProxyType({}),
             rejection_counts=MappingProxyType({}),
         )
 
@@ -535,11 +540,51 @@ def _call_consumer(
     return matches[0].consumer_pc, None
 
 
+def _call_preparation(
+    program: SSAProgram,
+    frame: CallFrame,
+    owner: SSAValue,
+) -> tuple[frozenset[int], frozenset[SSAValue]]:
+    """Return exact SSA dependencies used to prepare one owned call.
+
+    Only definition PCs between the pending table allocation and the CALL, in the
+    CALL's basic block, are marked as preparation.  The complete value closure is
+    still returned so an indirect dependency on the pending table owner rejects the
+    transaction instead of letting a table read observe its partial state.
+    """
+
+    owner_pc = owner.origin_pc if owner.origin_pc is not None else -1
+    call_block = program.analysis.block_for_pc.get(frame.pc)
+    phi_operands = {phi.result: tuple(phi.operands.values()) for phi in program.phis}
+    pending = list(frame.dependencies)
+    values: set[SSAValue] = set()
+    preparation_pcs: set[int] = set()
+    while pending:
+        value = pending.pop()
+        if value in values:
+            continue
+        values.add(value)
+        pending.extend(phi_operands.get(value, ()))
+        if value.kind != "instruction" or value.origin_pc is None:
+            continue
+        definition = program.instruction_at(value.origin_pc)
+        if definition is None:
+            continue
+        pending.extend(use.value for use in definition.uses)
+        if (
+            owner_pc < value.origin_pc < frame.pc
+            and program.analysis.block_for_pc.get(value.origin_pc) == call_block
+        ):
+            preparation_pcs.add(value.origin_pc)
+    return frozenset(preparation_pcs), frozenset(values)
+
+
 def _call_gap_is_structural(
     program: SSAProgram,
     call_pc: int,
     consumer_pc: int,
     candidate_consumers: Mapping[int, int],
+    preparation_pcs: Mapping[int, frozenset[int]],
 ) -> bool:
     for pc in sorted(program.instructions):
         if not call_pc < pc < consumer_pc:
@@ -550,6 +595,8 @@ def _call_gap_is_structural(
         if instruction.name in {"CALL", "CALLFB"} and candidate_consumers.get(pc) == consumer_pc:
             continue
         if instruction.name.startswith("FASTCALL") and candidate_consumers.get(pc) == consumer_pc:
+            continue
+        if pc in preparation_pcs.get(consumer_pc, frozenset()):
             continue
         return False
     return True
@@ -571,7 +618,16 @@ def plan_table_builds(
     rejections: Counter[str] = Counter()
     identities = _table_identities(program)
     parents = _table_parents(program, identities, rejections)
-    raw: dict[int, tuple[int, SSAValue, SSAValue | None, CallResultShape]] = {}
+    raw: dict[
+        int,
+        tuple[
+            int,
+            SSAValue,
+            SSAValue | None,
+            CallResultShape,
+            frozenset[int],
+        ],
+    ] = {}
 
     for pc, frame in call_frames.frames.items():
         result_value = (
@@ -580,8 +636,8 @@ def plan_table_builds(
             else None
         )
         consumer_result = call_frames.fastcall_result_at(pc) or result_value
-        consumer = _call_consumer(program, pc, frame.result_shape, consumer_result)
-        if consumer is None:
+        call_consumer = _call_consumer(program, pc, frame.result_shape, consumer_result)
+        if call_consumer is None:
             if frame.result_shape in {
                 CallResultShape.FIXED_MANY,
                 CallResultShape.OPEN,
@@ -590,7 +646,7 @@ def plan_table_builds(
             elif frame.result_shape == CallResultShape.FIXED_ONE:
                 rejections["not-single-use"] += 1
             continue
-        consumer_pc, result_use = consumer
+        consumer_pc, result_use = call_consumer
         ssa_consumer = program.instructions.get(consumer_pc)
         if ssa_consumer is None:
             rejections["non-table-consumer"] += 1
@@ -643,21 +699,58 @@ def plan_table_builds(
             rejections["debug-binding"] += 1
             continue
         protected = _protected_tables(owner, parents)
-        if any(identities.get(dependency) in protected for dependency in frame.dependencies):
+        preparation_pcs, dependency_values = _call_preparation(program, frame, owner)
+        if any(identities.get(dependency) in protected for dependency in dependency_values):
             rejections["call-not-owned"] += 1
             continue
-        raw[pc] = (consumer_pc, owner, consumer_result, frame.result_shape)
+        consumer_instruction = program.instruction_at(consumer_pc)
+        protected_preparation = (
+            preparation_pcs
+            if consumer_instruction is not None
+            and consumer_instruction.instruction.name == "SETLIST"
+            else frozenset()
+        )
+        raw[pc] = (
+            consumer_pc,
+            owner,
+            consumer_result,
+            frame.result_shape,
+            protected_preparation,
+        )
 
-    candidate_consumers = {pc: item[0] for pc, item in raw.items()}
-    for pc, item in raw.items():
-        fastcall_pc = fastcall_for_fallback_call(program, pc)
-        if fastcall_pc is not None:
-            candidate_consumers[fastcall_pc] = item[0]
+    accepted = set(raw)
+    while True:
+        candidate_consumers = {pc: raw[pc][0] for pc in accepted}
+        preparation_by_consumer: defaultdict[int, set[int]] = defaultdict(set)
+        for pc in accepted:
+            item = raw[pc]
+            preparation_by_consumer[item[0]].update(item[4])
+            fastcall_pc = fastcall_for_fallback_call(program, pc)
+            if fastcall_pc is not None:
+                candidate_consumers[fastcall_pc] = item[0]
+        frozen_preparation = {
+            consumer_pc: frozenset(pcs)
+            for consumer_pc, pcs in preparation_by_consumer.items()
+        }
+        rejected = {
+            pc
+            for pc in accepted
+            if not _call_gap_is_structural(
+                program,
+                pc,
+                raw[pc][0],
+                candidate_consumers,
+                frozen_preparation,
+            )
+        }
+        if not rejected:
+            break
+        accepted.difference_update(rejected)
+        rejections["observable-order-conflict"] += len(rejected)
+
     calls: dict[int, TableCallOwnership] = {}
-    for pc, (consumer_pc, owner, result_value, shape) in raw.items():
-        if not _call_gap_is_structural(program, pc, consumer_pc, candidate_consumers):
-            rejections["observable-order-conflict"] += 1
-            continue
+    for pc in sorted(accepted):
+        consumer_pc, owner, result_value, shape, _preparation = raw[pc]
         calls[pc] = TableCallOwnership(
             call_pc=pc,
             consumer_pc=consumer_pc,
@@ -673,11 +766,26 @@ def plan_table_builds(
         if fastcall_pc is not None:
             fastcall_bridges[fastcall_pc] = ownership
 
+    protected_values_by_pc: defaultdict[int, set[SSAValue]] = defaultdict(set)
+    for call_pc, ownership in calls.items():
+        protected_values_by_pc[call_pc].update(ownership.protected_values)
+        for preparation_pc in raw[call_pc][4]:
+            protected_values_by_pc[preparation_pc].update(ownership.protected_values)
+        fastcall_pc = fastcall_for_fallback_call(program, call_pc)
+        if fastcall_pc is not None:
+            protected_values_by_pc[fastcall_pc].update(ownership.protected_values)
+
     return TableBuildPlan(
         table_identity_by_value=MappingProxyType(dict(identities)),
         parent_by_table=MappingProxyType(dict(parents)),
         calls=MappingProxyType(dict(calls)),
         fastcall_bridges=MappingProxyType(dict(fastcall_bridges)),
+        protected_values_by_pc=MappingProxyType(
+            {
+                pc: frozenset(values)
+                for pc, values in sorted(protected_values_by_pc.items())
+            }
+        ),
         rejection_counts=MappingProxyType(dict(sorted(rejections.items()))),
     )
 

@@ -74,6 +74,25 @@ def test_loop_phi_combines_preheader_and_latch_values() -> None:
     assert program.value_at_use(3, 0) == phi.result
 
 
+def test_generic_for_body_uses_loop_definition_not_stale_register_value() -> None:
+    instructions = [
+        _instruction(0, "LOADN", a=4, d=99),
+        _instruction(1, "LOADNIL", a=0),
+        _instruction(2, "LOADNIL", a=1),
+        _instruction(3, "FORGPREP", a=0, d=1),
+        _instruction(4, "SETUPVAL", a=4, b=0),
+        _instruction(5, "FORGLOOP", a=0, d=-2, aux=2),
+        _instruction(7, "RETURN", b=1),
+    ]
+
+    program = build_ssa(instructions, code_size=8)
+
+    loop_value = program.value_defined_at(5, 4)
+    assert loop_value is not None
+    assert program.value_at_use(4, 4) == loop_value
+    assert not any(phi.block == 4 and phi.register == 4 for phi in program.phis)
+
+
 def test_creates_entry_values_for_registers_used_before_definition() -> None:
     instructions = [
         _instruction(0, "MOVE", a=0, b=5),

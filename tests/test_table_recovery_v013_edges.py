@@ -203,3 +203,39 @@ def test_noncontiguous_open_setlist_uses_conservative_fallback() -> None:
     assert "{[2] = 2}" in output
     assert "-- set all stack values from var1 into tbl1 starting at 2" in output
     assert "set all stack values" in output
+
+
+def test_open_setlist_keeps_owned_call_preparation_in_transaction() -> None:
+    constants = (
+        LuauConstant("string", "ScreenGui", 3),
+        LuauConstant("string", "Vignette", 3),
+        LuauConstant("string", "Clone", 3),
+    )
+    code = (
+        _abc("NEWTABLE", a=1),
+        0,
+        _abc("GETTABLEKS", a=2, b=0),
+        0,
+        _abc("NAMECALL", a=2, b=2),
+        2,
+        _abc("CALL", a=2, b=2, c=2),
+        _abc("GETTABLEKS", a=3, b=0),
+        1,
+        _abc("NAMECALL", a=3, b=3),
+        2,
+        _abc("CALL", a=3, b=2, c=0),
+        _abc("SETLIST", a=1, b=2, c=0),
+        1,
+        _abc("RETURN", a=1, b=2),
+    )
+
+    output = decompile_module(
+        _module(code, constants, stack=5, num_params=1),
+        {},
+        "owned-call-preparation.luau",
+    )
+
+    assert "arg1.ScreenGui:Clone()" in output
+    assert "arg1.Vignette:Clone()" in output
+    assert "set all stack values" not in output
+    assert "--[[ multiple returns ]]" not in output

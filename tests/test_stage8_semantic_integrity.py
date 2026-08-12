@@ -20,7 +20,7 @@ _FIXTURE = (
     / "mega_stress_v13.bin.b64"
 )
 _BYTECODE_SHA256 = "2446c05b227e607150b2dc030c56f23db253cb4e1aa79c1211041b29508fe1b7"
-_OUTPUT_SHA256 = "9e6cbd1844fb002b7638832bdf4e8256ff525a799c20cf978cc569debf2ff736"
+_OUTPUT_SHA256 = "090f0d1a5e6b90ea3826993b178bc90e8a535ea04f0ea6efed254262e53895e1"
 _REAL_MIXED_CALL_SETLIST = (
     "CwMHBG1hdGgDbWF4A29uZQZjYXNlLTUEbmFtZQVmbG9vcgVwcmludAACBAEAAAgA"
     "CEsSAAUAAAAABgIAAAUDAAAMAQMAAAgQgBUBAwAWAQAABAIAAAAAAADwPwMBAwIE"
@@ -103,8 +103,8 @@ def test_real_v13_output_has_no_known_synthetic_ownership_artifacts() -> None:
     assert "--[[ open result ]]" not in output
     assert "\nclass " not in output
 
-    assert "for index3, value3 in item19 do" in output
-    assert "for index4, value4 in item23, item24 do" in output
+    assert "for _, value4 in item13 do" in output
+    assert "for index3, value6 in item16, item17 do" in output
     assert "local recursiveFunction, recursiveFunction2" in output
     assert "xpcall(arg1, function(arg1)" in output
 

@@ -2,6 +2,47 @@
 
 All notable changes are documented here.
 
+## [0.21.0.dev0] - 2026-08-12
+
+### New identity
+
+- Renamed the user-facing project and primary command to **ByteWeft**.
+- Added a provenance header with the ByteWeft version, UTC timestamp, bytecode
+  version, and type-data version to CLI and API decompilations.
+- Added `--no-header` and `IncludeHeader=false` for deterministic consumers, plus
+  `SOURCE_DATE_EPOCH` support for reproducible timestamps.
+- Kept the `lunaux` Python namespace, CLI alias, and `LUNAUX_*` environment
+  variables as compatibility interfaces.
+
+### Semantic and structural recovery
+
+- Fixed symbol recovery for decoded instructions that are unreachable and therefore
+  intentionally absent from the SSA instruction map.
+- Corrected `FORGPREP*` successor semantics so generic-loop bodies consume the
+  values defined by `FORGLOOP`, rather than stale physical-register lifetimes.
+- Fixed overlapping legacy/advanced loop ownership and recovered safe terminal
+  single-break loops as `repeat ... until` without duplicating loop regions.
+- Preserved captured phi names and created a fresh lexical binding when a physical
+  register is reused after its proven structural lifetime.
+- Recovered mixed terminal short-circuit guards while preserving the exact branch
+  edge represented by each condition.
+- Extended transactional table ownership to call-preparation values used by open
+  `SETLIST`, while preserving call barriers and flushing nested pending tables before
+  observable uses.
+
+### Real-module impact
+
+- Removes the invalid global assignment produced when a loop register was reused for
+  a later `math.clamp` result.
+- Removes a duplicated infinite-loop wrapper around the missile-rise interpolation
+  loop.
+- Preserves the early validation guard as a direct `not a or not b or not c` test.
+- Keeps call-valued GUI clones inside their proven table constructor and preserves
+  child-before-parent table initialization order.
+
+The portable backend remains deterministic. The timestamped provenance line is a
+presentation-layer feature and can be disabled without changing the recovered body.
+
 ## [0.20.0.dev0-stage7] - 2026-08-11
 
 ### Added

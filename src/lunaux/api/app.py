@@ -70,7 +70,7 @@ def create_app(
     )
 
     app = FastAPI(
-        title="LunaUX Next API",
+        title="ByteWeft API",
         version=__version__,
         docs_url="/docs",
         redoc_url="/redoc",

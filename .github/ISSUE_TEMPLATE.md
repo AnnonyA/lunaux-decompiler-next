@@ -8,7 +8,7 @@ Provide the smallest authorized input or source program that demonstrates the is
 
 ## Environment
 
-- LunaUX Next version:
+- ByteWeft version:
 - Backend and version:
 - Python version:
 - Operating system:

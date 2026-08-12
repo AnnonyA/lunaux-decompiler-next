@@ -19,7 +19,8 @@ from pathlib import Path
 from tkinter import BOTH, END, LEFT, RIGHT, X, Y, filedialog, messagebox, ttk
 
 ROOT = Path(__file__).resolve().parent
-CONFIG_PATH = ROOT / ".lunaux-windows.json"
+CONFIG_PATH = ROOT / ".byteweft-windows.json"
+LEGACY_CONFIG_PATH = ROOT / ".lunaux-windows.json"
 VENV_DIR = ROOT / ".venv"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
@@ -48,8 +49,9 @@ class LauncherConfig:
 
     @classmethod
     def load(cls) -> LauncherConfig:
+        config_path = CONFIG_PATH if CONFIG_PATH.exists() else LEGACY_CONFIG_PATH
         try:
-            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            data = json.loads(config_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             return cls()
         return cls(
@@ -67,7 +69,7 @@ class LauncherConfig:
         CONFIG_PATH.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
 
 
-class LunaUXInstaller:
+class ByteWeftInstaller:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.config = LauncherConfig.load()
@@ -75,7 +77,7 @@ class LunaUXInstaller:
         self.server_process: subprocess.Popen[str] | None = None
         self.busy = False
 
-        self.root.title("LunaUX Next — Windows Launcher")
+        self.root.title("ByteWeft — Windows Launcher")
         self.root.geometry("960x720")
         self.root.minsize(840, 620)
         self.root.configure(bg=BG)
@@ -195,7 +197,7 @@ class LunaUXInstaller:
         header.pack(fill=X, pady=(0, 18))
         title_box = ttk.Frame(header, style="Root.TFrame")
         title_box.pack(side=LEFT, fill=X, expand=True)
-        ttk.Label(title_box, text="LunaUX Next", style="Title.TLabel").pack(
+        ttk.Label(title_box, text="ByteWeft", style="Title.TLabel").pack(
             anchor="w"
         )
         ttk.Label(
@@ -335,7 +337,7 @@ class LunaUXInstaller:
         tk.Label(
             info,
             text=(
-                "Recommended mode: Native → Unluau → Python. LunaUX tries the "
+                "Recommended mode: Native → Unluau → Python. ByteWeft tries the "
                 "next engine automatically when one engine cannot recover a "
                 "specific script. External binaries remain optional."
             ),
@@ -519,7 +521,7 @@ class LunaUXInstaller:
                     self.server_process = None
                     self._refresh_status()
                 elif kind == "error":
-                    messagebox.showerror("LunaUX Next", str(payload))
+                    messagebox.showerror("ByteWeft", str(payload))
         except queue.Empty:
             pass
         self.root.after(100, self._drain_events)
@@ -601,30 +603,30 @@ class LunaUXInstaller:
     def _environment(self) -> dict[str, str]:
         env = os.environ.copy()
         env["PYTHONUTF8"] = "1"
-        env["LUNAUX_BACKEND_MODE"] = self.config.backend_mode
-        env["LUNAUX_BACKEND_MODULE"] = "luna"
-        env["LUNAUX_EXTERNAL_TIMEOUT_SECONDS"] = str(
+        env["BYTEWEFT_BACKEND_MODE"] = self.config.backend_mode
+        env["BYTEWEFT_BACKEND_MODULE"] = "luna"
+        env["BYTEWEFT_EXTERNAL_TIMEOUT_SECONDS"] = str(
             self.config.external_timeout_seconds
         )
         if self.config.native_path:
-            env["LUNAUX_NATIVE_PATH"] = self.config.native_path
+            env["BYTEWEFT_NATIVE_PATH"] = self.config.native_path
         else:
-            env.pop("LUNAUX_NATIVE_PATH", None)
+            env.pop("BYTEWEFT_NATIVE_PATH", None)
         if self.config.unluau_path:
-            env["LUNAUX_UNLUAU_PATH"] = self.config.unluau_path
+            env["BYTEWEFT_UNLUAU_PATH"] = self.config.unluau_path
         else:
-            env.pop("LUNAUX_UNLUAU_PATH", None)
+            env.pop("BYTEWEFT_UNLUAU_PATH", None)
         return env
 
     def start_server(self) -> None:
         if self.server_process is not None and self.server_process.poll() is None:
             messagebox.showinfo(
-                "LunaUX Next",
+                "ByteWeft",
                 "The local server is already running.",
             )
             return
         if not self._venv_python().exists():
-            messagebox.showwarning("LunaUX Next", "Install the project first.")
+            messagebox.showwarning("ByteWeft", "Install the project first.")
             return
         if not self.save_configuration(show_message=False):
             return
@@ -697,7 +699,7 @@ class LunaUXInstaller:
 
     def run_doctor(self) -> None:
         if not self._venv_python().exists():
-            messagebox.showwarning("LunaUX Next", "Install the project first.")
+            messagebox.showwarning("ByteWeft", "Install the project first.")
             return
 
         def task() -> None:
@@ -714,7 +716,7 @@ class LunaUXInstaller:
 
     def choose_native(self) -> None:
         selected = filedialog.askopenfilename(
-            title="Select LunaUX native backend",
+            title="Select ByteWeft native backend",
             filetypes=(("Python extension", "*.pyd"), ("All files", "*.*")),
         )
         if selected:
@@ -740,19 +742,19 @@ class LunaUXInstaller:
             timeout = int(self.timeout_var.get())
         except ValueError:
             messagebox.showerror(
-                "LunaUX Next",
+                "ByteWeft",
                 "Port and timeout must be whole numbers.",
             )
             return False
         if not 1 <= port <= 65535:
             messagebox.showerror(
-                "LunaUX Next",
+                "ByteWeft",
                 "Port must be between 1 and 65535.",
             )
             return False
         if timeout <= 0:
             messagebox.showerror(
-                "LunaUX Next",
+                "ByteWeft",
                 "External timeout must be greater than zero.",
             )
             return False
@@ -760,13 +762,13 @@ class LunaUXInstaller:
         unluau_path = self.unluau_var.get().strip()
         if native_path and not Path(native_path).is_file():
             messagebox.showerror(
-                "LunaUX Next",
+                "ByteWeft",
                 "The selected native backend does not exist.",
             )
             return False
         if unluau_path and not Path(unluau_path).is_file():
             messagebox.showerror(
-                "LunaUX Next",
+                "ByteWeft",
                 "The selected Unluau executable or DLL does not exist.",
             )
             return False
@@ -781,7 +783,7 @@ class LunaUXInstaller:
         self.config.save()
         self._refresh_status()
         if show_message:
-            messagebox.showinfo("LunaUX Next", "Configuration saved.")
+            messagebox.showinfo("ByteWeft", "Configuration saved.")
         return True
 
     def open_docs(self) -> None:
@@ -870,10 +872,10 @@ def main() -> int:
     if os.name != "nt":
         print(
             "This launcher is designed for Windows. "
-            "Use `python -m lunaux` on other systems."
+            "Use the `byteweft` command on other systems."
         )
     root = tk.Tk()
-    LunaUXInstaller(root)
+    ByteWeftInstaller(root)
     root.mainloop()
     return 0
 

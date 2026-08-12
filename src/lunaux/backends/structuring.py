@@ -107,6 +107,7 @@ class BooleanChain:
     false_start: int
     join: int
     skipped_pcs: frozenset[int]
+    condition_edges: tuple[Literal["fallthrough", "taken"], ...] = ()
 
     @property
     def has_else(self) -> bool:
@@ -774,25 +775,68 @@ def _and_chain(
     branch_by_header: Mapping[int, BranchRegion],
 ) -> BooleanChain | None:
     conditions = [root]
+    condition_edges: list[Literal["fallthrough", "taken"]] = ["fallthrough"]
     failure = root.taken
     current = root
     visited_headers = {root.header}
+    terminal_success: int | None = None
     while True:
         candidate = branch_by_header.get(current.fallthrough)
-        if candidate is None or candidate.header in visited_headers or candidate.taken != failure:
+        if candidate is None or candidate.header in visited_headers:
             break
         visited_headers.add(candidate.header)
         block = analysis.block_by_start[candidate.header]
         reachable_predecessors = block.predecessors & analysis.reachable
         if len(reachable_predecessors) != 1 or not _condition_only(block):
             break
+        if candidate.taken != failure:
+            # A terminal guard commonly reverses the last branch so that failure is
+            # laid out first and the successful continuation follows it:
+            #
+            #   JUMPIFNOT a, failure
+            #   JUMPIFNOT b, failure
+            #   JUMPIF c, success
+            # failure: ... RETURN
+            # success: ...
+            #
+            # This is still one source predicate (a and b and c), but emitting it as
+            # an ordinary nested if would put the failure block under the successful
+            # path.  Represent the bytecode layout directly as the equivalent early
+            # guard ``if not a or not b or not c then ... end``.
+            if candidate.fallthrough != failure or candidate.taken <= candidate.header:
+                break
+            conditions.append(candidate)
+            condition_edges.append("fallthrough")
+            current = candidate
+            terminal_success = candidate.taken
+            break
         conditions.append(candidate)
+        condition_edges.append("fallthrough")
         current = candidate
     if len(conditions) < 2:
         return None
     condition_pcs = _condition_pcs(analysis, conditions)
     if condition_pcs is None:
         return None
+    if terminal_success is not None:
+        if failure <= max(condition_pcs) or terminal_success <= failure:
+            return None
+        # Earlier taken edges and the last fallthrough edge all select failure.
+        failure_edge_items: list[Literal["fallthrough", "taken"]] = [
+            "taken" for _ in range(len(condition_pcs) - 1)
+        ]
+        failure_edge_items.append("fallthrough")
+        failure_edges = tuple(failure_edge_items)
+        return BooleanChain(
+            root_pc=condition_pcs[0],
+            condition_pcs=condition_pcs,
+            operator="or",
+            body_start=failure,
+            false_start=terminal_success,
+            join=terminal_success,
+            skipped_pcs=frozenset(condition_pcs[1:]),
+            condition_edges=failure_edges,
+        )
     body_start = current.fallthrough
     join = root.join if root.join is not None else failure
     if body_start <= max(condition_pcs):
@@ -805,6 +849,7 @@ def _and_chain(
         false_start=failure,
         join=join,
         skipped_pcs=frozenset(condition_pcs[1:]),
+        condition_edges=tuple(condition_edges),
     )
 
 
@@ -854,6 +899,7 @@ def _or_chain(
         false_start=failure,
         join=join,
         skipped_pcs=frozenset(skipped_pcs),
+        condition_edges=tuple("fallthrough" for _ in condition_pcs),
     )
 
 

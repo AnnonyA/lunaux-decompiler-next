@@ -101,7 +101,7 @@ class UnluauBackend(DecompilerBackend):
                 return Path(discovered).resolve()
         raise LunaUXError(
             ErrorCode.BACKEND_UNAVAILABLE,
-            "Unluau was not found. Set LUNAUX_UNLUAU_PATH or place it under tools/unluau.",
+            "Unluau was not found. Set BYTEWEFT_UNLUAU_PATH or place it under tools/unluau.",
             status_code=503,
         )
 
@@ -113,6 +113,7 @@ class UnluauBackend(DecompilerBackend):
             roots.append(package_root)
         local_app_data = os.getenv("LOCALAPPDATA")
         if local_app_data:
+            roots.append(Path(local_app_data) / "ByteWeft")
             roots.append(Path(local_app_data) / "LunaUX")
 
         relative_names = (

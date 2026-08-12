@@ -52,6 +52,7 @@ from lunaux.backends.contextual_functions import (
     collect_module_function_contexts,
     plan_contextual_functions,
 )
+from lunaux.backends.effects import is_transparent_instruction
 from lunaux.backends.inlining import plan_expression_inlining
 from lunaux.backends.module_analysis import (
     ModuleAnalysis,
@@ -742,11 +743,77 @@ class _FunctionLifter:
             for pc, action in self.advanced_loop_plan.actions.items()
             if action.loop_header in active_loop_headers and pc not in machine_pcs
         }
+        legacy_owned_advanced_headers: set[int] = set()
+        for pc, action in self.active_loop_actions.items():
+            if pc not in self.while_headers:
+                continue
+            advanced = self.active_advanced_loops.get(action.loop_header)
+            header_block = (
+                self.analysis.block_at(advanced.header)
+                if advanced is not None
+                else None
+            )
+            if header_block is not None and all(
+                candidate.pc >= pc or is_transparent_instruction(candidate)
+                for candidate in header_block.instructions
+            ):
+                # The legacy conditional is the whole loop header once its pure
+                # setup expressions are inlined.  Prefer it over an enclosing
+                # ``while true`` region; observable setup (notably calls) must stay
+                # inside the canonical infinite loop and is handled below instead.
+                legacy_owned_advanced_headers.add(action.loop_header)
+        for header in legacy_owned_advanced_headers:
+            self.active_advanced_loops.pop(header, None)
+        self.active_advanced_repeat_conditions = {
+            pc: region
+            for pc, region in self.active_advanced_repeat_conditions.items()
+            if region.header not in legacy_owned_advanced_headers
+        }
+        self.active_loop_actions = {
+            pc: action
+            for pc, action in self.active_loop_actions.items()
+            if not (
+                action.loop_header in legacy_owned_advanced_headers
+                and pc in self.while_headers
+            )
+        }
         self.numeric_loop_regions = self._numeric_loop_regions()
         self.generic_loop_regions = self._generic_loop_regions()
         self.generic_loop_omitted_nil_values = self._generic_loop_nil_state_values()
         for pc, action in self._bytecode_loop_actions().items():
             self.active_loop_actions[pc] = action
+        self.terminal_repeat_conditions: dict[int, LoopJumpAction] = {}
+        self.terminal_repeat_headers: set[int] = set()
+        for header, advanced_region in self.active_advanced_loops.items():
+            if (
+                advanced_region.kind != "infinite"
+                or len(advanced_region.break_pcs) != 1
+                or advanced_region.continue_pcs
+            ):
+                continue
+            condition_pc = next(iter(advanced_region.break_pcs))
+            repeat_action = self.active_loop_actions.get(condition_pc)
+            if (
+                repeat_action is None
+                or repeat_action.kind != "break"
+                or repeat_action.edge == "always"
+            ):
+                continue
+            trailing = [
+                candidate
+                for candidate in self.instructions
+                if condition_pc < candidate.pc < advanced_region.close_pc
+                and self.analysis.block_for_pc.get(candidate.pc)
+                in advanced_region.body_blocks
+            ]
+            if not trailing or any(
+                candidate.name not in {"JUMP", "JUMPBACK", "JUMPX", "NOP", "COVERAGE"}
+                for candidate in trailing
+            ):
+                continue
+            self.terminal_repeat_headers.add(header)
+            self.terminal_repeat_conditions[condition_pc] = repeat_action
+            self.active_loop_actions.pop(condition_pc, None)
         self.active_loop_skip_pcs = {
             pc
             for pc in self.advanced_loop_plan.skipped_pcs
@@ -755,6 +822,7 @@ class _FunctionLifter:
         }
         advanced_legacy_pcs = (
             set(self.active_loop_actions)
+            | set(self.terminal_repeat_conditions)
             | self.active_loop_skip_pcs
             | {
                 region.condition_pc
@@ -765,6 +833,28 @@ class _FunctionLifter:
         for header in self.active_advanced_loops:
             self.while_headers.pop(header, None)
             self.repeat_starts.pop(header, None)
+        for pc in self.terminal_repeat_conditions:
+            self.while_headers.pop(pc, None)
+        for pc, action in self.active_loop_actions.items():
+            if pc not in self.while_headers:
+                continue
+            advanced = self.active_advanced_loops.get(action.loop_header)
+            header_block = (
+                self.analysis.block_at(advanced.header)
+                if advanced is not None
+                else None
+            )
+            if header_block is not None and any(
+                candidate.pc < pc
+                and not is_transparent_instruction(candidate)
+                for candidate in header_block.instructions
+            ):
+                # A legacy condition that follows observable header work cannot be
+                # nested inside the canonical infinite loop: doing so repeats the
+                # condition without repeating the prefix.  Keep the outer loop and
+                # render this edge as its proven break action.  Pure/literal prefixes
+                # retain the legacy loop, which the cleanup pass can flatten safely.
+                self.while_headers.pop(pc, None)
         self.while_back_pcs.difference_update(advanced_legacy_pcs)
         self.repeat_conditions = {
             pc: condition
@@ -774,6 +864,7 @@ class _FunctionLifter:
         loop_condition_pcs = (
             set(self.while_headers)
             | set(self.repeat_conditions)
+            | set(self.terminal_repeat_conditions)
             | {
                 region.condition_pc
                 for region in self.active_advanced_loops.values()
@@ -1117,6 +1208,20 @@ class _FunctionLifter:
 
     def _analyze_cfg_regions(self) -> None:
         for loop in self.analysis.loops:
+            if any(
+                instruction.name
+                in {
+                    "FORNPREP",
+                    "FORNLOOP",
+                    "FORGPREP",
+                    "FORGPREP_INEXT",
+                    "FORGPREP_NEXT",
+                    "FORGLOOP",
+                }
+                for block_start in loop.body
+                for instruction in self.analysis.block_by_start[block_start].instructions
+            ):
+                continue
             header_block = self.analysis.block_by_start[loop.header]
             latch_block = self.analysis.block_by_start[loop.latch]
             header = header_block.terminator
@@ -1597,15 +1702,7 @@ class _FunctionLifter:
             if instruction.name in {"CALL", "CALLFB", "GETVARARGS"}
             else None
         )
-        owned_call = (
-            self.table_build_plan.call_at(instruction.pc)
-            if instruction.name in {"CALL", "CALLFB"}
-            or instruction.name.startswith("FASTCALL")
-            else None
-        )
-        protected_identities = (
-            owned_call.protected_values if owned_call is not None else frozenset()
-        )
+        protected_identities = self.table_build_plan.protected_at(instruction.pc)
         write_sources = (
             table_write_source_registers(instruction) if target_pending is not None else frozenset()
         )
@@ -1648,7 +1745,10 @@ class _FunctionLifter:
                 continue
             if pending is open_parent:
                 continue
-            if pending.value in source_table_values:
+            if (
+                pending.value in source_table_values
+                and self._table_value_can_inline(pending, instruction.pc)
+            ):
                 continue
             if target_pending is not None and pending.register in write_sources:
                 continue
@@ -2455,12 +2555,12 @@ class _FunctionLifter:
         return True
 
     def _close_blocks(self, pc: int) -> None:
+        for close_text in reversed(self.block_closures.pop(pc, [])):
+            self.out.close(close_text)
         if pc in self.else_transitions:
             end_pc = self.else_transitions.pop(pc)
             self.out.transition("else")
             self.block_closures[end_pc].append("end")
-        for close_text in reversed(self.block_closures.pop(pc, [])):
-            self.out.close(close_text)
 
     def _open_until(self, target: int, header: str, close_text: str = "end") -> bool:
         if target <= 0 or target > len(self.proto.code):
@@ -2911,15 +3011,38 @@ class _FunctionLifter:
         self,
         condition_pcs: tuple[int, ...],
         operator: str,
+        condition_edges: tuple[Literal["fallthrough", "taken"], ...] = (),
     ) -> Expr | None:
         expressions: list[Expr] = []
-        for condition_pc in condition_pcs:
+        edges = condition_edges or tuple("fallthrough" for _ in condition_pcs)
+        if len(edges) != len(condition_pcs):
+            return None
+        for condition_pc, edge in zip(condition_pcs, edges, strict=True):
             instruction = self.instruction_by_pc.get(condition_pc)
             if instruction is None:
                 return None
             expression = self._conditional_expr(instruction)
             if expression is None:
                 return None
+            if edge == "taken":
+                if isinstance(expression, UnaryExpr) and expression.operator == "not":
+                    expression = expression.operand
+                elif isinstance(expression, BinaryExpr):
+                    inverted = {
+                        "==": "~=",
+                        "~=": "==",
+                        "<": ">=",
+                        ">=": "<",
+                        "<=": ">",
+                        ">": "<=",
+                    }.get(expression.operator)
+                    expression = (
+                        BinaryExpr(expression.left, inverted, expression.right)
+                        if inverted is not None
+                        else UnaryExpr("not", expression)
+                    )
+                else:
+                    expression = UnaryExpr("not", expression)
             expressions.append(expression)
         if not expressions:
             return None
@@ -2967,6 +3090,9 @@ class _FunctionLifter:
     def _open_structured_loop(self, instruction: DecodedInstruction) -> bool:
         advanced = self.active_advanced_loops.get(instruction.pc)
         if advanced is not None:
+            if instruction.pc in self.terminal_repeat_headers:
+                self.out.open("repeat")
+                return True
             if advanced.kind == "repeat":
                 self.out.open("repeat")
                 return True
@@ -3199,6 +3325,17 @@ class _FunctionLifter:
             if advanced_repeat is not None:
                 condition = self._conditional_body(instruction)
                 self.out.close(f"until {condition or 'false'}")
+                continue
+            terminal_repeat = self.terminal_repeat_conditions.get(instruction.pc)
+            if terminal_repeat is not None:
+                expression = self._conditional_expr(instruction)
+                if expression is None:
+                    condition = "false"
+                else:
+                    if terminal_repeat.edge == "taken":
+                        expression = UnaryExpr("not", expression)
+                    condition = render_expression(expression)
+                self.out.close(f"until {condition}")
                 continue
             if instruction.pc in self.repeat_conditions:
                 condition = self._conditional_body(instruction)
@@ -3661,6 +3798,7 @@ class _FunctionLifter:
                 combined = self._boolean_chain_expression(
                     chain.condition_pcs,
                     chain.operator,
+                    chain.condition_edges,
                 )
                 if combined is not None:
                     self.out.open(f"if {render_expression(combined)} then")
@@ -3730,7 +3868,7 @@ def decompile_module(
     module_analysis = build_module_analysis(module)
     out = _Emitter(resolved.semicolons)
     label = filename or "<bytecode>"
-    out.line(f"-- LunaUX Next reconstructed output for {label}")
+    out.line(f"-- ByteWeft reconstructed output for {label}")
     out.line(
         "-- Reconstruction is semantic and conservative; comments, formatting, "
         "and optimized source choices are not stored in bytecode."
@@ -3961,7 +4099,7 @@ def _type_info_lines(
 
 def disassemble_module(module: LuauBytecodeModule, filename: str | None) -> str:
     lines = [
-        f"; LunaUX Next disassembly for {filename or '<bytecode>'}",
+        f"; ByteWeft disassembly for {filename or '<bytecode>'}",
         (
             f"; bytecode={module.version} types={module.types_version} "
             f"protos={len(module.protos)} main={module.main_proto_id}"

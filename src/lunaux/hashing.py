@@ -8,7 +8,7 @@ _EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
 
 
 def installation_hash(package_root: Path | None = None) -> str:
-    """Return a deterministic SHA-256 for the installed LunaUX package files."""
+    """Return a deterministic SHA-256 for the installed ByteWeft package files."""
     root = package_root or Path(__file__).resolve().parent
     digest = sha256()
 

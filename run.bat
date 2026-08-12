@@ -2,9 +2,9 @@
 setlocal
 cd /d "%~dp0"
 set "PYTHONUTF8=1"
-title LunaUX Next Launcher
+title ByteWeft Launcher
 
-echo Starting LunaUX Next Windows Launcher...
+echo Starting ByteWeft Windows Launcher...
 
 py -3.13 -c "import sys" >nul 2>&1
 if not errorlevel 1 (
@@ -35,7 +35,7 @@ exit /b 1
 :done
 if errorlevel 1 (
     echo.
-    echo LunaUX Next closed with an error.
+    echo ByteWeft closed with an error.
     pause
 )
 endlocal

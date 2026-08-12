@@ -46,4 +46,21 @@ def test_decomp_accepts_positional_output_directory(tmp_path, monkeypatch) -> No
 
     assert result.exit_code == 0
     output_path = output_directory / "Example.luau"
-    assert output_path.read_text(encoding="utf-8").startswith("decompiled:Example.luac:3")
+    output = output_path.read_text(encoding="utf-8")
+    assert output.startswith("-- [[ ByteWeft v")
+    assert "decompiled:Example.luac:3" in output
+
+
+def test_decompile_can_disable_the_presentation_header(tmp_path, monkeypatch) -> None:
+    input_path = tmp_path / "Example.luac"
+    input_path.write_bytes(b"abc")
+    service = DecompilerService(FakeBackend(), max_bytecode_bytes=100)
+    monkeypatch.setattr("lunaux.cli._service", lambda: service)
+
+    result = runner.invoke(
+        app,
+        ["decompile", str(input_path), "--input-format", "raw", "--no-header"],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.startswith("decompiled:Example.luac:3")

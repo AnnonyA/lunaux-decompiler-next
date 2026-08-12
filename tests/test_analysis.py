@@ -131,6 +131,25 @@ def test_loadb_skip_has_only_the_jump_successor() -> None:
     assert 1 not in analysis.reachable
 
 
+def test_generic_for_prep_only_flows_to_loop_instruction() -> None:
+    instructions = [
+        _instruction(0, "LOADN", a=4, d=99),
+        _instruction(1, "LOADNIL", a=0),
+        _instruction(2, "LOADNIL", a=1),
+        _instruction(3, "FORGPREP", a=0, d=1),
+        _instruction(4, "SETUPVAL", a=4, b=0),
+        _instruction(5, "FORGLOOP", a=0, d=-2, aux=2),
+        _instruction(7, "RETURN", b=1),
+    ]
+
+    analysis = analyze_control_flow(instructions, code_size=8)
+
+    prep_block = analysis.block_at(3)
+    assert prep_block is not None
+    assert prep_block.successors == frozenset({5})
+    assert analysis.block_by_start[4].predecessors == frozenset({5})
+
+
 def test_renders_graphviz_with_edges_loop_and_phi_annotations() -> None:
     instructions = [
         _instruction(0, "JUMPIF", a=2, d=2),

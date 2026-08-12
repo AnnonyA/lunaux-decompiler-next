@@ -15,6 +15,7 @@ from lunaux.backends.ast import (
     NameExpr,
     RawStatement,
     ReturnStatement,
+    TableExpr,
     UnaryExpr,
     render_expression,
     source_expr,
@@ -94,6 +95,13 @@ def test_method_call_prints_colon_syntax() -> None:
     expression = MethodCallExpr(name("object"), "run", (name("argument"),))
 
     assert render_expression(expression) == "object:run(argument)"
+
+
+def test_postfix_operations_parenthesize_literal_and_table_bases() -> None:
+    assert render_expression(MethodCallExpr(LiteralExpr('"value"'), "format", ())) == (
+        '("value"):format()'
+    )
+    assert render_expression(FieldExpr(TableExpr(), "value")) == "({}).value"
 
 
 def test_source_expr_classifies_atomic_values() -> None:

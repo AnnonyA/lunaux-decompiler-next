@@ -162,7 +162,7 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
 
         loop_names = super()._loop_carried_names()
         result: dict[SSAValue, str] = {}
-        used: set[str] = set()
+        used: set[str] = set(self.declared)
         for values in groups.values():
             existing = next(
                 (loop_names[value] for value in values if value in loop_names),
@@ -179,18 +179,26 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
                         value.version,
                     ),
                 )
-                name = None
-                if self.symbols is not None:
-                    for value in ordered:
-                        symbol = self.symbols.symbol_for(value)
-                        if symbol is not None:
-                            name = self._friendly_name(symbol.name)
-                            break
-                if name is None:
-                    register = ordered[0].register
-                    name = self._friendly_name(
-                        self.register_names.get(register, f"value{register + 1}")
-                    )
+                debug_binding = next(
+                    (
+                        binding
+                        for value in ordered
+                        for binding in (
+                            self.scope_tree.binding_for_register(
+                                value.register,
+                                value.origin_pc if value.origin_pc is not None else 0,
+                            ),
+                        )
+                        if binding is not None
+                    ),
+                    None,
+                )
+                # A non-loop phi creates a new source storage identity.  Never name
+                # it from the mutable current name of its physical register: that
+                # register may previously have held an unrelated long-lived binding.
+                name = self._friendly_name(
+                    debug_binding.name if debug_binding is not None else "result"
+                )
             assert name is not None
             base = name
             suffix = 2
@@ -239,9 +247,11 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
 
     def _annotated_name(self, register: int, name: str, pc: int) -> str:
         serialized_type = legacy._local_type(self.module, self.proto, register, pc)
+        serialized_type = legacy._source_type(serialized_type)
         if serialized_type and serialized_type != "any":
             return f"{name}: {serialized_type}"
         parameter_type = self.parameter_type_overrides.get(register) if pc == 0 else None
+        parameter_type = legacy._source_type(parameter_type)
         return f"{name}: {parameter_type}" if parameter_type and parameter_type != "any" else name
 
     def _resolve_phi_expression(
@@ -441,6 +451,8 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
     def _branch_phi_declarations(self, instruction: DecodedInstruction) -> None:
         if instruction.name not in legacy._CONDITIONAL_OPS:
             return
+        if instruction.pc in self.active_guarded_phi_regions:
+            return
         block_start = self.analysis.block_for_pc.get(instruction.pc)
         if block_start is None:
             return
@@ -483,6 +495,11 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
                 super()._definition_name(register, instruction.pc)
             )
             variable = "index" if proposed.startswith("value") else proposed
+            base = variable
+            suffix = 2
+            while variable in self.declared:
+                variable = f"{base}{suffix}"
+                suffix += 1
             self._force_register_name(register, instruction.pc, target, variable)
             self.register_names[register] = variable
             self.declared.add(variable)
@@ -530,10 +547,7 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
                 )
                 variable = base
                 suffix = 2
-                while (
-                    variable in self.declared
-                    and self.register_names.get(register) != variable
-                ):
+                while variable in self.declared:
                     variable = f"{base}{suffix}"
                     suffix += 1
                 variables.append(variable)
@@ -553,10 +567,10 @@ class _QualityFunctionLifter(_MultiRetFunctionLifter):
             if iterator_expression is not None:
                 iterator_text = render_expression(iterator_expression)
             else:
-                iterator = self._ref(instruction.a, instruction.pc)
-                state = self._ref(instruction.a + 1, instruction.pc)
-                control = self._ref(instruction.a + 2, instruction.pc)
-                iterator_text = f"{iterator}, {state}, {control}"
+                iterator_operands = self._generic_iterator_operands(instruction)
+                iterator_text = ", ".join(
+                    render_expression(operand) for operand in iterator_operands
+                )
             return self._open_until(
                 close_pc,
                 f"for {', '.join(variables)} in {iterator_text} do",
@@ -850,7 +864,6 @@ def _clean_output(output: str) -> str:
     lines = _remove_redundant_while_guards(lines)
     lines = _rewrite_terminal_repeat_guards(lines)
     lines = _flatten_single_inner_while(lines)
-    lines = _rewrite_empty_loop_exit_ifs(lines)
     lines = [_simplify_not_comparisons(line) for line in lines]
     lines = [
         line

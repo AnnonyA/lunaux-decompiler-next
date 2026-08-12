@@ -188,6 +188,29 @@ def test_multi_use_closure_remains_shared_and_is_not_duplicated() -> None:
     assert 0 in plan.preemit_proto_ids
 
 
+def test_single_use_closure_argument_is_owned_by_exact_call_frame() -> None:
+    child = _proto(0, (_abc("RETURN", b=1),))
+    parent = _proto(
+        1,
+        (
+            _ad("DUPCLOSURE", a=1, d=0),
+            _abc("CALL", a=0, b=2, c=1),
+            _abc("RETURN", b=1),
+        ),
+        params=1,
+        constants=(LuauConstant("closure", 0, 6),),
+    )
+    plan = _plan(_module(child, parent, main=1))
+    instance = plan.for_parent(1).at_creation(0)
+
+    assert instance is not None
+    assert instance.terminal_pc == 1
+    assert instance.terminal_register == 1
+    assert instance.emission_kind == "inline-expression"
+    assert instance.child_proto_id in plan.owned_proto_ids
+    assert instance.child_proto_id not in plan.preemit_proto_ids
+
+
 def test_same_proto_instantiated_twice_has_two_distinct_ssa_owners() -> None:
     child = _proto(0, (_abc("RETURN", b=1),))
     parent = _proto(

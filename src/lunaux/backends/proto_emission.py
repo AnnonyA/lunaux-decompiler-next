@@ -530,6 +530,24 @@ def _plan_parent(
             kind = "inline-expression"
         elif (
             kind == "shared-proto"
+            and inline_callbacks
+            and terminal_instruction is not None
+            and terminal_instruction.instruction.name in {"CALL", "CALLFB"}
+            and terminal_register
+            in (
+                frame.argument_registers
+                if (frame := call_frames.at(terminal_instruction.pc)) is not None
+                else ()
+            )
+            and not alias_move_pcs
+        ):
+            # A single-use closure passed directly in a proved CallFrame is owned by
+            # that argument expression.  Keeping the child as a module-level proto
+            # duplicates it and loses its capture bindings when its parent is itself
+            # emitted inline.
+            kind = "inline-expression"
+        elif (
+            kind == "shared-proto"
             and binding_hint is not None
             and (context is None or context.kind != "global")
         ):
@@ -584,12 +602,63 @@ def _plan_parent(
     }
     edges: dict[int, set[int]] = defaultdict(set)
     by_pc = {instance.creation_pc: instance for instance in instances}
+    creation_owners_by_register: dict[int, list[ProtoInstancePlan]] = defaultdict(list)
+    for candidate in instances:
+        creation = instructions_by_pc[candidate.creation_pc]
+        creation_owners_by_register[creation.a].append(candidate)
+
+    def lexical_cell_owner(capture: CapturePlan) -> int | None:
+        """Resolve an explicit REF cell without treating its register as a value.
+
+        A forward reference is accepted only for the compiler's predeclaration form:
+        the captured SSA value is LOADNIL and the very next definition of that cell's
+        register is a closure creation.  Backward references require exact closure
+        SSA identity.
+        """
+
+        if capture.kind != "reference" or capture.source_value is None:
+            return None
+        candidates = creation_owners_by_register.get(capture.source_register, ())
+        exact = next(
+            (
+                candidate.creation_pc
+                for candidate in candidates
+                if candidate.closure_value == capture.source_value
+            ),
+            None,
+        )
+        if exact is not None:
+            return exact
+        origin = capture.source_value.origin_pc
+        if origin is None:
+            return None
+        initializer_instruction = instructions_by_pc.get(origin)
+        if initializer_instruction is None or initializer_instruction.name != "LOADNIL":
+            return None
+        later_definitions = tuple(
+            pc
+            for pc in frozen_definition_pcs.get(capture.source_register, ())
+            if pc > origin
+        )
+        if not later_definitions:
+            return None
+        next_definition = later_definitions[0]
+        return next(
+            (
+                candidate.creation_pc
+                for candidate in candidates
+                if candidate.creation_pc == next_definition
+            ),
+            None,
+        )
+
+    recursive_cell_initializers: set[int] = set()
     for instance in instances:
         for capture in instance.captures:
             target = (
                 binding_owner.get(capture.source_binding)
                 if capture.source_binding is not None
-                else None
+                else lexical_cell_owner(capture)
             )
             if target is not None:
                 edges[instance.creation_pc].add(target)
@@ -604,6 +673,36 @@ def _plan_parent(
         for pc in component
     }
     if group_by_pc:
+        for creation_pc in group_by_pc:
+            creation = instructions_by_pc[creation_pc]
+            earlier_definitions = tuple(
+                pc
+                for pc in frozen_definition_pcs.get(creation.a, ())
+                if pc < creation_pc
+            )
+            if earlier_definitions:
+                initializer_instruction = instructions_by_pc[earlier_definitions[-1]]
+                if initializer_instruction.name == "LOADNIL":
+                    recursive_cell_initializers.add(initializer_instruction.pc)
+        for instance in instances:
+            if instance.creation_pc not in group_by_pc:
+                continue
+            for capture in instance.captures:
+                target = lexical_cell_owner(capture)
+                origin = (
+                    capture.source_value.origin_pc
+                    if capture.source_value is not None
+                    else None
+                )
+                cell_initializer = (
+                    instructions_by_pc.get(origin) if origin is not None else None
+                )
+                if (
+                    target in group_by_pc
+                    and cell_initializer is not None
+                    and cell_initializer.name == "LOADNIL"
+                ):
+                    recursive_cell_initializers.add(cell_initializer.pc)
         instances = [
             replace(
                 instance,
@@ -641,7 +740,7 @@ def _plan_parent(
                 else frozenset()
             ),
         )
-    }
+    } | recursive_cell_initializers
     return ParentProtoEmissionPlan(
         proto_id=parent.proto_id,
         instances=tuple(instances),

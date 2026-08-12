@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from lunaux.backends.bytecode import LocalInfo, LuauProto
+from lunaux.backends.bytecode import LocalInfo, LuauProto, TypedLocalInfo
 from lunaux.backends.inlining import (
     parenthesize_inlined_expression,
     plan_expression_inlining,
@@ -33,7 +33,11 @@ def _instruction(
     )
 
 
-def _proto(*, locals_: tuple[LocalInfo, ...] = ()) -> LuauProto:
+def _proto(
+    *,
+    locals_: tuple[LocalInfo, ...] = (),
+    typed_locals: tuple[TypedLocalInfo, ...] = (),
+) -> LuauProto:
     return LuauProto(
         proto_id=0,
         max_stack_size=8,
@@ -52,6 +56,7 @@ def _proto(*, locals_: tuple[LocalInfo, ...] = ()) -> LuauProto:
         upvalue_names=(),
         feedback_pcs=(),
         cost=None,
+        typed_locals=typed_locals,
     )
 
 
@@ -122,6 +127,41 @@ def test_preserves_named_debug_locals() -> None:
 
     assert value is not None
     assert not plan_expression_inlining(program, proto).should_inline(value)
+
+
+def test_preserves_nameless_typed_value_until_a_specific_setup_is_proven() -> None:
+    instructions = [
+        _instruction(0, "LOADN", a=0, d=42),
+        _instruction(1, "RETURN", a=0, b=2),
+    ]
+    program = build_ssa(instructions, code_size=2)
+    proto = _proto(
+        typed_locals=(
+            TypedLocalInfo(type_tag=3, register=0, start_pc=0, end_pc=2),
+        )
+    )
+    value = program.value_defined_at(0, 0)
+
+    assert value is not None
+    assert not plan_expression_inlining(program, proto).should_inline(value)
+
+
+def test_typed_namecall_destination_does_not_materialize_getimport_setup() -> None:
+    instructions = [
+        _instruction(0, "GETIMPORT", a=0),
+        _instruction(2, "NAMECALL", a=0, b=0),
+        _instruction(4, "RETURN", b=1),
+    ]
+    program = build_ssa(instructions, code_size=5)
+    proto = _proto(
+        typed_locals=(
+            TypedLocalInfo(type_tag=15, register=0, start_pc=0, end_pc=5),
+        )
+    )
+    value = program.value_defined_at(0, 0)
+
+    assert value is not None
+    assert plan_expression_inlining(program, proto).should_inline(value)
 
 
 def test_rejects_loadb_with_skip_control_flow() -> None:

@@ -183,8 +183,26 @@ def _debug_visible(proto: LuauProto, register: int, pc: int) -> bool:
         and local.name is not None
         and local.start_pc <= pc < local.end_pc
         for local in proto.locals
-    ) or any(
-        local.register == register and local.start_pc <= pc < local.end_pc
+    )
+
+
+def _stable_typed_value(
+    program: SSAProgram,
+    proto: LuauProto,
+    register: int,
+    definition_pc: int,
+    through_pc: int,
+) -> bool:
+    """Return whether a typed VM range proves one stable SSA-backed local value."""
+
+    return any(
+        local.register == register
+        and local.start_pc <= definition_pc <= through_pc < local.end_pc
+        and not any(
+            definition_pc < instruction.pc < local.end_pc
+            and any(item.register == register for item in instruction.definitions)
+            for instruction in program.instructions.values()
+        )
         for local in proto.typed_locals
     )
 
@@ -209,6 +227,7 @@ def _use_occurrences(program: SSAProgram, value: SSAValue) -> int:
 
 
 def _debug_visible_through(
+    program: SSAProgram,
     proto: LuauProto,
     register: int,
     definition_pc: int,
@@ -219,11 +238,26 @@ def _debug_visible_through(
         and local.start_pc <= use_pc
         and local.end_pc > definition_pc
         for local in proto.locals
-    ) or any(
+    ) or _stable_typed_value(
+        program,
+        proto,
+        register,
+        definition_pc,
+        use_pc,
+    )
+
+
+def _named_debug_visible_through(
+    proto: LuauProto,
+    register: int,
+    definition_pc: int,
+    use_pc: int,
+) -> bool:
+    return any(
         local.register == register
         and local.start_pc <= use_pc
         and local.end_pc > definition_pc
-        for local in proto.typed_locals
+        for local in proto.locals
     )
 
 
@@ -422,7 +456,17 @@ def plan_expression_inlining(
             return None
         if definition.instruction.name in {"CALL", "CALLFB"} and definition.instruction.c != 2:
             return None
-        if _debug_visible(proto, value.register, definition_pc):
+        typed_value = _stable_typed_value(
+            program, proto, value.register, definition_pc, consumer_pc
+        )
+        consumer_name = program.instructions[consumer_pc].instruction.name
+        literal_loop_initializer = (
+            consumer_name == "FORNPREP"
+            and classify_instruction(definition.instruction).kind == EffectKind.LITERAL
+        )
+        if _debug_visible(proto, value.register, definition_pc) or (
+            typed_value and not literal_loop_initializer
+        ):
             return None
         if definition_pc >= consumer_pc:
             return None
@@ -563,8 +607,24 @@ def plan_expression_inlining(
         ):
             continue
         use_pc = use_pcs[0]
+        typed_value = _stable_typed_value(
+            program,
+            proto,
+            value.register,
+            value.origin_pc,
+            use_pc,
+        )
+        literal_loop_initializer = (
+            program.instructions[use_pc].instruction.name == "FORNPREP"
+        )
         if (
-            _debug_visible_through(proto, value.register, value.origin_pc, use_pc)
+            _named_debug_visible_through(
+                proto,
+                value.register,
+                value.origin_pc,
+                use_pc,
+            )
+            or (typed_value and not literal_loop_initializer)
             or not _fastcall_value_bridge(program, value.origin_pc, use_pc)
             or sum(
                 operand == value
@@ -609,7 +669,13 @@ def plan_expression_inlining(
             continue
         use_pc = use_pcs[0]
         if (
-            _debug_visible_through(proto, value.register, value.origin_pc, use_pc)
+            _debug_visible_through(
+                program,
+                proto,
+                value.register,
+                value.origin_pc,
+                use_pc,
+            )
             or sum(
                 operand == value
                 for operand in _ordered_operand_values(

@@ -210,6 +210,51 @@ class IfExpr(Expr):
         return Precedence.LOWEST
 
 
+def referenced_names(expression: Expr) -> frozenset[str]:
+    """Return lexical identifiers referenced by a structured expression.
+
+    Raw expressions intentionally contribute no names: callers that need lexical
+    guarantees must keep their bindings structured instead of guessing by parsing
+    rendered source.
+    """
+
+    if isinstance(expression, NameExpr):
+        return frozenset({expression.name})
+    if isinstance(expression, UnaryExpr):
+        return referenced_names(expression.operand)
+    if isinstance(expression, BinaryExpr):
+        return referenced_names(expression.left) | referenced_names(expression.right)
+    if isinstance(expression, FieldExpr):
+        return referenced_names(expression.base)
+    if isinstance(expression, IndexExpr):
+        return referenced_names(expression.base) | referenced_names(expression.index)
+    if isinstance(expression, CallExpr):
+        return frozenset().union(
+            referenced_names(expression.function),
+            *(referenced_names(argument) for argument in expression.arguments),
+        )
+    if isinstance(expression, MethodCallExpr):
+        return frozenset().union(
+            referenced_names(expression.base),
+            *(referenced_names(argument) for argument in expression.arguments),
+        )
+    if isinstance(expression, TableExpr):
+        return frozenset().union(
+            *(
+                referenced_names(field.value)
+                | (referenced_names(field.key) if field.key is not None else frozenset())
+                for field in expression.fields
+            )
+        )
+    if isinstance(expression, IfExpr):
+        return frozenset().union(
+            referenced_names(expression.condition),
+            referenced_names(expression.then_value),
+            referenced_names(expression.else_value),
+        )
+    return frozenset()
+
+
 class Statement:
     pass
 
@@ -351,6 +396,13 @@ def _render_child(
     return rendered
 
 
+def _render_postfix_base(expression: Expr) -> str:
+    rendered = _render_child(expression, Precedence.POSTFIX)
+    if isinstance(expression, (LiteralExpr, TableExpr)):
+        return f"({rendered})"
+    return rendered
+
+
 def render_expression(
     expression: Expr,
     *,
@@ -386,19 +438,19 @@ def render_expression(
         )
         return f"{left} {expression.operator} {right}"
     if isinstance(expression, FieldExpr):
-        base = _render_child(expression.base, Precedence.POSTFIX)
+        base = _render_postfix_base(expression.base)
         if _identifier(expression.field):
             return f"{base}.{expression.field}"
         return f"{base}[{render_expression(LiteralExpr(repr(expression.field)))}]"
     if isinstance(expression, IndexExpr):
-        base = _render_child(expression.base, Precedence.POSTFIX)
+        base = _render_postfix_base(expression.base)
         return f"{base}[{render_expression(expression.index)}]"
     if isinstance(expression, CallExpr):
-        function = _render_child(expression.function, Precedence.POSTFIX)
+        function = _render_postfix_base(expression.function)
         arguments = ", ".join(render_expression(item) for item in expression.arguments)
         return f"{function}({arguments})"
     if isinstance(expression, MethodCallExpr):
-        base = _render_child(expression.base, Precedence.POSTFIX)
+        base = _render_postfix_base(expression.base)
         arguments = ", ".join(render_expression(item) for item in expression.arguments)
         if _identifier(expression.method):
             return f"{base}:{expression.method}({arguments})"

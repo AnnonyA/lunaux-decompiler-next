@@ -5,7 +5,7 @@ import math
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 
 from lunaux.backends.advanced_loops import (
     LoopJumpAction,
@@ -28,6 +28,7 @@ from lunaux.backends.ast import (
     TableExpr,
     UnaryExpr,
     ensure_expr,
+    referenced_names,
     render_expression,
     render_statement,
     source_expr,
@@ -90,6 +91,8 @@ from lunaux.backends.semantic_naming import (
 from lunaux.backends.ssa import SSAValue, build_ssa
 from lunaux.backends.state_machine import StateMachineRegion, recover_state_machines
 from lunaux.backends.structuring import (
+    DecisionPhiRegion,
+    GuardedPhiRegion,
     ValueShortCircuitRegion,
     build_structured_recovery,
 )
@@ -302,6 +305,14 @@ def _format_number(value: float) -> str:
     return repr(value)
 
 
+def _source_type(type_name: str | None) -> str | None:
+    if type_name == "function":
+        return "(...any) -> ...any"
+    if type_name == "function?":
+        return "((...any) -> ...any)?"
+    return type_name
+
+
 def _constant(proto: LuauProto, index: int) -> LuauConstant | None:
     return proto.constants[index] if 0 <= index < len(proto.constants) else None
 
@@ -486,6 +497,17 @@ class _IfElseRegion:
     skip_jump_pc: int
 
 
+@dataclass(frozen=True, slots=True)
+class _BytecodeLoopRegion:
+    prep_pc: int
+    body_pc: int
+    loop_pc: int
+    close_pc: int
+
+    def contains(self, pc: int) -> bool:
+        return self.body_pc <= pc < self.loop_pc
+
+
 class _FunctionLifter:
     def __init__(
         self,
@@ -511,6 +533,9 @@ class _FunctionLifter:
         self.out = emitter
         self.inline_only_proto_ids = inline_only_proto_ids
         self.upvalue_bindings = upvalue_bindings or {}
+        self.lexically_reserved_names = frozenset().union(
+            *(referenced_names(binding) for binding in self.upvalue_bindings.values())
+        )
         self.parameter_name_overrides = parameter_name_overrides or {}
         self.parameter_type_overrides = dict(parameter_type_overrides or {})
         self.parameter_type_overrides.update(
@@ -620,6 +645,7 @@ class _FunctionLifter:
             self.scope_tree,
             self.symbols,
             parameter_overrides=self.parameter_name_overrides,
+            reserved_names=self.lexically_reserved_names,
             function_role=semantic_function_role,
             returned_module_root=(
                 infer_returned_module_root(proto, self.ssa)
@@ -716,6 +742,11 @@ class _FunctionLifter:
             for pc, action in self.advanced_loop_plan.actions.items()
             if action.loop_header in active_loop_headers and pc not in machine_pcs
         }
+        self.numeric_loop_regions = self._numeric_loop_regions()
+        self.generic_loop_regions = self._generic_loop_regions()
+        self.generic_loop_omitted_nil_values = self._generic_loop_nil_state_values()
+        for pc, action in self._bytecode_loop_actions().items():
+            self.active_loop_actions[pc] = action
         self.active_loop_skip_pcs = {
             pc
             for pc in self.advanced_loop_plan.skipped_pcs
@@ -796,6 +827,76 @@ class _FunctionLifter:
             if options.combine_boolean_conditions and options.inline_single_use_temporaries
             else {}
         )
+        self.active_guarded_phi_regions = {
+            region.root_pc: region
+            for region in self.structured_plan.guarded_phi_regions
+            if not (region.skipped_pcs & machine_pcs)
+        }
+        self.active_decision_phi_regions = {
+            region.root_block: region
+            for region in self.structured_plan.decision_phi_regions
+            if not (region.skipped_pcs & machine_pcs)
+        }
+        decision_pcs = frozenset(
+            pc
+            for region in self.active_decision_phi_regions.values()
+            for pc in region.skipped_pcs
+        )
+        self.active_boolean_chains = {
+            root: region
+            for root, region in self.active_boolean_chains.items()
+            if not (region.skipped_pcs & decision_pcs)
+        }
+        self.active_value_short_circuits = {
+            root: region
+            for root, region in self.active_value_short_circuits.items()
+            if not (region.skipped_pcs & decision_pcs)
+        }
+        guarded_results = frozenset(
+            assignment.result
+            for region in self.active_guarded_phi_regions.values()
+            for assignment in region.assignments
+        )
+        self.guarded_success_results = {
+            assignment.success_value: assignment.result
+            for region in self.active_guarded_phi_regions.values()
+            for assignment in region.assignments
+        }
+        self.guarded_phi_names: dict[SSAValue, str] = {}
+        self.active_phi_headers = {
+            pc: region
+            for pc, region in self.active_phi_headers.items()
+            if not any(
+                assignment.result in guarded_results for assignment in region.assignments
+            )
+            and not (region.skipped_pcs & decision_pcs)
+        }
+        self.active_phi_joins = {
+            join: active
+            for join, regions in self.structured_plan.phi_by_join.items()
+            if (
+                active := tuple(
+                    region
+                    for region in regions
+                    if region.condition_pc in self.active_phi_headers
+                )
+            )
+        }
+        self.captured_phi_values = frozenset(
+            value
+            for region in self.active_phi_headers.values()
+            for value in region.captured_values
+        )
+        self.phi_definition_pcs = frozenset(
+            value.origin_pc for value in self.captured_phi_values if value.origin_pc is not None
+        )
+        guarded_condition_pcs = {
+            pc
+            for region in self.active_guarded_phi_regions.values()
+            for pc in region.condition_pcs
+        }
+        for condition_pc in guarded_condition_pcs:
+            self.if_else_regions.pop(condition_pc, None)
         self.active_structuring_skip_pcs: set[int] = set()
         for region in self.active_phi_headers.values():
             self.active_structuring_skip_pcs.update(region.skipped_pcs)
@@ -803,6 +904,16 @@ class _FunctionLifter:
             self.active_structuring_skip_pcs.update(chain.skipped_pcs)
         for short_circuit in self.active_value_short_circuits.values():
             self.active_structuring_skip_pcs.update(short_circuit.skipped_pcs)
+        for guarded in self.active_guarded_phi_regions.values():
+            self.active_structuring_skip_pcs.update(guarded.skipped_pcs)
+        for decision in self.active_decision_phi_regions.values():
+            self.active_structuring_skip_pcs.update(decision.skipped_pcs)
+        self.active_structuring_skip_pcs.update(
+            value.origin_pc
+            for values in self.generic_loop_omitted_nil_values.values()
+            for value in values
+            if value.origin_pc is not None
+        )
         self.labels = self._collect_labels()
 
     def _analyze_control_flow(self) -> None:
@@ -850,6 +961,159 @@ class _FunctionLifter:
                 skip_jump_pc=skip.pc,
             )
             self.skip_jump_pcs.add(skip.pc)
+
+    def _numeric_loop_regions(self) -> tuple[_BytecodeLoopRegion, ...]:
+        regions: list[_BytecodeLoopRegion] = []
+        for instruction in self.instructions:
+            if instruction.name != "FORNPREP":
+                continue
+            close_pc = _jump_target(instruction)
+            loop = self.previous_by_next_pc.get(close_pc)
+            if loop is None or loop.name != "FORNLOOP" or loop.a != instruction.a:
+                continue
+            regions.append(
+                _BytecodeLoopRegion(
+                    prep_pc=instruction.pc,
+                    body_pc=instruction.pc + instruction.size,
+                    loop_pc=loop.pc,
+                    close_pc=close_pc,
+                )
+            )
+        return tuple(sorted(regions, key=lambda item: (item.prep_pc, item.close_pc)))
+
+    def _generic_loop_regions(self) -> tuple[_BytecodeLoopRegion, ...]:
+        prep_names = {"FORGPREP", "FORGPREP_INEXT", "FORGPREP_NEXT"}
+        regions: list[_BytecodeLoopRegion] = []
+        for instruction in self.instructions:
+            if instruction.name not in prep_names:
+                continue
+            loop_pc = _jump_target(instruction)
+            loop = self.instruction_by_pc.get(loop_pc)
+            if loop is None or loop.name != "FORGLOOP":
+                continue
+            regions.append(
+                _BytecodeLoopRegion(
+                    prep_pc=instruction.pc,
+                    body_pc=instruction.pc + instruction.size,
+                    loop_pc=loop_pc,
+                    close_pc=loop_pc + loop.size,
+                )
+            )
+        return tuple(sorted(regions, key=lambda item: (item.prep_pc, item.close_pc)))
+
+    def _generic_loop_nil_state_values(self) -> dict[int, frozenset[SSAValue]]:
+        """Prove compiler-generated trailing nil iterator operands by SSA identity.
+
+        FORGPREP keeps iterator/state/control alive through FORGLOOP, so these nil
+        values have two VM uses and are intentionally not ordinary one-use inline
+        candidates.  They are source-elidable only when one exact LOADNIL SSA value
+        is used exclusively by the matching prep/loop pair and has no named debug
+        binding.  Physical register history is never consulted.
+        """
+
+        result: dict[int, frozenset[SSAValue]] = {}
+        for region in self.generic_loop_regions:
+            prep = self.instruction_by_pc[region.prep_pc]
+            loop = self.instruction_by_pc[region.loop_pc]
+            omitted: set[SSAValue] = set()
+            for register in (prep.a + 1, prep.a + 2):
+                value = self.ssa.value_at_use(prep.pc, register)
+                if value is None or value.kind != "instruction" or value.origin_pc is None:
+                    continue
+                definition = self.ssa.instruction_at(value.origin_pc)
+                if (
+                    definition is None
+                    or definition.instruction.name != "LOADNIL"
+                    or self.scope_tree.binding_for_register(register, value.origin_pc)
+                    is not None
+                ):
+                    continue
+                sites = {
+                    (ssa_instruction.pc, use.register)
+                    for ssa_instruction in self.ssa.instructions.values()
+                    for use in ssa_instruction.uses
+                    if use.value == value
+                }
+                expected = {(prep.pc, register), (loop.pc, register)}
+                if sites == expected and self.ssa.uses_of(value) == len(expected):
+                    omitted.add(value)
+            if omitted:
+                result[prep.pc] = frozenset(omitted)
+        return result
+
+    def _generic_iterator_operands(
+        self,
+        instruction: DecodedInstruction,
+    ) -> tuple[Expr, ...]:
+        operands = [
+            self._ref_expr(register, instruction.pc)
+            for register in range(instruction.a, instruction.a + 3)
+        ]
+        values = [
+            self.ssa.value_at_use(instruction.pc, register)
+            for register in range(instruction.a, instruction.a + 3)
+        ]
+        omitted = self.generic_loop_omitted_nil_values.get(instruction.pc, frozenset())
+        while len(operands) > 1 and values[-1] in omitted:
+            operands.pop()
+            values.pop()
+        return tuple(operands)
+
+    def _bytecode_loop_actions(self) -> dict[int, LoopJumpAction]:
+        actions: dict[int, LoopJumpAction] = {}
+        regions = self.numeric_loop_regions + self.generic_loop_regions
+        complex_regions = {
+            region
+            for region in regions
+            if any(
+                other is not region and region.contains(other.prep_pc)
+                for other in regions
+            )
+            or any(
+                region.contains(candidate.pc)
+                and get_jump_target(candidate) == region.close_pc
+                for candidate in self.instructions
+                if candidate.name
+                in _CONDITIONAL_OPS | {"JUMP", "JUMPBACK", "JUMPX"}
+            )
+            or any(
+                region.contains(candidate.pc)
+                and candidate.name in {"JUMP", "JUMPBACK", "JUMPX"}
+                and get_jump_target(candidate) == region.loop_pc
+                for candidate in self.instructions
+            )
+        }
+        for instruction in self.instructions:
+            if instruction.name not in _CONDITIONAL_OPS | {"JUMP", "JUMPBACK", "JUMPX"}:
+                continue
+            containing = [
+                region for region in regions if region.contains(instruction.pc)
+            ]
+            if not containing:
+                continue
+            region = min(containing, key=lambda item: item.loop_pc - item.body_pc)
+            target = get_jump_target(instruction)
+            kind: Literal["break", "continue"]
+            if target == region.loop_pc:
+                kind = "continue"
+            elif target == region.close_pc:
+                kind = "break"
+            else:
+                continue
+            if kind == "continue" and region not in complex_regions:
+                continue
+            actions[instruction.pc] = LoopJumpAction(
+                pc=instruction.pc,
+                kind=kind,
+                target=target,
+                edge=(
+                    "always"
+                    if instruction.name in {"JUMP", "JUMPBACK", "JUMPX"}
+                    else "taken"
+                ),
+                loop_header=region.prep_pc,
+            )
+        return actions
 
     def _analyze_cfg_regions(self) -> None:
         for loop in self.analysis.loops:
@@ -932,6 +1196,9 @@ class _FunctionLifter:
             structured_targets.add(chain.body_start)
             structured_targets.add(chain.false_start)
             structured_targets.add(chain.join)
+        for decision in self.active_decision_phi_regions.values():
+            structured_targets.update(decision.blocks)
+            structured_targets.add(decision.join_pc)
         for instruction in self.instructions:
             if instruction.pc in self.state_machine_plan.skipped_pcs:
                 continue
@@ -1037,11 +1304,43 @@ class _FunctionLifter:
             type_name = self.symbols.type_at_definition(pc, register)
             if type_name is None and pc == 0:
                 type_name = self.symbols.entry_types.get(register)
+        type_name = _source_type(type_name)
         return f"{name}: {type_name}" if type_name and type_name != "any" else name
+
+    def _lexically_safe_local_name(self, register: int, pc: int, name: str) -> str:
+        if name not in self.lexically_reserved_names:
+            return name
+        occupied = (
+            self.declared
+            | self.lexically_reserved_names
+            | set(self.register_names.values())
+        )
+        base = name
+        suffix = 2
+        while f"{base}{suffix}" in occupied:
+            suffix += 1
+        safe = f"{base}{suffix}"
+        value = self.ssa.value_defined_at(pc, register)
+        forced_names = getattr(self, "_forced_value_names", None)
+        if value is not None and callable(forced_names):
+            forced_names()[value] = safe
+        self.register_names[register] = safe
+        return safe
 
     def _assign(self, register: int, expression: Expr | str, pc: int) -> None:
         resolved_expression = ensure_expr(expression)
         value = self.ssa.value_defined_at(pc, register)
+        guarded_result = (
+            self.guarded_success_results.get(value) if value is not None else None
+        )
+        if guarded_result is not None:
+            name = self._guarded_phi_binding_name(guarded_result)
+            self.out.line(
+                f"{name} = {render_expression(resolved_expression, pretty_tables=True)}",
+                statement=True,
+            )
+            self.register_names[register] = name
+            return
         if self.options.inline_single_use_temporaries and self.rmw_plan.should_capture(value):
             assert value is not None
             self.inline_expressions[value] = resolved_expression
@@ -1058,7 +1357,11 @@ class _FunctionLifter:
             self.inline_expressions[value] = resolved_expression
             self.register_names.setdefault(register, f"v{register}")
             return
-        name = self._definition_name(register, pc)
+        name = self._lexically_safe_local_name(
+            register,
+            pc,
+            self._definition_name(register, pc),
+        )
         if name in self.declared:
             lhs = name
         else:
@@ -1081,7 +1384,14 @@ class _FunctionLifter:
             ensure_expr(expression),
             pretty_tables=True,
         )
-        names = [self._definition_name(register, pc) for register in registers]
+        names = [
+            self._lexically_safe_local_name(
+                register,
+                pc,
+                self._definition_name(register, pc),
+            )
+            for register in registers
+        ]
         new_flags = [name not in self.declared for name in names]
         if all(new_flags):
             annotated = [
@@ -1135,6 +1445,7 @@ class _FunctionLifter:
             binding.name if binding is not None else recovered_name,
             fallback,
         )
+        name = self._lexically_safe_local_name(value.register, pc, name)
         type_name = symbol.type_name if symbol is not None else None
         if type_name is None:
             type_name = _local_type(
@@ -1143,6 +1454,7 @@ class _FunctionLifter:
                 value.register,
                 pc,
             )
+        type_name = _source_type(type_name)
         annotated = f"{name}: {type_name}" if type_name and type_name != "any" else name
         is_new = name not in self.declared
         lhs = annotated if is_new else name
@@ -1288,6 +1600,7 @@ class _FunctionLifter:
         owned_call = (
             self.table_build_plan.call_at(instruction.pc)
             if instruction.name in {"CALL", "CALLFB"}
+            or instruction.name.startswith("FASTCALL")
             else None
         )
         protected_identities = (
@@ -1302,6 +1615,17 @@ class _FunctionLifter:
             if ssa_instruction is not None
             else frozenset()
         )
+        closure = (
+            self.parent_proto_plan.at_creation(instruction.pc)
+            if self.parent_proto_plan is not None
+            else None
+        )
+        if closure is not None:
+            used_values |= frozenset(
+                capture.source_value
+                for capture in closure.captures
+                if capture.source_value is not None
+            )
         table_value_registers = table_write_value_registers(instruction)
         source_table_values = frozenset(
             value
@@ -1500,6 +1824,363 @@ class _FunctionLifter:
             right,
         )
         return True
+
+    def _decision_value_expression(
+        self,
+        value: SSAValue | None,
+        region: DecisionPhiRegion,
+        cache: dict[SSAValue, Expr],
+        seen: frozenset[SSAValue] = frozenset(),
+    ) -> Expr | None:
+        if value is None or value in seen:
+            return None
+        cached = cache.get(value)
+        if cached is not None:
+            return cached
+        if value.kind == "entry":
+            entry_expression = NameExpr(
+                self.semantic_names.entry_names.get(
+                    value.register,
+                    self.register_names.get(value.register, f"arg{value.register + 1}"),
+                )
+            )
+            cache[value] = entry_expression
+            return entry_expression
+        if value.kind != "instruction" or value.origin_pc is None:
+            return None
+        block = self.analysis.block_for_pc.get(value.origin_pc)
+        definition = self.ssa.instruction_at(value.origin_pc)
+        if block not in region.blocks or definition is None:
+            return None
+        instruction = definition.instruction
+        next_seen = seen | frozenset({value})
+
+        def operand(register: int) -> Expr | None:
+            source = next(
+                (use.value for use in definition.uses if use.register == register),
+                None,
+            )
+            return self._decision_value_expression(source, region, cache, next_seen)
+
+        name = instruction.name
+        expression: Expr | None = None
+        if name == "LOADNIL":
+            expression = LiteralExpr("nil")
+        elif name == "LOADB" and instruction.c == 0:
+            expression = LiteralExpr("true" if instruction.b else "false")
+        elif name == "LOADN":
+            expression = LiteralExpr(str(instruction.d))
+        elif name == "LOADK":
+            expression = source_expr(_constant_expr(self.proto, instruction.d))
+        elif name == "LOADKX":
+            expression = source_expr(_constant_expr(self.proto, instruction.aux or 0))
+        elif name == "MOVE":
+            expression = operand(instruction.b)
+        elif name == "GETGLOBAL":
+            expression = RawExpr(self._global_key(instruction), Precedence.POSTFIX)
+        elif name == "GETIMPORT":
+            expression = RawExpr(
+                _decode_import(self.proto, instruction.aux),
+                Precedence.POSTFIX,
+            )
+        elif name == "GETUPVAL":
+            expression = self.upvalue_bindings.get(instruction.b)
+            if expression is None:
+                upvalue = (
+                    self.proto.upvalue_names[instruction.b]
+                    if instruction.b < len(self.proto.upvalue_names)
+                    else None
+                )
+                expression = NameExpr(
+                    _sanitize_identifier(upvalue, f"upvalue_{instruction.b}")
+                )
+        elif name == "GETTABLE":
+            base = operand(instruction.b)
+            index = operand(instruction.c)
+            expression = IndexExpr(base, index) if base is not None and index is not None else None
+        elif name in {"GETTABLEKS", "GETUDATAKS"}:
+            base = operand(instruction.b)
+            expression = FieldExpr(base, self._table_key(instruction)) if base is not None else None
+        elif name == "GETTABLEN":
+            base = operand(instruction.b)
+            expression = (
+                IndexExpr(base, LiteralExpr(str(instruction.c + 1)))
+                if base is not None
+                else None
+            )
+        elif name in _BINARY_OPS:
+            left = operand(instruction.b)
+            right = operand(instruction.c)
+            expression = (
+                BinaryExpr(left, _BINARY_OPS[name], right)
+                if left is not None and right is not None
+                else None
+            )
+        elif name in _BINARY_CONST_OPS:
+            left = operand(instruction.b)
+            expression = (
+                BinaryExpr(
+                    left,
+                    _BINARY_CONST_OPS[name],
+                    source_expr(_constant_expr(self.proto, instruction.c)),
+                )
+                if left is not None
+                else None
+            )
+        elif name in {"SUBRK", "DIVRK"}:
+            right = operand(instruction.c)
+            expression = (
+                BinaryExpr(
+                    source_expr(_constant_expr(self.proto, instruction.b)),
+                    "-" if name == "SUBRK" else "/",
+                    right,
+                )
+                if right is not None
+                else None
+            )
+        elif name in _UNARY_OPS:
+            item = operand(instruction.b)
+            expression = UnaryExpr(_UNARY_OPS[name].strip(), item) if item is not None else None
+        elif name == "CONCAT":
+            items = [operand(register) for register in range(instruction.b, instruction.c + 1)]
+            if items and all(item is not None for item in items):
+                expression = cast(Expr, items[-1])
+                for item in reversed(items[:-1]):
+                    expression = BinaryExpr(cast(Expr, item), "..", expression)
+        elif name in {"CALL", "CALLFB"}:
+            frame = self.call_frames.at(instruction.pc)
+            if frame is not None and not frame.is_open_result:
+                arguments = tuple(
+                    self._decision_value_expression(argument, region, cache, next_seen)
+                    for argument in frame.arguments
+                )
+                if all(argument is not None for argument in arguments):
+                    if frame.namecall_pc is not None and frame.receiver is not None:
+                        receiver = self._decision_value_expression(
+                            frame.receiver,
+                            region,
+                            cache,
+                            next_seen,
+                        )
+                        namecall = self.instruction_by_pc.get(frame.namecall_pc)
+                        if receiver is not None and namecall is not None:
+                            expression = MethodCallExpr(
+                                receiver,
+                                self._table_key(namecall),
+                                cast(tuple[Expr, ...], arguments),
+                            )
+                    else:
+                        function = self._decision_value_expression(
+                            frame.callee,
+                            region,
+                            cache,
+                            next_seen,
+                        )
+                        if function is not None:
+                            expression = CallExpr(
+                                function,
+                                cast(tuple[Expr, ...], arguments),
+                            )
+        if expression is not None:
+            cache[value] = expression
+        return expression
+
+    def _decision_condition_expression(
+        self,
+        instruction: DecodedInstruction,
+        region: DecisionPhiRegion,
+        cache: dict[SSAValue, Expr],
+    ) -> Expr | None:
+        def used(register: int) -> Expr | None:
+            return self._decision_value_expression(
+                self.ssa.value_at_use(instruction.pc, register),
+                region,
+                cache,
+            )
+
+        name = instruction.name
+        left = used(instruction.a)
+        if left is None:
+            return None
+        if name == "JUMPIF":
+            return UnaryExpr("not", left)
+        if name == "JUMPIFNOT":
+            return left
+        if name in _COMPARISON_FALLTHROUGH:
+            right = used((instruction.aux or 0) & 0xFF)
+            return (
+                BinaryExpr(left, _COMPARISON_FALLTHROUGH[name], right)
+                if right is not None
+                else None
+            )
+        if name.startswith("JUMPXEQK"):
+            if name == "JUMPXEQKNIL":
+                right = LiteralExpr("nil")
+            elif name == "JUMPXEQKB":
+                right = LiteralExpr("true" if (instruction.aux or 0) & 1 else "false")
+            else:
+                right = source_expr(
+                    _constant_expr(self.proto, (instruction.aux or 0) & 0xFFFFFF)
+                )
+            return BinaryExpr(left, "==" if instruction.aux_not else "~=", right)
+        return None
+
+    def _decision_phi_expression(self, region: DecisionPhiRegion) -> Expr | None:
+        cache: dict[SSAValue, Expr] = {}
+        block_cache: dict[int, Expr] = {}
+        visiting: set[int] = set()
+        branches = {branch.header: branch for branch in self.analysis.branches}
+
+        def leaf(block: int) -> Expr | None:
+            return self._decision_value_expression(
+                region.phi.operands.get(block),
+                region,
+                cache,
+            )
+
+        def build(block_start: int) -> Expr | None:
+            cached = block_cache.get(block_start)
+            if cached is not None:
+                return cached
+            if block_start in visiting or block_start not in region.blocks:
+                return None
+            visiting.add(block_start)
+            block = self.analysis.block_by_start[block_start]
+            branch = branches.get(block_start)
+            expression: Expr | None
+            if branch is not None and block.terminator is not None:
+                instruction = block.terminator
+                fallthrough = (
+                    leaf(block_start)
+                    if branch.fallthrough == region.join_pc
+                    else build(branch.fallthrough)
+                )
+                taken = (
+                    leaf(block_start)
+                    if branch.taken == region.join_pc
+                    else build(branch.taken)
+                )
+                tested = self.ssa.value_at_use(instruction.pc, instruction.a)
+                operand = region.phi.operands.get(block_start)
+                tested_expression = self._decision_value_expression(
+                    tested,
+                    region,
+                    cache,
+                )
+                if (
+                    tested_expression is not None
+                    and operand == tested
+                    and instruction.name in {"JUMPIF", "JUMPIFNOT"}
+                ):
+                    if branch.taken == region.join_pc and fallthrough is not None:
+                        expression = BinaryExpr(
+                            tested_expression,
+                            "or" if instruction.name == "JUMPIF" else "and",
+                            fallthrough,
+                        )
+                    elif branch.fallthrough == region.join_pc and taken is not None:
+                        expression = BinaryExpr(
+                            tested_expression,
+                            "and" if instruction.name == "JUMPIF" else "or",
+                            taken,
+                        )
+                    else:
+                        expression = None
+                else:
+                    condition = self._decision_condition_expression(
+                        instruction,
+                        region,
+                        cache,
+                    )
+                    if (
+                        condition is not None
+                        and isinstance(fallthrough, BinaryExpr)
+                        and fallthrough.operator == "or"
+                        and fallthrough.right == taken
+                    ):
+                        expression = BinaryExpr(
+                            BinaryExpr(condition, "and", fallthrough.left),
+                            "or",
+                            taken,
+                        )
+                    else:
+                        expression = (
+                            IfExpr(condition, fallthrough, taken)
+                            if condition is not None
+                            and fallthrough is not None
+                            and taken is not None
+                            else None
+                        )
+            elif region.join_pc in block.successors:
+                expression = leaf(block_start)
+            elif len(block.successors) == 1:
+                expression = build(next(iter(block.successors)))
+            else:
+                expression = None
+            visiting.remove(block_start)
+            if expression is not None:
+                block_cache[block_start] = expression
+            return expression
+
+        return build(region.root_block)
+
+    def _literal_value_expression(self, value: SSAValue) -> Expr | None:
+        if value.kind != "instruction" or value.origin_pc is None:
+            return None
+        definition = self.ssa.instruction_at(value.origin_pc)
+        if definition is None:
+            return None
+        instruction = definition.instruction
+        if instruction.name == "LOADNIL":
+            return LiteralExpr("nil")
+        if instruction.name == "LOADB" and instruction.c == 0:
+            return LiteralExpr("true" if instruction.b else "false")
+        if instruction.name == "LOADN":
+            return LiteralExpr(str(instruction.d))
+        if instruction.name == "LOADK":
+            return source_expr(_constant_expr(self.proto, instruction.d))
+        if instruction.name == "LOADKX":
+            return source_expr(_constant_expr(self.proto, instruction.aux or 0))
+        return None
+
+    def _guarded_phi_binding_name(self, value: SSAValue) -> str:
+        existing = self.guarded_phi_names.get(value)
+        if existing is not None:
+            return existing
+        phi_names = getattr(self, "_all_phi_names", None)
+        if phi_names is not None:
+            planned = phi_names().get(value)
+            if planned is not None:
+                name = cast(str, planned)
+                self.guarded_phi_names[value] = name
+                return name
+        base = "result"
+        candidate = base
+        suffix = 2
+        while candidate in self.declared:
+            candidate = f"{base}{suffix}"
+            suffix += 1
+        self.guarded_phi_names[value] = candidate
+        return candidate
+
+    def _emit_guarded_phi_initializers(self, region: GuardedPhiRegion) -> None:
+        for assignment in region.assignments:
+            expression = self._literal_value_expression(assignment.default_value)
+            if expression is None:
+                continue
+            name = self._guarded_phi_binding_name(assignment.result)
+            if name in self.declared:
+                self.out.line(
+                    f"{name} = {render_expression(expression)}",
+                    statement=True,
+                )
+            else:
+                self.out.line(
+                    f"local {name} = {render_expression(expression)}",
+                    statement=True,
+                )
+                self.declared.add(name)
+            self.register_names[assignment.result.register] = name
 
     def _table_value_can_inline(
         self,
@@ -1918,16 +2599,22 @@ class _FunctionLifter:
     ) -> dict[int, Expr]:
         overrides: dict[int, Expr] = {}
         binding_names: dict[object, str] = {}
+        reference_cell_names: dict[int, str] = {}
         if group_names is not None and self.parent_proto_plan is not None:
             for creation_pc, name in group_names.items():
                 binding = self.parent_proto_plan.by_creation_pc[creation_pc].binding
                 if binding is not None:
                     binding_names[binding] = name
+                creation = self.instruction_by_pc.get(creation_pc)
+                if creation is not None:
+                    reference_cell_names[creation.a] = name
         for capture in instance.captures:
             if own_name is not None and capture.source_value == instance.closure_value:
                 overrides[capture.upvalue_index] = NameExpr(own_name)
                 continue
             group_name = binding_names.get(capture.source_binding)
+            if group_name is None and capture.kind == "reference":
+                group_name = reference_cell_names.get(capture.source_register)
             if group_name is not None:
                 overrides[capture.upvalue_index] = NameExpr(group_name)
         return overrides
@@ -1948,11 +2635,18 @@ class _FunctionLifter:
         if self.parent_proto_plan is None:
             return False
         instance = self.parent_proto_plan.at_creation(instruction.pc)
-        if instance is None or instance.emission_kind in {
-            "shared-proto",
-            "inline-expression",
-        }:
+        if instance is None or instance.emission_kind == "shared-proto":
             return False
+        if instance.emission_kind == "inline-expression":
+            expression, dependencies = self._anonymous_function_expr(
+                instance.child_proto_id,
+                instruction,
+                capture_bindings=self._planned_capture_overrides(instance),
+            )
+            self.callback_expressions[instance.closure_value] = expression
+            self.callback_dependencies[instance.closure_value] = dependencies
+            self.register_names.setdefault(instruction.a, f"v{instruction.a}")
+            return True
         if instance.emission_kind in {"method-declaration", "field-declaration"}:
             return True
 
@@ -2262,12 +2956,11 @@ class _FunctionLifter:
                 for index in range(variable_count)
             ]
             self.declared.update(variables)
-            iterator = self._ref(instruction.a, instruction.pc)
-            state = self._ref(instruction.a + 1, instruction.pc)
-            index = self._ref(instruction.a + 2, instruction.pc)
+            iterator_operands = self._generic_iterator_operands(instruction)
             return self._open_until(
                 close_pc,
-                f"for {', '.join(variables)} in {iterator}, {state}, {index} do",
+                f"for {', '.join(variables)} in "
+                f"{', '.join(render_expression(item) for item in iterator_operands)} do",
             )
         return False
 
@@ -2378,6 +3071,7 @@ class _FunctionLifter:
                 or f"arg{register + 1}"
             )
             name = _sanitize_identifier(name, f"arg{register + 1}")
+            name = self._lexically_safe_local_name(register, 0, name)
             parameters.append(self._annotated_name(register, name, 0))
             self.register_names[register] = name
             self.declared.add(name)
@@ -2409,6 +3103,7 @@ class _FunctionLifter:
                 return_type = self.return_type_override
                 if return_type is None and self.symbols is not None and self.symbols.return_type:
                     return_type = self.symbols.return_type
+                return_type = _source_type(return_type)
                 if return_type and return_type != "any":
                     header += f": {return_type}"
             self.out.open(header)
@@ -2451,14 +3146,25 @@ class _FunctionLifter:
                     typed.append(name)
             self.out.line("-- upvalues: " + ", ".join(typed))
 
+        rejected_decision_regions: list[DecisionPhiRegion] = []
+        for decision_region in self.active_decision_phi_regions.values():
+            expression = self._decision_phi_expression(decision_region)
+            if expression is None:
+                rejected_decision_regions.append(decision_region)
+            else:
+                self.inline_expressions[decision_region.phi.result] = expression
+        for decision_region in rejected_decision_regions:
+            self.active_decision_phi_regions.pop(decision_region.root_block, None)
+            self.active_structuring_skip_pcs.difference_update(decision_region.skipped_pcs)
+
         rejected_value_regions = [
             region
             for region in self.active_value_short_circuits.values()
             if not self._capture_value_short_circuit(region)
         ]
-        for region in rejected_value_regions:
-            self.active_value_short_circuits.pop(region.root_pc, None)
-            self.active_structuring_skip_pcs.difference_update(region.skipped_pcs)
+        for value_region in rejected_value_regions:
+            self.active_value_short_circuits.pop(value_region.root_pc, None)
+            self.active_structuring_skip_pcs.difference_update(value_region.skipped_pcs)
 
         for instruction in self.instructions:
             self._finalize_phi_regions(instruction.pc)
@@ -2525,49 +3231,70 @@ class _FunctionLifter:
         class_name = _sanitize_identifier(declaration.name, "AnonymousClass")
         self.register_names[instruction.a] = class_name
         self.declared.add(class_name)
-        self.out.open(f"class {class_name}")
+        self.out.line(f"local {class_name} = {{}}", statement=True)
         if declaration.source_kind == "metatable":
-            self.out.line("-- recovered from metatable __index pattern")
+            self.out.line(f"{class_name}.__index = {class_name}", statement=True)
         if declaration.superclass_register is not None:
             superclass = self._ref(declaration.superclass_register, instruction.pc)
-            self.out.line(f"-- superclass: {superclass}")
+            self.out.line(
+                f"setmetatable({class_name}, {{__index = {superclass}}})",
+                statement=True,
+            )
         elif declaration.superclass_name is not None:
-            self.out.line(f"-- superclass: {declaration.superclass_name}")
-        for property_name in declaration.properties:
-            property_name = _sanitize_identifier(property_name, "property")
-            self.out.line(f"public {property_name}")
-        if declaration.properties and declaration.methods:
+            self.out.line(
+                f"setmetatable({class_name}, {{__index = "
+                f"{declaration.superclass_name}}})",
+                statement=True,
+            )
+        if declaration.methods:
             self.out.line()
         for method in declaration.methods:
             method_name = _sanitize_identifier(method.name, "method")
             if method.proto_id is None:
                 self.out.line(f"-- unresolved method {method_name}")
                 continue
-            if method.kind == "constructor":
-                self.out.line("-- constructor")
-            elif method.kind == "static_method":
-                self.out.line("-- static method")
-            elif method.kind == "metamethod":
-                self.out.line("-- metamethod")
             child = self.module.protos[method.proto_id]
-            _FunctionLifter(
+            instance = (
+                self.parent_proto_plan.at_creation(method.closure_pc)
+                if self.parent_proto_plan is not None and method.closure_pc is not None
+                else None
+            )
+            creation = self.instruction_by_pc.get(method.closure_pc or -1)
+            capture_overrides: dict[int, Expr] = {}
+            if creation is not None:
+                capture_overrides, _dependencies = self._callback_capture_bindings(
+                    creation,
+                    child,
+                )
+            if instance is not None:
+                capture_overrides.update(self._planned_capture_overrides(instance))
+            child_lifter = _FunctionLifter(
                 self.module,
                 child,
                 self.proto_names,
                 self.options,
                 self.out,
                 inline_only_proto_ids=self.inline_only_proto_ids,
+                upvalue_bindings=capture_overrides,
                 parameter_name_overrides=dict(method.parameter_names),
                 parameter_type_overrides=dict(method.parameter_types),
                 return_type_override=method.return_type,
                 module_analysis=self.module_analysis,
                 proto_emission_plan=self.proto_emission_plan,
-            ).lift(
-                as_function=True,
-                function_name_override=method_name,
-                local_function=False,
+                semantic_function_role=(
+                    "method" if method.kind == "instance_method" else "normal"
+                ),
             )
-        self.out.close()
+            if method.kind == "instance_method":
+                child_lifter.lift(
+                    as_function=True,
+                    method_declaration=(NameExpr(class_name), method_name),
+                )
+            else:
+                child_lifter.lift(
+                    as_function=True,
+                    field_function_declaration=(NameExpr(class_name), method_name),
+                )
         return True
 
     def _lift_instruction(self, instruction: DecodedInstruction) -> None:
@@ -2909,6 +3636,9 @@ class _FunctionLifter:
         elif name in {"FORNLOOP", "FORGLOOP"}:
             return
         elif name in _CONDITIONAL_OPS:
+            guarded_phi = self.active_guarded_phi_regions.get(pc)
+            if guarded_phi is not None:
+                self._emit_guarded_phi_initializers(guarded_phi)
             target = _jump_target(instruction)
             condition_expression = self._conditional_expr(instruction)
             condition = (
@@ -3073,6 +3803,7 @@ def decompile_module(
         if (
             proto.proto_id == module.main_proto_id
             or proto.proto_id not in proto_emission_plan.preemit_proto_ids
+            or proto.proto_id in legacy_inline_only_proto_ids
             or proto.proto_id in class_method_proto_ids
         ):
             continue

@@ -132,7 +132,7 @@ def test_parameter_names_use_numbered_native_type_families() -> None:
     assert recovery.return_type == "number"
 
 
-def test_class_shape_and_method_are_recovered_as_class_syntax() -> None:
+def test_class_shape_and_method_are_recovered_as_standard_luau() -> None:
     constants = (
         LuauConstant("string", "Point", 3),
         LuauConstant("string", "x", 3),
@@ -189,6 +189,7 @@ def test_class_shape_and_method_are_recovered_as_class_syntax() -> None:
         },
         "classes.luau",
     )
-    assert "class Point" in source
-    assert "public x" in source
-    assert "function length(" in source
+    assert "local Point = {}" in source
+    assert "class Point" not in source
+    assert "public x" not in source
+    assert "function Point.length(arg1)" in source

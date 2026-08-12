@@ -12,6 +12,7 @@ from lunaux.backends.ast import (
     NameExpr,
     UnaryExpr,
     ensure_expr,
+    referenced_names,
     render_expression,
     source_expr,
 )
@@ -62,7 +63,9 @@ class _SafeCompatibilityQualityFunctionLifter(_CompatibilityQualityFunctionLifte
             return cast(dict[SSAValue, str], cached)
 
         result: dict[SSAValue, str] = {}
-        used: set[str] = set()
+        used = set().union(
+            *(referenced_names(binding) for binding in self.upvalue_bindings.values())
+        )
         for instruction in self.instructions:
             if instruction.name not in {"NEWCLOSURE", "DUPCLOSURE"}:
                 continue

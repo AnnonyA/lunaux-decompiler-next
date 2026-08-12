@@ -12,7 +12,12 @@ from lunaux.backends.ast import Expr, LiteralExpr, TableExpr, TableField, render
 from lunaux.backends.bytecode import LuauProto
 from lunaux.backends.callframe import CallFramePlan, CallResultShape
 from lunaux.backends.opcodes import DecodedInstruction, setlist_semantics
-from lunaux.backends.ssa import SSAProgram, SSAUse, SSAValue
+from lunaux.backends.ssa import (
+    SSAProgram,
+    SSAUse,
+    SSAValue,
+    fastcall_for_fallback_call,
+)
 
 _TABLE_WRITE_OPS: Final[frozenset[str]] = frozenset(
     {"SETTABLE", "SETTABLEKS", "SETUDATAKS", "SETTABLEN", "SETLIST"}
@@ -80,13 +85,14 @@ class TableBuildPlan:
     table_identity_by_value: Mapping[SSAValue, SSAValue]
     parent_by_table: Mapping[SSAValue, SSAValue]
     calls: Mapping[int, TableCallOwnership]
+    fastcall_bridges: Mapping[int, TableCallOwnership]
     rejection_counts: Mapping[str, int]
 
     def table_identity(self, value: SSAValue | None) -> SSAValue | None:
         return self.table_identity_by_value.get(value) if value is not None else None
 
     def call_at(self, pc: int) -> TableCallOwnership | None:
-        return self.calls.get(pc)
+        return self.calls.get(pc) or self.fastcall_bridges.get(pc)
 
     def is_in_transaction(
         self,
@@ -108,6 +114,7 @@ class TableBuildPlan:
             table_identity_by_value=MappingProxyType({}),
             parent_by_table=MappingProxyType({}),
             calls=MappingProxyType({}),
+            fastcall_bridges=MappingProxyType({}),
             rejection_counts=MappingProxyType({}),
         )
 
@@ -542,6 +549,8 @@ def _call_gap_is_structural(
             continue
         if instruction.name in {"CALL", "CALLFB"} and candidate_consumers.get(pc) == consumer_pc:
             continue
+        if instruction.name.startswith("FASTCALL") and candidate_consumers.get(pc) == consumer_pc:
+            continue
         return False
     return True
 
@@ -570,7 +579,8 @@ def plan_table_builds(
             if frame.result_shape in {CallResultShape.FIXED_ONE, CallResultShape.OPEN}
             else None
         )
-        consumer = _call_consumer(program, pc, frame.result_shape, result_value)
+        consumer_result = call_frames.fastcall_result_at(pc) or result_value
+        consumer = _call_consumer(program, pc, frame.result_shape, consumer_result)
         if consumer is None:
             if frame.result_shape in {
                 CallResultShape.FIXED_MANY,
@@ -615,11 +625,20 @@ def plan_table_builds(
         if owner is None:
             rejections["missing-table-owner"] += 1
             continue
-        if program.analysis.block_for_pc.get(pc) != program.analysis.block_for_pc.get(
-            consumer_pc
-        ):
-            rejections["cross-block"] += 1
-            continue
+        call_block = program.analysis.block_for_pc.get(pc)
+        consumer_block = program.analysis.block_for_pc.get(consumer_pc)
+        if call_block != consumer_block and fastcall_for_fallback_call(program, pc) is None:
+            # A preceding fixed-one element can dominate a SETLIST that follows a
+            # later FASTCALL diamond.  Its exact SSA value remains the prefix operand
+            # on both paths; rejecting it solely because the later optimization split
+            # the CFG makes ownership partial and drops the whole constructor batch.
+            if (
+                call_block is None
+                or consumer_block is None
+                or not program.analysis.dominates(call_block, consumer_block)
+            ):
+                rejections["cross-block"] += 1
+                continue
         if result_value is not None and _debug_visible(proto, result_value):
             rejections["debug-binding"] += 1
             continue
@@ -627,9 +646,13 @@ def plan_table_builds(
         if any(identities.get(dependency) in protected for dependency in frame.dependencies):
             rejections["call-not-owned"] += 1
             continue
-        raw[pc] = (consumer_pc, owner, result_value, frame.result_shape)
+        raw[pc] = (consumer_pc, owner, consumer_result, frame.result_shape)
 
     candidate_consumers = {pc: item[0] for pc, item in raw.items()}
+    for pc, item in raw.items():
+        fastcall_pc = fastcall_for_fallback_call(program, pc)
+        if fastcall_pc is not None:
+            candidate_consumers[fastcall_pc] = item[0]
     calls: dict[int, TableCallOwnership] = {}
     for pc, (consumer_pc, owner, result_value, shape) in raw.items():
         if not _call_gap_is_structural(program, pc, consumer_pc, candidate_consumers):
@@ -644,10 +667,17 @@ def plan_table_builds(
             protected_values=_protected_tables(owner, parents),
         )
 
+    fastcall_bridges: dict[int, TableCallOwnership] = {}
+    for call_pc, ownership in calls.items():
+        fastcall_pc = fastcall_for_fallback_call(program, call_pc)
+        if fastcall_pc is not None:
+            fastcall_bridges[fastcall_pc] = ownership
+
     return TableBuildPlan(
         table_identity_by_value=MappingProxyType(dict(identities)),
         parent_by_table=MappingProxyType(dict(parents)),
         calls=MappingProxyType(dict(calls)),
+        fastcall_bridges=MappingProxyType(dict(fastcall_bridges)),
         rejection_counts=MappingProxyType(dict(sorted(rejections.items()))),
     )
 

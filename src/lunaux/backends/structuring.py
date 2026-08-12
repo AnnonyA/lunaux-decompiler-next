@@ -126,6 +126,33 @@ class ValueShortCircuitRegion:
 
 
 @dataclass(frozen=True, slots=True)
+class GuardedPhiAssignment:
+    result: SSAValue
+    success_value: SSAValue
+    default_value: SSAValue
+
+
+@dataclass(frozen=True, slots=True)
+class GuardedPhiRegion:
+    root_pc: int
+    condition_pcs: tuple[int, ...]
+    failure_block: int
+    success_block: int
+    join_pc: int
+    assignments: tuple[GuardedPhiAssignment, ...]
+    skipped_pcs: frozenset[int]
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionPhiRegion:
+    root_block: int
+    join_pc: int
+    phi: SSAPhi
+    blocks: frozenset[int]
+    skipped_pcs: frozenset[int]
+
+
+@dataclass(frozen=True, slots=True)
 class StructuredRecoveryPlan:
     phi_regions: tuple[PhiIfRegion, ...]
     phi_by_header: Mapping[int, PhiIfRegion]
@@ -135,6 +162,10 @@ class StructuredRecoveryPlan:
     boolean_by_root: Mapping[int, BooleanChain]
     value_short_circuits: tuple[ValueShortCircuitRegion, ...]
     value_short_circuit_by_root: Mapping[int, ValueShortCircuitRegion]
+    guarded_phi_regions: tuple[GuardedPhiRegion, ...]
+    guarded_phi_by_root: Mapping[int, GuardedPhiRegion]
+    decision_phi_regions: tuple[DecisionPhiRegion, ...]
+    decision_phi_by_root: Mapping[int, DecisionPhiRegion]
     skipped_condition_pcs: frozenset[int]
     skipped_structuring_pcs: frozenset[int]
 
@@ -229,7 +260,9 @@ def _value_short_circuits(
         matching = [
             (phi, lhs, rhs_value)
             for phi, lhs, rhs_value in matching
-            if lhs == left and rhs_value is not None
+            if lhs == left
+            and rhs_value is not None
+            and frozenset(phi.operands) == frozenset({branch.header, branch.fallthrough})
         ]
         if len(matching) != 1:
             continue
@@ -294,6 +327,270 @@ def _value_short_circuits(
             )
         )
     return tuple(sorted(result, key=lambda item: (item.root_pc, item.join_pc)))
+
+
+def _literal_definition_value(
+    program: SSAProgram,
+    value: SSAValue,
+    block: int,
+) -> int | None:
+    if value.kind != "instruction" or value.origin_pc is None:
+        return None
+    definition = program.instructions.get(value.origin_pc)
+    if definition is None:
+        return None
+    instruction = definition.instruction
+    if (
+        program.analysis.block_for_pc.get(value.origin_pc) != block
+        or instruction.name not in {"LOADNIL", "LOADB", "LOADN", "LOADK", "LOADKX"}
+        or (instruction.name == "LOADB" and instruction.c != 0)
+    ):
+        return None
+    return value.origin_pc
+
+
+def _guarded_phi_regions(program: SSAProgram) -> tuple[GuardedPhiRegion, ...]:
+    """Recover a conditional value with a shared literal failure block.
+
+    Optimized Luau commonly represents ``if a and f(a) then g(a) else nil`` as a
+    chain of forward branches that all target the same literal block.  Treating the
+    last branch as an ordinary if/else overlaps the outer guard's close with the
+    inner else transition.  This plan instead gives the phi result one storage
+    binding initialized to the proven failure value, then emits the successful
+    assignment under every guard.
+    """
+
+    analysis = program.analysis
+    branches = tuple(sorted(analysis.branches, key=lambda item: item.header))
+    phis_by_block: dict[int, list[SSAPhi]] = defaultdict(list)
+    for phi in program.phis:
+        phis_by_block[phi.block].append(phi)
+    result: list[GuardedPhiRegion] = []
+    claimed_conditions: set[int] = set()
+
+    for failure in sorted(analysis.block_by_start):
+        targeting = [branch for branch in branches if branch.taken == failure]
+        if not targeting:
+            continue
+        by_header = {branch.header: branch for branch in targeting}
+        roots = [
+            branch
+            for branch in targeting
+            if not any(parent.fallthrough == branch.header for parent in targeting)
+        ]
+        for root in roots:
+            chain = [root]
+            while chain[-1].fallthrough in by_header:
+                candidate = by_header[chain[-1].fallthrough]
+                if candidate in chain:
+                    break
+                chain.append(candidate)
+            success = chain[-1].fallthrough
+            joins = {branch.join for branch in chain}
+            if len(joins) != 1:
+                continue
+            join = next(iter(joins))
+            if join is None:
+                continue
+            join_block = analysis.block_by_start.get(join)
+            failure_block = analysis.block_by_start.get(failure)
+            success_block = analysis.block_by_start.get(success)
+            if (
+                join_block is None
+                or failure_block is None
+                or success_block is None
+                or failure not in join_block.predecessors
+                or success not in join_block.predecessors
+                or any(
+                    analysis.block_by_start[branch.header].terminator is None
+                    for branch in chain
+                )
+            ):
+                continue
+            condition_pcs = tuple(
+                analysis.block_by_start[branch.header].terminator.pc  # type: ignore[union-attr]
+                for branch in chain
+            )
+            if any(pc in claimed_conditions for pc in condition_pcs):
+                continue
+
+            assignments: list[GuardedPhiAssignment] = []
+            default_pcs: set[int] = set()
+            for phi in phis_by_block.get(join, []):
+                success_value = phi.operands.get(success)
+                default_value = phi.operands.get(failure)
+                if success_value is None or default_value is None:
+                    continue
+                default_pc = _literal_definition_value(program, default_value, failure)
+                if default_pc is None:
+                    continue
+                if success_value.origin_pc is None or (
+                    analysis.block_for_pc.get(success_value.origin_pc) != success
+                ):
+                    continue
+                assignments.append(
+                    GuardedPhiAssignment(phi.result, success_value, default_value)
+                )
+                default_pcs.add(default_pc)
+            semantic_failure_pcs = {
+                instruction.pc
+                for instruction in failure_block.instructions
+                if instruction.name not in _IGNORED_OPS | _UNCONDITIONAL_JUMPS
+            }
+            if not assignments or semantic_failure_pcs != default_pcs:
+                continue
+            success_terminator = success_block.terminator
+            skipped = set(default_pcs)
+            if (
+                success_terminator is not None
+                and success_terminator.name in _UNCONDITIONAL_JUMPS
+                and get_jump_target(success_terminator) == join
+            ):
+                skipped.add(success_terminator.pc)
+            result.append(
+                GuardedPhiRegion(
+                    root_pc=condition_pcs[0],
+                    condition_pcs=condition_pcs,
+                    failure_block=failure,
+                    success_block=success,
+                    join_pc=join,
+                    assignments=tuple(assignments),
+                    skipped_pcs=frozenset(skipped),
+                )
+            )
+            claimed_conditions.update(condition_pcs)
+    return tuple(sorted(result, key=lambda item: (item.root_pc, item.join_pc)))
+
+
+def _decision_phi_regions(program: SSAProgram) -> tuple[DecisionPhiRegion, ...]:
+    """Find acyclic decision DAGs that feed one multi-predecessor phi.
+
+    These regions are the bytecode form of longer value-producing short-circuit
+    expressions.  Ownership is deliberately conservative: every block must be
+    dominated by one conditional root, postdominated by the phi join, and may only
+    contain expression construction, a fixed-one-result call, or control flow.
+    """
+
+    analysis = program.analysis
+    allowed = _PURE_PHI_VALUE_OPS | _CONDITIONAL_OPS | _UNCONDITIONAL_JUMPS | {
+        "CALL",
+        "CALLFB",
+        "NAMECALL",
+        "NAMECALLUDATA",
+    }
+    loop_blocks = frozenset(block for loop in analysis.loops for block in loop.body)
+    result: list[DecisionPhiRegion] = []
+    claimed: set[int] = set()
+
+    for phi in sorted(program.phis, key=lambda item: (item.block, item.register)):
+        if len(phi.operands) < 2 or phi.block in claimed:
+            continue
+        operand_blocks = frozenset(phi.operands)
+        common_dominators = set.intersection(
+            *(set(analysis.dominators.get(block, frozenset())) for block in operand_blocks)
+        )
+        candidates = [
+            block
+            for block in common_dominators
+            if block != phi.block
+            and (candidate := analysis.block_by_start.get(block)) is not None
+            and candidate.terminator is not None
+            and candidate.terminator.name in _CONDITIONAL_OPS
+        ]
+        if not candidates:
+            continue
+        root = max(candidates, key=lambda block: len(analysis.dominators[block]))
+        blocks = frozenset(
+            block
+            for block in analysis.reachable
+            if block != phi.block
+            and analysis.dominates(root, block)
+            and analysis.postdominates(phi.block, block)
+        )
+        if (
+            not operand_blocks <= blocks
+            or blocks & loop_blocks
+            or blocks & claimed
+            or any(other.block in blocks - {root} for other in program.phis)
+        ):
+            continue
+
+        def value_contains_call(
+            value: SSAValue,
+            seen: frozenset[SSAValue] = frozenset(),
+            region_blocks: frozenset[int] = blocks,
+        ) -> bool:
+            if value in seen or value.kind != "instruction" or value.origin_pc is None:
+                return False
+            definition = program.instructions.get(value.origin_pc)
+            if definition is None:
+                return False
+            if definition.instruction.name in {"CALL", "CALLFB"}:
+                return definition.instruction.c == 2
+            return any(
+                value_contains_call(
+                    use.value,
+                    seen | frozenset({value}),
+                    region_blocks,
+                )
+                for use in definition.uses
+                if program.analysis.block_for_pc.get(
+                    use.value.origin_pc if use.value.origin_pc is not None else -1
+                )
+                in region_blocks
+            )
+
+        has_fixed_call = any(value_contains_call(value) for value in phi.operands.values())
+
+        root_terminator = analysis.block_by_start[root].terminator
+        root_condition_values = (
+            tuple(
+                use.value
+                for use in program.instructions[root_terminator.pc].uses
+            )
+            if root_terminator is not None
+            else ()
+        )
+        if any(value_contains_call(value) for value in root_condition_values):
+            # Root-prefix statements remain outside the captured region.  An
+            # effectful condition dependency would otherwise be evaluated twice.
+            continue
+        valid = True
+        skipped: set[int] = set()
+        for block_start in blocks:
+            block = analysis.block_by_start[block_start]
+            if not block.successors or not block.successors <= blocks | {phi.block}:
+                valid = False
+                break
+            for instruction in block.instructions:
+                if block_start == root and instruction is not block.terminator:
+                    continue
+                if block_start != root or instruction is block.terminator:
+                    skipped.add(instruction.pc)
+                if instruction.name in _IGNORED_OPS:
+                    continue
+                if instruction.name not in allowed:
+                    valid = False
+                    break
+                if instruction.name in {"CALL", "CALLFB"} and instruction.c != 2:
+                    valid = False
+                    break
+            if not valid:
+                break
+        if not valid or (len(phi.operands) == 2 and not has_fixed_call):
+            continue
+        result.append(
+            DecisionPhiRegion(
+                root_block=root,
+                join_pc=phi.block,
+                phi=phi,
+                blocks=blocks,
+                skipped_pcs=frozenset(skipped),
+            )
+        )
+        claimed.update(blocks)
+
+    return tuple(sorted(result, key=lambda item: (item.root_block, item.join_pc)))
 
 
 def _condition_only(block: BasicBlock) -> bool:
@@ -629,6 +926,8 @@ def build_structured_recovery(
         boolean_chains,
     )
     value_short_circuits = _value_short_circuits(program, proto)
+    guarded_phi_regions = _guarded_phi_regions(program)
+    decision_phi_regions = _decision_phi_regions(program)
 
     phi_by_join: dict[int, list[PhiIfRegion]] = defaultdict(list)
     captured_values: set[SSAValue] = set()
@@ -644,6 +943,10 @@ def build_structured_recovery(
         skipped_structuring_pcs.update(chain.skipped_pcs)
     for short_circuit in value_short_circuits:
         skipped_structuring_pcs.update(short_circuit.skipped_pcs)
+    for guarded in guarded_phi_regions:
+        skipped_structuring_pcs.update(guarded.skipped_pcs)
+    for decision in decision_phi_regions:
+        skipped_structuring_pcs.update(decision.skipped_pcs)
 
     return StructuredRecoveryPlan(
         phi_regions=phi_regions,
@@ -660,6 +963,14 @@ def build_structured_recovery(
         value_short_circuits=value_short_circuits,
         value_short_circuit_by_root=MappingProxyType(
             {short_circuit.root_pc: short_circuit for short_circuit in value_short_circuits}
+        ),
+        guarded_phi_regions=guarded_phi_regions,
+        guarded_phi_by_root=MappingProxyType(
+            {region.root_pc: region for region in guarded_phi_regions}
+        ),
+        decision_phi_regions=decision_phi_regions,
+        decision_phi_by_root=MappingProxyType(
+            {region.root_block: region for region in decision_phi_regions}
         ),
         skipped_condition_pcs=frozenset(skipped_condition_pcs),
         skipped_structuring_pcs=frozenset(skipped_structuring_pcs),

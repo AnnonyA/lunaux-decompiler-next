@@ -203,7 +203,8 @@ def test_wip_class_bytecode_and_newclass_are_supported() -> None:
     assert "NEWCLASS" in text
     assert "class-shape(MyClass" in text
     source = decompile_module(module, {}, "class")
-    assert "class MyClass" in source
+    assert "local MyClass = {}" in source
+    assert "class MyClass" not in source
 
 
 def test_userdata_aux_uses_low_16_bits_for_key() -> None:
